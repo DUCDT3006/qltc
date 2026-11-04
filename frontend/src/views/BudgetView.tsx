@@ -1,16 +1,33 @@
 import React, { useState } from 'react';
-import { Jar } from '../types';
+import { Jar, IncomeSource } from '../types';
 import { formatVND } from '../mockData';
-import { Sparkles, Check, ChevronDown } from 'lucide-react';
+import { Sparkles, Check, Plus, Edit2, X, Settings2 } from 'lucide-react';
 
 interface BudgetViewProps {
   jars: Jar[];
-  onUpdateJar: (id: string, limit: number) => void;
+  incomeSources: IncomeSource[];
+  onAddIncomeSource: (source: IncomeSource) => void;
+  onUpdateJarLimit: (jarId: string, limit: number) => void;
 }
 
-export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
+export const BudgetView: React.FC<BudgetViewProps> = ({
+  jars,
+  incomeSources,
+  onAddIncomeSource,
+  onUpdateJarLimit
+}) => {
   const [allocatedSuccess, setAllocatedSuccess] = useState(false);
+  const [showIncomeModal, setShowIncomeModal] = useState(false);
+  const [selectedJarForEdit, setSelectedJarForEdit] = useState<Jar | null>(null);
+  const [editLimitStr, setEditLimitStr] = useState('');
 
+  // Form thêm nguồn thu
+  const [newSourceName, setNewSourceName] = useState('');
+  const [newSourceKind, setNewSourceKind] = useState<'fixed' | 'irregular' | 'passive'>('fixed');
+  const [newSourceAmount, setNewSourceAmount] = useState('');
+  const [newSourceRecurrence, setNewSourceRecurrence] = useState('Hàng tháng');
+
+  const totalExpectedIncome = incomeSources.reduce((sum, s) => sum + s.expectedAmount, 0);
   const totalLimit = jars.reduce((sum, j) => sum + j.monthlyLimit, 0);
   const totalSpent = jars.reduce((sum, j) => sum + j.spentThisMonth, 0);
   const remaining = totalLimit - totalSpent;
@@ -18,6 +35,34 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
   const handleSimulateAllocation = () => {
     setAllocatedSuccess(true);
     setTimeout(() => setAllocatedSuccess(false), 3000);
+  };
+
+  const handleCreateIncomeSource = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSourceName.trim()) return;
+    const amount = parseInt(newSourceAmount.replace(/[^\d]/g, ''), 10) || 0;
+
+    onAddIncomeSource({
+      id: `inc_${Date.now()}`,
+      name: newSourceName.trim(),
+      kind: newSourceKind,
+      expectedAmount: amount,
+      recurrence: newSourceRecurrence
+    });
+
+    setNewSourceName('');
+    setNewSourceAmount('');
+    setShowIncomeModal(false);
+  };
+
+  const handleSaveJarLimit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedJarForEdit) return;
+    const limit = parseInt(editLimitStr.replace(/[^\d]/g, ''), 10);
+    if (!isNaN(limit) && limit >= 0) {
+      onUpdateJarLimit(selectedJarForEdit.id, limit);
+    }
+    setSelectedJarForEdit(null);
   };
 
   return (
@@ -30,9 +75,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
             6 hũ chi tiêu · Còn lại <b className="num text-[#F2F5F5]">{formatVND(remaining)}</b>
           </div>
         </div>
-        <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-[#657D81]/20 text-[#BFD0D3] border border-[#8BA5AA]/25">
-          Tháng 11 ▾
-        </span>
+        <button
+          onClick={() => setShowIncomeModal(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#657D81]/25 text-[#D5E1E3] border border-[#8BA5AA]/25 active:scale-95"
+        >
+          <Settings2 size={13} /> Nguồn thu ({incomeSources.length})
+        </button>
       </div>
 
       {/* Income Sources & 1-Click Allocation Card */}
@@ -40,10 +88,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
         <div className="flex items-center justify-between mb-1.5">
           <div>
             <div className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider">
-              Nguồn thu tháng 11 (3 nguồn)
+              Nguồn thu tháng 11 ({incomeSources.length} nguồn)
             </div>
             <div className="num text-[23px] font-bold text-[#F2F5F5] mt-0.5">
-              45.200.000 <span className="text-base text-[#95B0B4] font-normal">₫</span>
+              {formatVND(totalExpectedIncome)}
             </div>
           </div>
           <button
@@ -55,17 +103,28 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
           </button>
         </div>
 
-        {/* 3 Source breakdown bar */}
+        {/* Breakdown bar */}
         <div className="flex gap-1 h-2 rounded-full overflow-hidden my-3">
-          <div className="bg-[#95B0B4] h-full" style={{ width: '55%' }} title="Lương"></div>
-          <div className="bg-[#657D81] h-full" style={{ width: '28%' }} title="Freelance"></div>
-          <div className="bg-[#445659] h-full" style={{ width: '17%' }} title="Cho thuê"></div>
+          {incomeSources.map((s, idx) => {
+            const pct = totalExpectedIncome > 0 ? (s.expectedAmount / totalExpectedIncome) * 100 : 0;
+            const colors = ['#95B0B4', '#657D81', '#445659', '#7A9599', '#B0C0C3'];
+            return (
+              <div
+                key={s.id}
+                className="h-full transition-all"
+                style={{ width: `${pct}%`, backgroundColor: colors[idx % colors.length] }}
+                title={`${s.name} (${pct.toFixed(0)}%)`}
+              ></div>
+            );
+          })}
         </div>
 
-        <div className="flex justify-between text-[11px] text-[#869699]">
-          <span>Lương 25tr (55%)</span>
-          <span>Freelance 12,7tr (28%)</span>
-          <span>Cho thuê 7,5tr (17%)</span>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#869699]">
+          {incomeSources.map((s) => (
+            <span key={s.id}>
+              {s.name}: <b className="text-[#D5E1E3] num">{formatVND(s.expectedAmount)}</b>
+            </span>
+          ))}
         </div>
       </div>
 
@@ -79,7 +138,11 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
           return (
             <div
               key={jar.id}
-              className={`bg-[#1C2426]/75 border rounded-2xl p-3.5 flex flex-col justify-between ${
+              onClick={() => {
+                setSelectedJarForEdit(jar);
+                setEditLimitStr(new Intl.NumberFormat('vi-VN').format(jar.monthlyLimit));
+              }}
+              className={`bg-[#1C2426]/75 border rounded-2xl p-3.5 flex flex-col justify-between cursor-pointer active:scale-98 transition-transform ${
                 isWarn ? 'border-[#D4A373]/35' : 'border-[#8BA5AA]/12'
               }`}
             >
@@ -99,8 +162,9 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
               <div className="num text-[16px] font-bold text-[#F2F5F5]">
                 {formatVND(remainingAmount > 0 ? remainingAmount : 0)}
               </div>
-              <div className="text-[11px] text-[#869699] num mt-0.5">
-                {jar.code === 'FFA' ? 'Đã chuyển Đầu tư' : `Hạn mức ${formatVND(jar.monthlyLimit)}`}
+              <div className="text-[11px] text-[#869699] num mt-0.5 flex items-center justify-between">
+                <span>{jar.code === 'FFA' ? 'Đã chuyển Đầu tư' : `Hạn mức ${formatVND(jar.monthlyLimit)}`}</span>
+                <Edit2 size={11} className="text-[#869699] ml-1 opacity-70" />
               </div>
 
               <div className="h-1.5 rounded-full bg-[#232D30] overflow-hidden mt-2.5">
@@ -123,6 +187,125 @@ export const BudgetView: React.FC<BudgetViewProps> = ({ jars }) => {
         </span>
         <span className="num font-semibold text-[#C4D0D2]">−6.000.000 ₫</span>
       </div>
+
+      {/* MODAL 1: Quản lý Nguồn thu */}
+      {showIncomeModal && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-[#F2F5F5]">Tùy biến Nguồn thu</span>
+              <button
+                onClick={() => setShowIncomeModal(false)}
+                className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* List current sources */}
+            <div className="space-y-2">
+              {incomeSources.map((s) => (
+                <div key={s.id} className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-[#F2F5F5]">{s.name}</div>
+                    <div className="text-[10.5px] text-[#869699]">
+                      {s.recurrence} · {s.kind === 'fixed' ? 'Cố định' : s.kind === 'passive' ? 'Thụ động' : 'Không đều'}
+                    </div>
+                  </div>
+                  <div className="num text-xs font-bold text-[#8CC7AE]">
+                    {formatVND(s.expectedAmount)}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Form add new source */}
+            <form onSubmit={handleCreateIncomeSource} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5">
+              <span className="text-xs font-bold text-[#F2F5F5] block">Thêm nguồn thu mới</span>
+              <input
+                type="text"
+                placeholder="Tên nguồn thu (VD: Cổ tức, Bán hàng Shopee...)"
+                value={newSourceName}
+                onChange={(e) => setNewSourceName(e.target.value)}
+                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={newSourceKind}
+                  onChange={(e) => setNewSourceKind(e.target.value as any)}
+                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
+                >
+                  <option value="fixed">Cố định</option>
+                  <option value="irregular">Không đều</option>
+                  <option value="passive">Thụ động</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="Chu kỳ (VD: Hàng tháng)"
+                  value={newSourceRecurrence}
+                  onChange={(e) => setNewSourceRecurrence(e.target.value)}
+                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
+                />
+              </div>
+              <input
+                type="text"
+                placeholder="Số tiền dự kiến mỗi kỳ (₫)"
+                value={newSourceAmount}
+                onChange={(e) => setNewSourceAmount(e.target.value)}
+                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
+              />
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow"
+              >
+                + Thêm nguồn thu
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: Chỉnh sửa hạn mức Hũ */}
+      {selectedJarForEdit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-sm bg-[#161C1E] border border-[#8BA5AA]/25 rounded-3xl p-5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-bold text-[#F2F5F5]">
+                Hạn mức {selectedJarForEdit.name}
+              </span>
+              <button
+                onClick={() => setSelectedJarForEdit(null)}
+                className="w-7 h-7 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={handleSaveJarLimit} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                  Hạn mức tháng mới (₫)
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={editLimitStr}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/[^\d]/g, '');
+                    setEditLimitStr(raw ? new Intl.NumberFormat('vi-VN').format(parseInt(raw, 10)) : '');
+                  }}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2.5 text-base font-bold num text-[#F2F5F5] focus:outline-none"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow active:scale-98"
+              >
+                Lưu hạn mức
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

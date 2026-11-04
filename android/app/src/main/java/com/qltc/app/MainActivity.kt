@@ -35,7 +35,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Nếu đã có quyền, mở WebView nạp ứng dụng QLTC
-        val webUrl = prefs.getString("web_url", "https://qltc.pages.dev") ?: "https://qltc.pages.dev"
+        val webUrl = prefs.getString("web_url", "https://qltc-app.dtd-store.workers.dev") ?: "https://qltc-app.dtd-store.workers.dev"
         loadAppWebView(webUrl)
     }
 

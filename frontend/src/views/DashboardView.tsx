@@ -10,6 +10,7 @@ interface DashboardViewProps {
   jars: Jar[];
   holdings: Holding[];
   pendingCount: number;
+  privacyMode: boolean;
   onOpenInbox: () => void;
   onOpenBudget: () => void;
   onOpenInvestments: () => void;
@@ -21,6 +22,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   totalInvestments,
   jars,
   pendingCount,
+  privacyMode,
   onOpenInbox,
   onOpenBudget,
   onOpenInvestments
@@ -55,13 +57,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         <div className="num text-[30px] font-bold text-[#F2F5F5] tracking-tight my-1">
-          {new Intl.NumberFormat('vi-VN').format(netWorth)}{' '}
+          {privacyMode ? '••••••••••' : new Intl.NumberFormat('vi-VN').format(netWorth)}{' '}
           <span className="text-[20px] font-normal text-[#95B0B4]">₫</span>
         </div>
 
         <div className="text-[11.5px] text-[#869699] mb-1">
-          {new Intl.NumberFormat('vi-VN').format(Math.round(liquidCash / 1000000))}tr tiền mặt ·{' '}
-          {new Intl.NumberFormat('vi-VN').format(Math.round(totalInvestments / 1000000))}tr đầu tư
+          {privacyMode
+            ? '•••••• tiền mặt · •••••• đầu tư'
+            : `${new Intl.NumberFormat('vi-VN').format(Math.round(liquidCash / 1000000))}tr tiền mặt · ${new Intl.NumberFormat('vi-VN').format(Math.round(totalInvestments / 1000000))}tr đầu tư`}
         </div>
 
         <Sparkline />
@@ -81,11 +84,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="flex items-center justify-between num mb-2.5">
           <div>
             <div className="text-[11px] text-[#869699]">Thu nhập (3 nguồn)</div>
-            <div className="text-[16.5px] font-bold text-[#F2F5F5] mt-0.5">+45.200.000 ₫</div>
+            <div className="text-[16.5px] font-bold text-[#F2F5F5] mt-0.5">
+              {privacyMode ? '•••••• ₫' : '+45.200.000 ₫'}
+            </div>
           </div>
           <div className="text-right">
             <div className="text-[11px] text-[#869699]">Đã chi</div>
-            <div className="text-[16.5px] font-semibold text-[#B0C0C3] mt-0.5">−28.100.000 ₫</div>
+            <div className="text-[16.5px] font-semibold text-[#B0C0C3] mt-0.5">
+              {privacyMode ? '•••••• ₫' : '−28.100.000 ₫'}
+            </div>
           </div>
         </div>
 
@@ -124,7 +131,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </span>
                 </div>
                 <div className="text-[10.5px] text-[#869699] num mb-2">
-                  Còn {formatVND(jar.monthlyLimit - jar.spentThisMonth)}
+                  Còn {privacyMode ? '••••••' : formatVND(jar.monthlyLimit - jar.spentThisMonth)}
                 </div>
                 <div className="h-1 rounded-full bg-[#232D30] overflow-hidden">
                   <div
@@ -148,7 +155,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Danh mục đầu tư
           </div>
           <div className="num text-[17px] font-bold text-[#F2F5F5] mt-1 flex items-center gap-1.5">
-            356.400.000 ₫
+            {privacyMode ? '•••••••••• ₫' : '356.400.000 ₫'}
             <span className="text-[11.5px] font-semibold text-[#8CC7AE]">+12,3%</span>
           </div>
         </div>

@@ -4,15 +4,20 @@ import { Bell } from 'lucide-react';
 interface NavbarProps {
   pendingCount: number;
   onOpenInbox: () => void;
+  onOpenSettings: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ pendingCount, onOpenInbox }) => {
+export const Navbar: React.FC<NavbarProps> = ({ pendingCount, onOpenInbox, onOpenSettings }) => {
   return (
     <header className="flex items-center justify-between px-5 pt-4 pb-3">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm">
+        <button
+          onClick={onOpenSettings}
+          title="Tài khoản & Cài đặt"
+          className="w-10 h-10 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm active:scale-95 transition-transform"
+        >
           A
-        </div>
+        </button>
         <div>
           <div className="text-[11px] text-[#869699] font-medium">Thứ Tư, 04/11</div>
           <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight">Chào anh</div>

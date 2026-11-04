@@ -8,13 +8,13 @@
     {
       "binding": "DB",
       "database_name": "qltc-db",
-      "database_id": "local-qltc-db"
+      "database_id": "1dcba37d-26a3-406f-a6bc-f183210edb4e"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "KV",
-      "id": "qltc_kv"
+      "id": "4a0f927b0e334f93b7584fe422be0ab7"
     }
   ],
   "triggers": {

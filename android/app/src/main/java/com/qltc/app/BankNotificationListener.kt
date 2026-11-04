@@ -87,7 +87,7 @@ class BankNotificationListener : NotificationListenerService() {
 
     private fun sendToBackend(packageName: String, title: String, text: String) {
         val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
-        val backendUrl = prefs.getString("backend_url", "https://qltc-backend.your-subdomain.workers.dev") ?: return
+        val backendUrl = prefs.getString("backend_url", "https://qltc-backend.dtd-store.workers.dev") ?: "https://qltc-backend.dtd-store.workers.dev"
 
         CoroutineScope(Dispatchers.IO).launch {
             try {

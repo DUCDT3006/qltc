@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qltc-app",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-02-24",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  }
+}

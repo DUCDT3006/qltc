@@ -1,4 +1,4 @@
-import { Jar, BankAccount, Transaction, Holding } from './types';
+import { Jar, BankAccount, Transaction, Holding, IncomeSource } from './types';
 
 export const INITIAL_JARS: Jar[] = [
   { id: 'jar_nec', code: 'NEC', name: 'Thiết yếu', targetPercent: 0.55, monthlyLimit: 24900000, spentThisMonth: 15500000, color: '#95B0B4' },
@@ -7,6 +7,12 @@ export const INITIAL_JARS: Jar[] = [
   { id: 'jar_edu', code: 'EDU', name: 'Giáo dục', targetPercent: 0.10, monthlyLimit: 4500000, spentThisMonth: 1340000, color: '#657D81' },
   { id: 'jar_play', code: 'PLAY', name: 'Hưởng thụ', targetPercent: 0.10, monthlyLimit: 4500000, spentThisMonth: 4090000, color: '#D4A373' },
   { id: 'jar_give', code: 'GIVE', name: 'Cho đi', targetPercent: 0.05, monthlyLimit: 2300000, spentThisMonth: 1050000, color: '#657D81' }
+];
+
+export const INITIAL_INCOME_SOURCES: IncomeSource[] = [
+  { id: 'inc_1', name: 'Lương chính (Công ty)', kind: 'fixed', expectedAmount: 25000000, recurrence: 'Hàng tháng (ngày 5)' },
+  { id: 'inc_2', name: 'Freelance & Dự án ngoài', kind: 'irregular', expectedAmount: 12700000, recurrence: 'Theo đợt nghiệm thu' },
+  { id: 'inc_3', name: 'Cho thuê căn hộ mini', kind: 'passive', expectedAmount: 7500000, recurrence: 'Hàng tháng (ngày 1)' }
 ];
 
 export const INITIAL_ACCOUNTS: BankAccount[] = [
@@ -90,6 +96,48 @@ export const INITIAL_PENDING_TRANSACTIONS: Transaction[] = [
   }
 ];
 
+export const INITIAL_CONFIRMED_TRANSACTIONS: Transaction[] = [
+  {
+    id: 'txn_c1',
+    bankCode: 'VCB',
+    accountMask: '0071',
+    accountName: 'Vietcombank · *0071',
+    type: 'expense',
+    amount: 6000000,
+    description: 'TIEN THUE NHA THANG 11',
+    suggestedCategory: 'Hóa đơn & Nhà ở',
+    suggestedJarCode: 'NEC',
+    occurredAt: '03/11 · 15:20',
+    status: 'confirmed'
+  },
+  {
+    id: 'txn_c2',
+    bankCode: 'MB',
+    accountMask: '0340',
+    accountName: 'MB Bank · *0340',
+    type: 'income',
+    amount: 12700000,
+    description: 'THANH TOAN HOP DONG THIET KE APP',
+    suggestedCategory: 'Thu nhập ngoài / Freelance',
+    suggestedJarCode: 'FFA',
+    occurredAt: '02/11 · 11:00',
+    status: 'confirmed'
+  },
+  {
+    id: 'txn_c3',
+    bankCode: 'TCB',
+    accountMask: '1902',
+    accountName: 'Techcombank · *1902',
+    type: 'expense',
+    amount: 1200000,
+    description: 'WINMART SIÊU THỊ THỰC PHẨM TUẦN',
+    suggestedCategory: 'Ăn uống hàng ngày',
+    suggestedJarCode: 'NEC',
+    occurredAt: '01/11 · 18:30',
+    status: 'confirmed'
+  }
+];
+
 export const INITIAL_HOLDINGS: Holding[] = [
   { symbol: 'HPG', name: 'Tập đoàn Hòa Phát', assetClass: 'stock', quantity: 2000, avgCost: 24100, currentPrice: 27350, unit: 'CP' },
   { symbol: 'FPT', name: 'Tập đoàn FPT', assetClass: 'stock', quantity: 500, avgCost: 132000, currentPrice: 128400, unit: 'CP' },
@@ -100,18 +148,4 @@ export const INITIAL_HOLDINGS: Holding[] = [
 
 export function formatVND(amount: number): string {
   return new Intl.NumberFormat('vi-VN').format(Math.round(amount)) + ' ₫';
-}
-
-export function formatShortVND(amount: number): string {
-  const abs = Math.abs(amount);
-  if (abs >= 1000000000) {
-    return (amount / 1000000000).toFixed(1).replace('.', ',') + ' tỷ';
-  }
-  if (abs >= 1000000) {
-    return (amount / 1000000).toFixed(1).replace('.', ',') + 'tr';
-  }
-  if (abs >= 1000) {
-    return (amount / 1000).toFixed(0) + 'k';
-  }
-  return amount.toString();
 }

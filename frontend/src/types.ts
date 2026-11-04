@@ -19,6 +19,15 @@ export interface BankAccount {
   type: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto';
 }
 
+export interface IncomeSource {
+  id: string;
+  name: string;
+  kind: 'fixed' | 'irregular' | 'passive';
+  expectedAmount: number;
+  recurrence: string;
+  color?: string;
+}
+
 export interface Transaction {
   id: string;
   bankCode: string;

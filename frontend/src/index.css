@@ -1,0 +1,39 @@
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+:root {
+  --color-primary: #657D81;
+  --color-primary-light: #95B0B4;
+  --color-primary-dark: #3E4F52;
+  --color-bg-deep: #0E1314;
+  --color-bg-card: rgba(28, 36, 38, 0.78);
+  --color-border: rgba(139, 165, 170, 0.12);
+  --color-pos: #8CC7AE;
+  --color-warn: #D4A373;
+}
+
+body {
+  margin: 0;
+  font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: #0E1314;
+  color: #F2F5F5;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(101, 125, 129, 0.3);
+  border-radius: 4px;
+}

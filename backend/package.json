@@ -1,0 +1,19 @@
+{
+  "name": "qltc-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:init": "wrangler d1 execute qltc-db --local --file=./schema.sql",
+    "d1:init:prod": "wrangler d1 execute qltc-db --remote --file=./schema.sql"
+  },
+  "dependencies": {
+    "hono": "^4.7.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261103.1",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.157.0"
+  }
+}

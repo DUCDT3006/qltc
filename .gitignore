@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.output/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+
+# Android / Gradle
+.gradle/
+android/app/build/
+android/.gradle/
+android/build/
+local.properties
+*.apk
+*.aab
+
+# OS
+.DS_Store
+Thumbs.db
+*.log

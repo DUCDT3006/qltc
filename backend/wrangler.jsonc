@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qltc-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "qltc-db",
+      "database_id": "local-qltc-db"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "qltc_kv"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 1,8,13 * * *"]
+  }
+}

@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer ring in #657D81 -->
+    <path
+        android:strokeColor="#657D81"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M54,18 A36,36 0 1,1 24,34"/>
+    <!-- Ascending chart trend in #8CC7AE -->
+    <path
+        android:strokeColor="#8CC7AE"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,68 L48,46 L62,56 L76,32"/>
+    <!-- Top point in white -->
+    <path
+        android:fillColor="#F2F5F5"
+        android:pathData="M76,32m-4,0a4,4 0 1,0 8,0a4,4 0 1,0 -8,0"/>
+</vector>

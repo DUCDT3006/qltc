@@ -21,7 +21,7 @@ interface ResetModalProps {
   accounts: BankAccount[];
   holdings: Holding[];
   onRefreshAll: () => Promise<void>;
-  onDirectReset: (scope: 'transactions' | 'balances' | 'holdings' | 'all') => Promise<void>;
+  onDirectReset: (scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all') => Promise<void>;
 }
 
 export const ResetModal: React.FC<ResetModalProps> = ({
@@ -40,7 +40,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     desc: string;
-    scope: 'transactions' | 'balances' | 'holdings' | 'all';
+    scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all';
   } | null>(null);
 
   // State chỉnh sửa số dư tài khoản
@@ -58,7 +58,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   if (!isOpen) return null;
 
   // Thực hiện Reset sau khi người dùng bấm xác nhận trong In-app dialog
-  const executeReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'all') => {
+  const executeReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all') => {
     setIsProcessing(true);
     setMessage(null);
     setConfirmDialog(null);
@@ -312,16 +312,44 @@ export const ResetModal: React.FC<ResetModalProps> = ({
               </button>
             </div>
 
-            {/* Lựa chọn 3: Đặt lại toàn bộ về 0 */}
+            {/* Lựa chọn 3: Xóa nguồn thu mẫu */}
+            <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-4 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-[#657D81]/20 text-[#D5E1E3] mt-0.5">
+                  <DollarSign size={18} />
+                </div>
+                <div className="flex-1">
+                  <div className="text-xs font-bold text-[#F2F5F5]">3. Xóa các nguồn thu nhập mẫu</div>
+                  <div className="text-[11px] text-[#869699] mt-0.5 leading-relaxed">
+                    Xóa 3 nguồn thu mẫu (Lương 25tr, Freelance 12.7tr, Thuê căn hộ 7.5tr) về 0đ để anh tự thiết lập các nguồn thu thực tế của mình ở trang Ngân sách.
+                  </div>
+                </div>
+              </div>
+              <button
+                disabled={isProcessing}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: 'Xóa toàn bộ nguồn thu mẫu',
+                    desc: 'Toàn bộ 3 nguồn thu mẫu sẽ được xóa sạch về 0đ để anh tự thêm nguồn thu thực tế của mình.',
+                    scope: 'income'
+                  })
+                }
+                className="w-full py-2.5 rounded-xl bg-[#283538] hover:bg-[#344448] text-xs font-semibold text-[#F2F5F5] border border-[#8BA5AA]/25 active:scale-98 transition-transform"
+              >
+                Xóa nguồn thu mẫu về 0
+              </button>
+            </div>
+
+            {/* Lựa chọn 4: Đặt lại toàn bộ về 0 */}
             <div className="bg-[#241C1C] border border-[#E06D6D]/20 rounded-2xl p-4 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="p-2 rounded-xl bg-[#E06D6D]/20 text-[#E06D6D] mt-0.5">
                   <AlertTriangle size={18} />
                 </div>
                 <div className="flex-1">
-                  <div className="text-xs font-bold text-[#F2F5F5]">3. Đặt lại toàn bộ về 0 (Khởi tạo từ đầu)</div>
+                  <div className="text-xs font-bold text-[#F2F5F5]">4. Đặt lại TOÀN BỘ về 0 (Khởi tạo từ đầu)</div>
                   <div className="text-[11px] text-[#A88C8C] mt-0.5 leading-relaxed">
-                    Xóa sạch toàn bộ giao dịch, đặt số dư các thẻ/ví về 0đ và xóa toàn bộ tài sản đầu tư mẫu để anh tự nhập tình hình tài chính thực tế từ đầu.
+                    Xóa sạch toàn bộ giao dịch, đặt số dư các thẻ/ví về 0đ, xóa toàn bộ danh mục đầu tư mẫu và xóa sạch 3 nguồn thu mẫu về 0đ.
                   </div>
                 </div>
               </div>
@@ -330,7 +358,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
                 onClick={() =>
                   setConfirmDialog({
                     title: 'Khởi tạo lại toàn bộ sổ tài chính về 0',
-                    desc: 'Toàn bộ giao dịch, số dư ngân hàng và tài sản đầu tư mẫu sẽ được đưa về 0đ. Cấu trúc 6 hũ vẫn được bảo toàn để anh bắt đầu nhập mới.',
+                    desc: 'Toàn bộ giao dịch, số dư ngân hàng, danh mục đầu tư và các nguồn thu nhập mẫu sẽ được đưa về 0đ sạch sẽ 100%.',
                     scope: 'all'
                   })
                 }

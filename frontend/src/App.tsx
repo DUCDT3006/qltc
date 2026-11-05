@@ -50,11 +50,25 @@ export function App() {
 
   // States
   const [jars, setJars] = useState<Jar[]>(INITIAL_JARS);
-  const [incomeSources, setIncomeSources] = useState<IncomeSource[]>(INITIAL_INCOME_SOURCES);
+  const [incomeSources, setIncomeSources] = useState<IncomeSource[]>(() => {
+    const saved = localStorage.getItem('qltc_income_sources');
+    if (saved !== null) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return [];
+      }
+    }
+    return INITIAL_INCOME_SOURCES;
+  });
   const [accounts, setAccounts] = useState<BankAccount[]>(INITIAL_ACCOUNTS);
   const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>(INITIAL_PENDING_TRANSACTIONS);
   const [confirmedTransactions, setConfirmedTransactions] = useState<Transaction[]>(INITIAL_CONFIRMED_TRANSACTIONS);
   const [holdings, setHoldings] = useState<Holding[]>(INITIAL_HOLDINGS);
+
+  useEffect(() => {
+    localStorage.setItem('qltc_income_sources', JSON.stringify(incomeSources));
+  }, [incomeSources]);
 
   // Tải dữ liệu thật từ Cloudflare D1
   const loadDataFromBackend = useCallback(async () => {
@@ -248,7 +262,7 @@ export function App() {
   };
 
   // Thực hiện Reset trực tiếp (Zero out state)
-  const handleDirectReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'all') => {
+  const handleDirectReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all') => {
     // 1. Cập nhật ngay trên bộ nhớ React để UI cập nhật về 0 tức thì
     if (scope === 'transactions' || scope === 'all') {
       setPendingTransactions([]);
@@ -261,19 +275,40 @@ export function App() {
     if (scope === 'holdings' || scope === 'all') {
       setHoldings([]);
     }
+    if (scope === 'income' || scope === 'all') {
+      setIncomeSources([]);
+      localStorage.setItem('qltc_income_sources', '[]');
+    }
+    if (scope === 'all') {
+      setJars(prev => prev.map(j => ({ ...j, spentThisMonth: 0, monthlyLimit: 0 })));
+    }
 
     // 2. Gửi lệnh xóa lên Cloudflare D1
     try {
       await fetch(`${API_BASE}/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope, clearNotifications: true })
+        body: JSON.stringify({ scope: scope === 'income' ? 'transactions' : scope, clearNotifications: true })
       });
       // Tải lại để đồng bộ hoàn toàn với database
       await loadDataFromBackend();
     } catch (err) {
       console.error('Lỗi gọi API reset:', err);
     }
+  };
+
+  // Xóa nguồn thu
+  const handleDeleteIncomeSource = (id: string) => {
+    setIncomeSources(prev => prev.filter(s => s.id !== id));
+  };
+
+  // Tự động phân bổ lại 6 hũ theo tổng thu nhập
+  const handleAutoAllocateJars = (income: number) => {
+    setJars(prev => prev.map(j => {
+      const targetPct = j.targetPercent || 0.1;
+      const limit = Math.round(income * targetPct);
+      return { ...j, monthlyLimit: limit };
+    }));
   };
 
   // Xóa giao dịch đã duyệt
@@ -397,6 +432,8 @@ export function App() {
             totalInvestments={totalInvestments}
             jars={jars}
             holdings={holdings}
+            incomeSources={incomeSources}
+            confirmedTransactions={confirmedTransactions}
             pendingCount={pendingTransactions.length}
             privacyMode={privacyMode}
             onOpenInbox={() => setCurrentTab('transactions')}
@@ -423,7 +460,9 @@ export function App() {
             jars={jars}
             incomeSources={incomeSources}
             onAddIncomeSource={handleAddIncomeSource}
+            onDeleteIncomeSource={handleDeleteIncomeSource}
             onUpdateJarLimit={handleUpdateJarLimit}
+            onAutoAllocateJars={handleAutoAllocateJars}
           />
         )}
 

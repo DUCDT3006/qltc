@@ -1,20 +1,24 @@
 import React, { useState } from 'react';
 import { Jar, IncomeSource } from '../types';
 import { formatVND } from '../mockData';
-import { Sparkles, Check, Plus, Edit2, X, Settings2 } from 'lucide-react';
+import { Sparkles, Check, Edit2, X, Settings2, Trash2 } from 'lucide-react';
 
 interface BudgetViewProps {
   jars: Jar[];
   incomeSources: IncomeSource[];
   onAddIncomeSource: (source: IncomeSource) => void;
+  onDeleteIncomeSource: (id: string) => void;
   onUpdateJarLimit: (jarId: string, limit: number) => void;
+  onAutoAllocateJars: (totalIncome: number) => void;
 }
 
 export const BudgetView: React.FC<BudgetViewProps> = ({
   jars,
   incomeSources,
   onAddIncomeSource,
-  onUpdateJarLimit
+  onDeleteIncomeSource,
+  onUpdateJarLimit,
+  onAutoAllocateJars
 }) => {
   const [allocatedSuccess, setAllocatedSuccess] = useState(false);
   const [showIncomeModal, setShowIncomeModal] = useState(false);
@@ -33,6 +37,11 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const remaining = totalLimit - totalSpent;
 
   const handleSimulateAllocation = () => {
+    if (totalExpectedIncome <= 0) {
+      alert('Vui lòng thêm ít nhất 1 nguồn thu nhập ở mục "Nguồn thu" để chia hũ tự động nhé anh!');
+      return;
+    }
+    onAutoAllocateJars(totalExpectedIncome);
     setAllocatedSuccess(true);
     setTimeout(() => setAllocatedSuccess(false), 3000);
   };
@@ -72,7 +81,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         <div>
           <span className="text-[20px] font-bold text-[#F2F5F5]">Ngân sách</span>
           <div className="text-xs text-[#869699] mt-0.5">
-            6 hũ chi tiêu · Còn lại <b className="num text-[#F2F5F5]">{formatVND(remaining)}</b>
+            6 hũ chi tiêu · Còn lại <b className="num text-[#F2F5F5]">{formatVND(remaining > 0 ? remaining : 0)}</b>
           </div>
         </div>
         <button
@@ -104,34 +113,44 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         </div>
 
         {/* Breakdown bar */}
-        <div className="flex gap-1 h-2 rounded-full overflow-hidden my-3">
-          {incomeSources.map((s, idx) => {
-            const pct = totalExpectedIncome > 0 ? (s.expectedAmount / totalExpectedIncome) * 100 : 0;
-            const colors = ['#95B0B4', '#657D81', '#445659', '#7A9599', '#B0C0C3'];
-            return (
-              <div
-                key={s.id}
-                className="h-full transition-all"
-                style={{ width: `${pct}%`, backgroundColor: colors[idx % colors.length] }}
-                title={`${s.name} (${pct.toFixed(0)}%)`}
-              ></div>
-            );
-          })}
-        </div>
+        {totalExpectedIncome > 0 ? (
+          <>
+            <div className="flex gap-1 h-2 rounded-full overflow-hidden my-3">
+              {incomeSources.map((s, idx) => {
+                const pct = (s.expectedAmount / totalExpectedIncome) * 100;
+                const colors = ['#95B0B4', '#657D81', '#445659', '#7A9599', '#B0C0C3'];
+                return (
+                  <div
+                    key={s.id}
+                    className="h-full transition-all"
+                    style={{ width: `${pct}%`, backgroundColor: colors[idx % colors.length] }}
+                    title={`${s.name} (${pct.toFixed(0)}%)`}
+                  ></div>
+                );
+              })}
+            </div>
 
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#869699]">
-          {incomeSources.map((s) => (
-            <span key={s.id}>
-              {s.name}: <b className="text-[#D5E1E3] num">{formatVND(s.expectedAmount)}</b>
-            </span>
-          ))}
-        </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#869699]">
+              {incomeSources.map((s) => (
+                <span key={s.id}>
+                  {s.name}: <b className="text-[#D5E1E3] num">{formatVND(s.expectedAmount)}</b>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="text-[11px] text-[#869699] my-2.5">
+            Chưa thiết lập nguồn thu nào. Anh bấm <strong>"Nguồn thu"</strong> góc trên để thêm thu nhập thực tế nhé.
+          </div>
+        )}
       </div>
 
       {/* 6 Jars Grid */}
       <div className="grid grid-cols-2 gap-2.5">
         {jars.map((jar) => {
-          const pct = Math.min(100, Math.round((jar.spentThisMonth / jar.monthlyLimit) * 100));
+          const pct = jar.monthlyLimit > 0
+            ? Math.min(100, Math.round((jar.spentThisMonth / jar.monthlyLimit) * 100))
+            : 0;
           const remainingAmount = jar.monthlyLimit - jar.spentThisMonth;
           const isWarn = jar.code === 'PLAY' || pct >= 90;
 
@@ -180,12 +199,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         })}
       </div>
 
-      {/* Upcoming recurring bills */}
+      {/* Information Tip Card */}
       <div className="bg-[#1C2426]/80 backdrop-blur-md border border-[#8BA5AA]/12 rounded-2xl p-3.5 flex items-center justify-between text-xs">
         <span className="text-[#869699]">
-          Định kỳ sắp tới · <b className="text-[#F2F5F5]">Tiền thuê nhà (05/11)</b>
+          Quy tắc 6 hũ · <b className="text-[#F2F5F5]">Tự do tài chính & Tích lũy</b>
         </span>
-        <span className="num font-semibold text-[#C4D0D2]">−6.000.000 ₫</span>
+        <span className="text-[#8CC7AE] font-semibold text-[11px]">55% · 10% · 10% · 10% · 10% · 5%</span>
       </div>
 
       {/* MODAL 1: Quản lý Nguồn thu */}
@@ -204,19 +223,35 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
 
             {/* List current sources */}
             <div className="space-y-2">
-              {incomeSources.map((s) => (
-                <div key={s.id} className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-semibold text-[#F2F5F5]">{s.name}</div>
-                    <div className="text-[10.5px] text-[#869699]">
-                      {s.recurrence} · {s.kind === 'fixed' ? 'Cố định' : s.kind === 'passive' ? 'Thụ động' : 'Không đều'}
+              {incomeSources.length === 0 ? (
+                <div className="text-center py-6 text-xs text-[#869699] bg-[#1C2426]/50 rounded-2xl border border-[#8BA5AA]/10">
+                  Chưa có nguồn thu nào. Anh nhập nguồn thu thực tế ở bên dưới để thêm nhé!
+                </div>
+              ) : (
+                incomeSources.map((s) => (
+                  <div key={s.id} className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-semibold text-[#F2F5F5]">{s.name}</div>
+                      <div className="text-[10.5px] text-[#869699]">
+                        {s.recurrence} · {s.kind === 'fixed' ? 'Cố định' : s.kind === 'passive' ? 'Thụ động' : 'Không đều'}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="num text-xs font-bold text-[#8CC7AE]">
+                        {formatVND(s.expectedAmount)}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteIncomeSource(s.id)}
+                        className="w-7 h-7 rounded-lg bg-[#282121] text-[#E06D6D] hover:bg-[#3B2525] flex items-center justify-center active:scale-90 transition-transform"
+                        title="Xóa nguồn thu này"
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     </div>
                   </div>
-                  <div className="num text-xs font-bold text-[#8CC7AE]">
-                    {formatVND(s.expectedAmount)}
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Form add new source */}
@@ -224,7 +259,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               <span className="text-xs font-bold text-[#F2F5F5] block">Thêm nguồn thu mới</span>
               <input
                 type="text"
-                placeholder="Tên nguồn thu (VD: Cổ tức, Bán hàng Shopee...)"
+                placeholder="Tên nguồn thu (VD: Lương, Cổ tức, Bán hàng...)"
                 value={newSourceName}
                 onChange={(e) => setNewSourceName(e.target.value)}
                 className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
@@ -298,7 +333,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               </div>
               <button
                 type="submit"
-                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow active:scale-98"
+                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow"
               >
                 Lưu hạn mức
               </button>

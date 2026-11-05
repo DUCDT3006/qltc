@@ -1,6 +1,6 @@
 import React from 'react';
 import { Sparkline } from '../components/Sparkline';
-import { Jar, Holding } from '../types';
+import { Jar, Holding, IncomeSource, Transaction } from '../types';
 import { formatVND } from '../mockData';
 
 interface DashboardViewProps {
@@ -9,6 +9,8 @@ interface DashboardViewProps {
   totalInvestments: number;
   jars: Jar[];
   holdings: Holding[];
+  incomeSources: IncomeSource[];
+  confirmedTransactions: Transaction[];
   pendingCount: number;
   privacyMode: boolean;
   onOpenInbox: () => void;
@@ -21,12 +23,51 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   liquidCash,
   totalInvestments,
   jars,
+  holdings,
+  incomeSources,
+  confirmedTransactions,
   pendingCount,
   privacyMode,
   onOpenInbox,
   onOpenBudget,
   onOpenInvestments
 }) => {
+  // 1. Tính tổng thu nhập tháng này (từ nguồn thu dự kiến hoặc từ giao dịch thu nhập thực tế)
+  const totalExpectedIncome = incomeSources.reduce((sum, s) => sum + s.expectedAmount, 0);
+  const confirmedIncome = confirmedTransactions
+    .filter(t => t.type === 'income')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const displayIncome = totalExpectedIncome > 0 ? totalExpectedIncome : confirmedIncome;
+
+  // 2. Tính tổng chi tiêu thực tế tháng này từ các hũ
+  const totalSpent = jars.reduce((sum, j) => sum + j.spentThisMonth, 0);
+
+  // 3. Tỷ lệ tiết kiệm và thanh tỷ lệ chi tiêu
+  const savingsRate = displayIncome > 0
+    ? Math.max(0, Math.round(((displayIncome - totalSpent) / displayIncome) * 100))
+    : 0;
+  const spentPct = displayIncome > 0
+    ? Math.min(100, Math.round((totalSpent / displayIncome) * 100))
+    : 0;
+
+  // 4. Ngân sách còn lại của 6 hũ
+  const totalJarLimits = jars.reduce((sum, j) => sum + j.monthlyLimit, 0);
+  const totalJarRemaining = Math.max(0, totalJarLimits - totalSpent);
+
+  // 5. Phân bổ tài sản đầu tư động theo holdings
+  const totalCost = holdings.reduce((sum, h) => sum + (h.quantity * h.avgCost), 0);
+  const profitRate = totalCost > 0 ? ((totalInvestments - totalCost) / totalCost) * 100 : 0;
+
+  const stockVal = holdings.filter(h => h.assetClass === 'stock').reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
+  const fundVal = holdings.filter(h => h.assetClass === 'fund').reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
+  const cryptoVal = holdings.filter(h => h.assetClass === 'crypto').reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
+  const goldVal = holdings.filter(h => h.assetClass === 'gold').reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
+
+  const stockPct = totalInvestments > 0 ? Math.round((stockVal / totalInvestments) * 100) : 0;
+  const fundPct = totalInvestments > 0 ? Math.round((fundVal / totalInvestments) * 100) : 0;
+  const cryptoPct = totalInvestments > 0 ? Math.round((cryptoVal / totalInvestments) * 100) : 0;
+  const goldPct = totalInvestments > 0 ? Math.round((goldVal / totalInvestments) * 100) : 0;
+
   return (
     <div className="space-y-3 pb-24 px-4">
       {/* Pending Banner if any */}
@@ -52,7 +93,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Tài sản ròng
           </span>
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#7EB89E]/15 text-[#8CC7AE] border border-[#7EB89E]/25">
-            +2,4% tháng này
+            Thực tế
           </span>
         </div>
 
@@ -77,27 +118,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Dòng tiền tháng 11
           </span>
           <span className="text-[11.5px] text-[#869699]">
-            Tiết kiệm <b className="text-[#D5E1E3] font-semibold">37,8%</b>
+            {displayIncome > 0 ? (
+              <>
+                Tiết kiệm <b className="text-[#D5E1E3] font-semibold">{savingsRate}%</b>
+              </>
+            ) : (
+              <span className="text-[#869699]">Chưa có thu nhập</span>
+            )}
           </span>
         </div>
 
         <div className="flex items-center justify-between num mb-2.5">
           <div>
-            <div className="text-[11px] text-[#869699]">Thu nhập (3 nguồn)</div>
+            <div className="text-[11px] text-[#869699]">
+              Thu nhập {incomeSources.length > 0 ? `(${incomeSources.length} nguồn)` : ''}
+            </div>
             <div className="text-[16.5px] font-bold text-[#F2F5F5] mt-0.5">
-              {privacyMode ? '•••••• ₫' : '+45.200.000 ₫'}
+              {privacyMode ? '•••••• ₫' : `+${formatVND(displayIncome)}`}
             </div>
           </div>
           <div className="text-right">
             <div className="text-[11px] text-[#869699]">Đã chi</div>
             <div className="text-[16.5px] font-semibold text-[#B0C0C3] mt-0.5">
-              {privacyMode ? '•••••• ₫' : '−28.100.000 ₫'}
+              {privacyMode ? '•••••• ₫' : `−${formatVND(totalSpent)}`}
             </div>
           </div>
         </div>
 
         <div className="h-1.5 flex gap-1 rounded-full bg-transparent overflow-hidden">
-          <div className="bg-[#95B0B4] h-full rounded-full" style={{ width: '62%' }}></div>
+          <div
+            className="bg-[#95B0B4] h-full rounded-full transition-all duration-300"
+            style={{ width: `${displayIncome > 0 ? spentPct : 0}%` }}
+          ></div>
           <div className="bg-[#263134] h-full flex-1 rounded-full"></div>
         </div>
       </div>
@@ -109,13 +161,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Phân bổ ngân sách
           </span>
           <button onClick={onOpenBudget} className="text-[11.5px] text-[#869699] hover:text-[#F2F5F5]">
-            6 hũ · còn 16,8tr ›
+            {totalJarLimits > 0 ? `6 hũ · còn ${formatVND(totalJarRemaining)} ›` : '6 hũ · Xem chi tiết ›'}
           </button>
         </div>
 
         <div className="grid grid-cols-2 gap-2.5">
           {jars.slice(0, 4).map((jar) => {
-            const pct = Math.min(100, Math.round((jar.spentThisMonth / jar.monthlyLimit) * 100));
+            const pct = jar.monthlyLimit > 0
+              ? Math.min(100, Math.round((jar.spentThisMonth / jar.monthlyLimit) * 100))
+              : 0;
             const isWarn = jar.code === 'PLAY' || pct >= 90;
             return (
               <div
@@ -131,7 +185,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </span>
                 </div>
                 <div className="text-[10.5px] text-[#869699] num mb-2">
-                  Còn {privacyMode ? '••••••' : formatVND(jar.monthlyLimit - jar.spentThisMonth)}
+                  Còn {privacyMode ? '••••••' : formatVND(Math.max(0, jar.monthlyLimit - jar.spentThisMonth))}
                 </div>
                 <div className="h-1 rounded-full bg-[#232D30] overflow-hidden">
                   <div
@@ -155,13 +209,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Danh mục đầu tư
           </div>
           <div className="num text-[17px] font-bold text-[#F2F5F5] mt-1 flex items-center gap-1.5">
-            {privacyMode ? '•••••••••• ₫' : '356.400.000 ₫'}
-            <span className="text-[11.5px] font-semibold text-[#8CC7AE]">+12,3%</span>
+            {privacyMode ? '•••••••••• ₫' : formatVND(totalInvestments)}
+            {totalInvestments > 0 && profitRate !== 0 && (
+              <span className={`text-[11.5px] font-semibold ${profitRate >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
+                {profitRate >= 0 ? `+${profitRate.toFixed(1)}%` : `${profitRate.toFixed(1)}%`}
+              </span>
+            )}
           </div>
         </div>
         <div className="text-right text-[10.5px] text-[#869699] leading-relaxed">
-          CP 45% · Quỹ 30%<br />
-          Coin 15% · Vàng 10%
+          {totalInvestments > 0 ? (
+            <>
+              {stockPct > 0 && `CP ${stockPct}% `}
+              {fundPct > 0 && `· Quỹ ${fundPct}%`}
+              <br />
+              {cryptoPct > 0 && `Coin ${cryptoPct}% `}
+              {goldPct > 0 && `· Vàng ${goldPct}%`}
+            </>
+          ) : (
+            <span className="text-[#869699]">Chưa có tài sản ›</span>
+          )}
         </div>
       </div>
     </div>

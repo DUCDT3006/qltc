@@ -676,11 +676,41 @@ app.post('/api/reset', async (c) => {
   });
 });
 
+// Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
+app.get('/api/download-apk', async (c) => {
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk';
+  const response = await fetch(apkUrl, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'QLTC-Updater/1.0'
+    }
+  });
+
+  if (!response.ok) {
+    return c.text('Không thể tải file APK từ GitHub', 502);
+  }
+
+  const contentLength = response.headers.get('content-length') || '5632636';
+
+  return new Response(response.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Disposition': 'attachment; filename="qltc-v1.0.2.apk"',
+      'Content-Length': contentLength,
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
+      'Cache-Control': 'public, max-age=3600'
+    }
+  });
+});
+
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
     version: '1.0.2',
     latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk',
+    directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,
     message: 'Giao diện web cập nhật tức thì qua mạng (OTA).'

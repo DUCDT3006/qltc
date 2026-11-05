@@ -576,17 +576,89 @@ app.delete('/api/accounts/:id', async (c) => {
   return c.json({ success: true, message: 'Đã xóa tài khoản' });
 });
 
-// Cập nhật hạn mức hũ chi tiêu
+// Tạo hũ chi tiêu mới
+app.post('/api/jars', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    code?: string;
+    name: string;
+    targetPercent?: number; // e.g. 0.1 for 10%
+    monthlyLimit?: number;
+    color?: string;
+  }>();
+
+  const jarId = `jar_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const code = (body.code || body.name.substring(0, 4)).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'JAR';
+  const color = body.color || '#657D81';
+
+  // Lấy số thứ tự lớn nhất
+  const maxOrder = await db.prepare('SELECT MAX(sort_order) as m FROM jars WHERE user_id = ?').bind(userId).first<{ m: number }>();
+  const sortOrder = (maxOrder?.m || 0) + 1;
+
+  await db.prepare(`
+    INSERT INTO jars (id, user_id, code, name, target_percent, monthly_limit, color, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(jarId, userId, code, body.name, body.targetPercent || 0.1, body.monthlyLimit || 0, color, sortOrder).run();
+
+  return c.json({ success: true, jarId, message: 'Đã tạo hũ chi tiêu mới thành công' });
+});
+
+// Cập nhật thông tin hũ chi tiêu (hạn mức, tỷ lệ %, tên, màu)
 app.put('/api/jars/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
-  const body = await c.req.json<{ monthly_limit?: number }>();
+  const body = await c.req.json<{
+    monthly_limit?: number;
+    target_percent?: number;
+    name?: string;
+    color?: string;
+  }>();
+
+  const updates: string[] = [];
+  const bindings: any[] = [];
+
   if (body.monthly_limit !== undefined) {
-    await db.prepare('UPDATE jars SET monthly_limit = ? WHERE id = ? AND user_id = ?')
-      .bind(body.monthly_limit, id, userId).run();
+    updates.push('monthly_limit = ?');
+    bindings.push(body.monthly_limit);
   }
-  return c.json({ success: true, message: 'Đã cập nhật hạn mức hũ' });
+  if (body.target_percent !== undefined) {
+    updates.push('target_percent = ?');
+    bindings.push(body.target_percent);
+  }
+  if (body.name !== undefined) {
+    updates.push('name = ?');
+    bindings.push(body.name);
+  }
+  if (body.color !== undefined) {
+    updates.push('color = ?');
+    bindings.push(body.color);
+  }
+
+  if (updates.length > 0) {
+    bindings.push(id, userId);
+    await db.prepare(`UPDATE jars SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`)
+      .bind(...bindings).run();
+  }
+
+  return c.json({ success: true, message: 'Đã cập nhật hũ chi tiêu thành công' });
+});
+
+// Xóa 1 hũ chi tiêu
+app.delete('/api/jars/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+
+  // Chuyển các giao dịch thuộc hũ này sang NULL trước khi xóa hũ
+  await db.prepare('UPDATE transactions SET jar_id = NULL WHERE jar_id = ? AND user_id = ?')
+    .bind(id, userId).run();
+
+  await db.prepare('DELETE FROM jars WHERE id = ? AND user_id = ?')
+    .bind(id, userId).run();
+
+  return c.json({ success: true, message: 'Đã xóa hũ thành công' });
 });
 
 // Danh sách tài sản đầu tư
@@ -669,6 +741,11 @@ app.post('/api/reset', async (c) => {
     await db.prepare('DELETE FROM assets').run();
   }
 
+  if (body.scope === 'all') {
+    // 4. Đặt toàn bộ hạn mức các hũ về 0
+    await db.prepare('UPDATE jars SET monthly_limit = 0 WHERE user_id = ?').bind(userId).run();
+  }
+
   return c.json({
     success: true,
     message: 'Đã thiết lập lại dữ liệu thành công',
@@ -678,7 +755,7 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
@@ -696,7 +773,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.0.2.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.0.3.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -708,8 +785,8 @@ app.get('/api/download-apk', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.2',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk',
+    version: '1.0.3',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

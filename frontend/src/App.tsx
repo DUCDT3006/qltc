@@ -302,15 +302,6 @@ export function App() {
     setIncomeSources(prev => prev.filter(s => s.id !== id));
   };
 
-  // Tự động phân bổ lại 6 hũ theo tổng thu nhập
-  const handleAutoAllocateJars = (income: number) => {
-    setJars(prev => prev.map(j => {
-      const targetPct = j.targetPercent || 0.1;
-      const limit = Math.round(income * targetPct);
-      return { ...j, monthlyLimit: limit };
-    }));
-  };
-
   // Xóa giao dịch đã duyệt
   const handleDeleteConfirmed = (id: string) => {
     setConfirmedTransactions(prev => prev.filter(t => t.id !== id));
@@ -378,9 +369,86 @@ export function App() {
     setIncomeSources(prev => [...prev, newSource]);
   };
 
-  // Cập nhật hạn mức hũ
-  const handleUpdateJarLimit = (jarId: string, limit: number) => {
-    setJars(prev => prev.map(j => j.id === jarId ? { ...j, monthlyLimit: limit } : j));
+  // Thêm hũ mới
+  const handleAddJar = async (newJar: { name: string; code?: string; targetPercent: number; monthlyLimit: number; color?: string }) => {
+    try {
+      const res = await fetch(`${API_BASE}/jars`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newJar)
+      });
+      if (res.ok) {
+        await loadDataFromBackend();
+      }
+    } catch (e) {
+      console.error('Lỗi tạo hũ:', e);
+    }
+  };
+
+  // Cập nhật thông tin hũ (hạn mức, %, tên, màu)
+  const handleUpdateJar = async (jarId: string, updates: { name?: string; targetPercent?: number; monthlyLimit?: number; color?: string }) => {
+    setJars(prev => prev.map(j => {
+      if (j.id === jarId) {
+        return {
+          ...j,
+          name: updates.name ?? j.name,
+          monthlyLimit: updates.monthlyLimit ?? j.monthlyLimit,
+          targetPercent: updates.targetPercent ?? j.targetPercent,
+          color: updates.color ?? j.color
+        };
+      }
+      return j;
+    }));
+
+    try {
+      await fetch(`${API_BASE}/jars/${jarId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: updates.name,
+          monthly_limit: updates.monthlyLimit,
+          target_percent: updates.targetPercent,
+          color: updates.color
+        })
+      });
+    } catch (e) {
+      console.error('Lỗi lưu hũ:', e);
+    }
+  };
+
+  // Xóa hũ
+  const handleDeleteJar = async (jarId: string) => {
+    setJars(prev => prev.filter(j => j.id !== jarId));
+    try {
+      await fetch(`${API_BASE}/jars/${jarId}`, {
+        method: 'DELETE'
+      });
+    } catch (e) {
+      console.error('Lỗi xóa hũ:', e);
+    }
+  };
+
+  // Tự động phân bổ lại các hũ theo tổng thu nhập và tỷ lệ % từng hũ
+  const handleAutoAllocateJars = async (totalIncome: number) => {
+    const updatedJars = jars.map(j => {
+      const targetPct = j.targetPercent || 0.1;
+      const limit = Math.round(totalIncome * targetPct);
+      return { ...j, monthlyLimit: limit };
+    });
+
+    setJars(updatedJars);
+
+    try {
+      await Promise.all(updatedJars.map(j =>
+        fetch(`${API_BASE}/jars/${j.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ monthly_limit: j.monthlyLimit })
+        })
+      ));
+    } catch (e) {
+      console.error('Lỗi đồng bộ hạn mức hũ:', e);
+    }
   };
 
   // Giả lập 1 thông báo ngân hàng gửi tới Android để test
@@ -461,7 +529,9 @@ export function App() {
             incomeSources={incomeSources}
             onAddIncomeSource={handleAddIncomeSource}
             onDeleteIncomeSource={handleDeleteIncomeSource}
-            onUpdateJarLimit={handleUpdateJarLimit}
+            onAddJar={handleAddJar}
+            onUpdateJar={handleUpdateJar}
+            onDeleteJar={handleDeleteJar}
             onAutoAllocateJars={handleAutoAllocateJars}
           />
         )}

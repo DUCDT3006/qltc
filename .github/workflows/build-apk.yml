@@ -34,31 +34,31 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.2.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.3.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.0.2.apk
+          path: qltc-v1.0.3.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.2
-          name: "QLTC v1.0.2 - Nâng cấp bộ tải APK trực tiếp & Cập nhật hũ thu chi"
+          tag_name: v1.0.3
+          name: "QLTC v1.0.3 - Tùy biến toàn diện hũ chi tiêu (Thêm, Xóa, Tùy chỉnh % & Hạn mức)"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.2 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.3 - Android APK
 
-            Bản cập nhật v1.0.2 bổ sung các cải tiến quan trọng:
-            - **Trình tải file APK trực tiếp:** Tự động kích hoạt tải xuống khi bấm nút cập nhật trong app.
-            - **Hộp thoại Reset trực tiếp:** Xóa giao dịch, số dư và danh mục đầu tư về 0đ an toàn và nhanh chóng.
-            - **Linh hoạt chọn hũ:** Khoản chi chọn toàn bộ 6 hũ chi tiêu; khoản thu chọn nguồn thu nhập.
-            - **Bóc tách ngân hàng chuẩn xác:** Hỗ trợ đầy đủ Techcombank, HDBank, SMS (Samsung, Xiaomi) & các ví điện tử.
+            Bản cập nhật v1.0.3 bổ sung các tính năng đột phá:
+            - **Chủ động thêm & xóa hũ:** Người dùng có thể tạo thêm các hũ mới hoặc xóa hũ hiện tại tùy ý.
+            - **Tùy biến tỷ lệ % mục tiêu:** Tự do đặt tỷ lệ % chia tiền cho từng hũ (không còn bị cố định).
+            - **Lưu trữ hạn mức bền vững:** Khắc phục triệt để lỗi không lưu hạn mức hũ Tiết kiệm, Hưởng thụ, Cho đi lên đám mây.
+            - **Hiển thị phiên bản v1.0.3 trực tiếp:** Dễ dàng nhận biết bản cập nhật mới trên thanh Navbar.
           files: |
-            qltc-v1.0.2.apk
+            qltc-v1.0.3.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

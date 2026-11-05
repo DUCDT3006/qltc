@@ -16,7 +16,7 @@ import {
   INITIAL_CONFIRMED_TRANSACTIONS,
   INITIAL_HOLDINGS
 } from './mockData';
-import { TabType, Transaction, Jar, BankAccount, Holding, IncomeSource } from './types';
+import { TabType, Transaction, Jar, BankAccount, Holding, IncomeSource, UserProfile } from './types';
 
 const API_BASE = 'https://qltc-backend.dtd-store.workers.dev/api';
 
@@ -65,6 +65,20 @@ export function App() {
   const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>(INITIAL_PENDING_TRANSACTIONS);
   const [confirmedTransactions, setConfirmedTransactions] = useState<Transaction[]>(INITIAL_CONFIRMED_TRANSACTIONS);
   const [holdings, setHoldings] = useState<Holding[]>(INITIAL_HOLDINGS);
+
+  // Thông tin người dùng
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_user_profile');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      name: 'Anh Đức',
+      email: 'duc@qltc.local',
+      phone: '',
+      avatar: ''
+    };
+  });
 
   useEffect(() => {
     localStorage.setItem('qltc_income_sources', JSON.stringify(incomeSources));
@@ -166,6 +180,16 @@ export function App() {
             currentPrice: h.current_price,
             unit: h.asset_class === 'gold' ? 'chỉ' : 'cổ/coin'
           })));
+        }
+      }
+
+      // 6. Thông tin người dùng từ D1
+      const userRes = await fetch(`${API_BASE}/user/profile`);
+      if (userRes.ok) {
+        const data = await userRes.json();
+        if (data.user) {
+          setUserProfile(data.user);
+          localStorage.setItem('qltc_user_profile', JSON.stringify(data.user));
         }
       }
     } catch (err) {
@@ -477,6 +501,23 @@ export function App() {
     setCurrentTab('transactions');
   };
 
+  // Cập nhật thông tin hồ sơ cá nhân
+  const handleUpdateUserProfile = async (updated: Partial<UserProfile>) => {
+    const newProfile = { ...userProfile, ...updated };
+    setUserProfile(newProfile);
+    localStorage.setItem('qltc_user_profile', JSON.stringify(newProfile));
+
+    try {
+      await fetch(`${API_BASE}/user/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated)
+      });
+    } catch (e) {
+      console.error('Lỗi lưu thông tin cá nhân:', e);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#161C1E] via-[#0E1314] to-[#0A0D0E] text-[#F2F5F5] flex flex-col justify-between max-w-md mx-auto relative shadow-2xl overflow-x-hidden">
       {/* Glow effect at top */}
@@ -489,6 +530,7 @@ export function App() {
         onOpenSettings={() => setIsSettingsOpen(true)}
         onRefresh={handleRefresh}
         isSyncing={isSyncing}
+        userProfile={userProfile}
       />
 
       {/* Main View Area */}
@@ -572,6 +614,8 @@ export function App() {
         onSimulateNotification={handleSimulateNotification}
         onReprocessSuccess={loadDataFromBackend}
         onOpenResetModal={() => setIsResetOpen(true)}
+        userProfile={userProfile}
+        onUpdateUserProfile={handleUpdateUserProfile}
       />
 
       {/* Reset & Financial Calibration Modal */}

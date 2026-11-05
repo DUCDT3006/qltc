@@ -15,9 +15,15 @@ import {
   RotateCcw,
   Sparkles,
   ArrowUpCircle,
-  Copy
+  Copy,
+  User,
+  Camera,
+  Mail,
+  Phone,
+  Edit3,
+  Trash2
 } from 'lucide-react';
-import { BankAccount } from '../types';
+import { BankAccount, UserProfile } from '../types';
 import { formatVND } from '../mockData';
 
 interface RawLog {
@@ -41,6 +47,8 @@ interface SettingsModalProps {
   onSimulateNotification: () => void;
   onReprocessSuccess?: () => void;
   onOpenResetModal: () => void;
+  userProfile: UserProfile;
+  onUpdateUserProfile: (updated: Partial<UserProfile>) => Promise<void>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -52,13 +60,114 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onTogglePrivacy,
   onSimulateNotification,
   onReprocessSuccess,
-  onOpenResetModal
+  onOpenResetModal,
+  userProfile,
+  onUpdateUserProfile
 }) => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [name, setName] = useState('');
   const [bankCode, setBankCode] = useState('VCB');
   const [mask, setMask] = useState('');
   const [balanceStr, setBalanceStr] = useState('');
+
+  // Profile edit state
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [profileName, setProfileName] = useState(userProfile?.name || 'Anh Đức');
+  const [profileEmail, setProfileEmail] = useState(userProfile?.email || '');
+  const [profilePhone, setProfilePhone] = useState(userProfile?.phone || '');
+  const [profileAvatar, setProfileAvatar] = useState(userProfile?.avatar || '');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileSaveSuccess, setProfileSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (userProfile) {
+      setProfileName(userProfile.name || 'Anh Đức');
+      setProfileEmail(userProfile.email || '');
+      setProfilePhone(userProfile.phone || '');
+      setProfileAvatar(userProfile.avatar || '');
+    }
+  }, [userProfile, isOpen]);
+
+  // Xử lý nén và chọn ảnh avatar từ điện thoại / máy tính
+  const handleAvatarFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxDim = 250;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxDim) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          }
+        } else {
+          if (height > maxDim) {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          setProfileAvatar(dataUrl);
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Tạo avatar từ icon preset phong cách sang trọng
+  const handleSelectPresetAvatar = (emoji: string) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const grad = ctx.createLinearGradient(0, 0, 128, 128);
+      grad.addColorStop(0, '#3E4F52');
+      grad.addColorStop(1, '#1C2426');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(64, 64, 64, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = '64px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(emoji, 64, 70);
+      setProfileAvatar(canvas.toDataURL('image/png'));
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingProfile(true);
+    try {
+      await onUpdateUserProfile({
+        name: profileName.trim() || 'Anh Đức',
+        email: profileEmail.trim(),
+        phone: profilePhone.trim(),
+        avatar: profileAvatar
+      });
+      setProfileSaveSuccess(true);
+      setTimeout(() => {
+        setProfileSaveSuccess(false);
+        setIsEditingProfile(false);
+      }, 1000);
+    } catch (err) {
+      console.error('Lỗi lưu hồ sơ:', err);
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
 
   // Logs state
   const [showLogs, setShowLogs] = useState(false);
@@ -68,7 +177,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [reprocessMsg, setReprocessMsg] = useState('');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.0.4';
+  const CURRENT_VERSION = 'v1.0.5';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -76,8 +185,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.0.4',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
+    tagName: 'v1.0.5',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -139,8 +248,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.0.4';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk';
+      let latestTag = 'v1.0.5';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk';
       let releaseBody = '';
 
       try {
@@ -191,11 +300,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.0.4',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
+        tagName: 'v1.0.5',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.0.4. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.0.5. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -210,7 +319,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk');
       return;
     }
 
@@ -360,6 +469,187 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <X size={18} />
           </button>
+        </div>
+
+        {/* HỒ SƠ THÔNG TIN CÁ NHÂN */}
+        <div className="bg-gradient-to-br from-[#1E2729] to-[#151D1F] border border-[#8BA5AA]/25 rounded-2xl p-4 shadow-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {/* Avatar circle */}
+              <div className="relative">
+                <div className="w-[50px] h-[50px] rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] border-2 border-[#8CC7AE]/50 flex items-center justify-center font-bold text-lg text-[#F2F5F5] overflow-hidden shadow-md">
+                  {profileAvatar ? (
+                    <img src={profileAvatar} alt={profileName} className="w-full h-full object-cover" />
+                  ) : (
+                    <span>{(profileName?.trim() || 'A')[0].toUpperCase()}</span>
+                  )}
+                </div>
+                {isEditingProfile && (
+                  <label
+                    title="Đổi ảnh đại diện"
+                    className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-[#8CC7AE] text-[#0E1314] flex items-center justify-center cursor-pointer shadow-md hover:scale-105 active:scale-95 transition-transform"
+                  >
+                    <Camera size={12} strokeWidth={2.5} />
+                    <input type="file" accept="image/*" className="hidden" onChange={handleAvatarFileChange} />
+                  </label>
+                )}
+              </div>
+
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm font-bold text-[#F2F5F5]">{profileName || 'Anh Đức'}</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#8CC7AE]/15 text-[#8CC7AE] font-medium">Cá nhân</span>
+                </div>
+                <div className="text-[11.5px] text-[#869699] flex items-center gap-1 mt-0.5">
+                  <Mail size={12} className="text-[#8CC7AE]" />
+                  <span className="truncate max-w-[170px]">{profileEmail || 'Chưa đặt Gmail'}</span>
+                </div>
+                {profilePhone ? (
+                  <div className="text-[11px] text-[#869699] flex items-center gap-1 mt-0.5">
+                    <Phone size={12} className="text-[#8CC7AE]" />
+                    <span>{profilePhone}</span>
+                  </div>
+                ) : (
+                  <div className="text-[10.5px] text-[#6E7F82] italic mt-0.5">Chưa có số điện thoại</div>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setIsEditingProfile(!isEditingProfile)}
+              className="py-1.5 px-3 rounded-xl bg-[#232E31] hover:bg-[#2B393D] text-xs font-semibold text-[#8CC7AE] border border-[#8CC7AE]/25 flex items-center gap-1 active:scale-95 transition-transform"
+            >
+              <Edit3 size={13} />
+              {isEditingProfile ? 'Đóng' : 'Sửa'}
+            </button>
+          </div>
+
+          {/* Form Chỉnh sửa thông tin */}
+          {isEditingProfile && (
+            <form onSubmit={handleSaveProfile} className="pt-3 border-t border-[#8BA5AA]/15 space-y-3 animate-fade-in">
+              <div className="text-[11px] font-semibold text-[#8CC7AE] flex items-center justify-between">
+                <span>Cập nhật thông tin (Không bắt buộc)</span>
+                <span className="text-[10px] text-[#869699] font-normal">Có thể để mặc định</span>
+              </div>
+
+              {/* Tùy chọn Avatar */}
+              <div className="space-y-1.5">
+                <label className="text-[11px] text-[#97A8AB] font-medium block">Ảnh đại diện (Avatar):</label>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="cursor-pointer py-1.5 px-3 rounded-xl bg-[#232E31] border border-[#8BA5AA]/30 text-[11px] font-semibold text-[#BFD0D3] flex items-center gap-1.5 hover:bg-[#2A373B] active:scale-95 transition-transform">
+                    <Camera size={13} className="text-[#8CC7AE]" />
+                    Tải ảnh từ máy
+                    <input type="file" accept="image/*" className="hidden" onChange={handleAvatarFileChange} />
+                  </label>
+
+                  {profileAvatar && (
+                    <button
+                      type="button"
+                      onClick={() => setProfileAvatar('')}
+                      className="py-1.5 px-2.5 rounded-xl bg-[#291B1D] text-[#E07A5F] border border-[#E07A5F]/30 text-[11px] font-semibold flex items-center gap-1 active:scale-95 transition-transform"
+                    >
+                      <Trash2 size={12} />
+                      Gỡ ảnh
+                    </button>
+                  )}
+                </div>
+
+                {/* Preset icons sang trọng */}
+                <div className="flex items-center gap-1.5 pt-1">
+                  <span className="text-[10px] text-[#869699]">Icon mẫu:</span>
+                  {['👔', '🕶️', '⚡', '💎', '👑', '🎯'].map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => handleSelectPresetAvatar(emoji)}
+                      className="w-7 h-7 rounded-lg bg-[#232E31] hover:bg-[#2B393D] border border-[#8BA5AA]/20 flex items-center justify-center text-sm active:scale-90 transition-transform"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Nhập Họ tên */}
+              <div className="space-y-1">
+                <label className="text-[11px] text-[#97A8AB] font-medium block">Họ và tên / Biệt danh:</label>
+                <div className="relative">
+                  <User size={14} className="absolute left-3 top-2.5 text-[#869699]" />
+                  <input
+                    type="text"
+                    placeholder="VD: Anh Đức, Đức Dương..."
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                    className="w-full bg-[#121617] border border-[#8BA5AA]/25 rounded-xl pl-8 pr-3 py-2 text-xs text-[#F2F5F5] placeholder-[#576466] focus:outline-none focus:border-[#8CC7AE]/50"
+                  />
+                </div>
+              </div>
+
+              {/* Nhập Gmail */}
+              <div className="space-y-1">
+                <label className="text-[11px] text-[#97A8AB] font-medium block">Gmail / Email:</label>
+                <div className="relative">
+                  <Mail size={14} className="absolute left-3 top-2.5 text-[#869699]" />
+                  <input
+                    type="email"
+                    placeholder="VD: duongthuongduc@gmail.com"
+                    value={profileEmail}
+                    onChange={(e) => setProfileEmail(e.target.value)}
+                    className="w-full bg-[#121617] border border-[#8BA5AA]/25 rounded-xl pl-8 pr-3 py-2 text-xs text-[#F2F5F5] placeholder-[#576466] focus:outline-none focus:border-[#8CC7AE]/50"
+                  />
+                </div>
+              </div>
+
+              {/* Nhập Số điện thoại */}
+              <div className="space-y-1">
+                <label className="text-[11px] text-[#97A8AB] font-medium block">Số điện thoại:</label>
+                <div className="relative">
+                  <Phone size={14} className="absolute left-3 top-2.5 text-[#869699]" />
+                  <input
+                    type="tel"
+                    placeholder="VD: 0912 345 678"
+                    value={profilePhone}
+                    onChange={(e) => setProfilePhone(e.target.value)}
+                    className="w-full bg-[#121617] border border-[#8BA5AA]/25 rounded-xl pl-8 pr-3 py-2 text-xs text-[#F2F5F5] placeholder-[#576466] focus:outline-none focus:border-[#8CC7AE]/50"
+                  />
+                </div>
+              </div>
+
+              <div className="text-[10px] text-[#869699] italic">
+                💡 Thông tin cá nhân này không bắt buộc. Anh có thể để mặc định hoặc thay đổi bất cứ khi nào theo ý muốn.
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsEditingProfile(false)}
+                  className="flex-1 py-2 rounded-xl bg-[#232E31] text-[#97A8AB] text-xs font-semibold hover:bg-[#283538] active:scale-95 transition-transform"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingProfile}
+                  className="flex-1 py-2 rounded-xl bg-[#8CC7AE] hover:bg-[#9ED4BD] text-[#0E1314] text-xs font-bold shadow-md flex items-center justify-center gap-1.5 active:scale-95 transition-transform disabled:opacity-50"
+                >
+                  {isSavingProfile ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      Đang lưu...
+                    </>
+                  ) : profileSaveSuccess ? (
+                    <>
+                      <CheckCircle2 size={14} />
+                      Đã lưu!
+                    </>
+                  ) : (
+                    'Lưu thông tin'
+                  )}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
 
         {/* Nút mở Thiết lập lại tài chính & Reset dữ liệu */}

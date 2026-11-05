@@ -468,6 +468,56 @@ app.get('/api/overview', async (c) => {
   });
 });
 
+// Thông tin hồ sơ người dùng
+app.get('/api/user/profile', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  let user = await db.prepare('SELECT id, email, name, phone, avatar FROM users WHERE id = ?')
+    .bind(userId).first<{ id: string; email: string; name: string; phone: string | null; avatar: string | null }>();
+  if (!user) {
+    await db.prepare('INSERT OR IGNORE INTO users (id, email, name) VALUES (?, ?, ?)')
+      .bind(userId, 'duc@qltc.local', 'Anh Đức').run();
+    user = { id: userId, email: 'duc@qltc.local', name: 'Anh Đức', phone: null, avatar: null };
+  }
+  return c.json({ user });
+});
+
+// Cập nhật thông tin hồ sơ người dùng
+app.put('/api/user/profile', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{ name?: string; email?: string; phone?: string; avatar?: string }>();
+  
+  const current = await db.prepare('SELECT id, email, name, phone, avatar FROM users WHERE id = ?')
+    .bind(userId).first<{ id: string; email: string; name: string; phone: string | null; avatar: string | null }>();
+  
+  const newName = body.name !== undefined ? body.name.trim() : (current?.name || 'Anh Đức');
+  const newEmail = body.email !== undefined ? body.email.trim() : (current?.email || 'duc@qltc.local');
+  const newPhone = body.phone !== undefined ? body.phone.trim() : (current?.phone || null);
+  const newAvatar = body.avatar !== undefined ? body.avatar : (current?.avatar || null);
+
+  await db.prepare(`
+    INSERT INTO users (id, name, email, phone, avatar)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      email = excluded.email,
+      phone = excluded.phone,
+      avatar = excluded.avatar
+  `).bind(userId, newName, newEmail, newPhone, newAvatar).run();
+
+  return c.json({
+    success: true,
+    user: {
+      id: userId,
+      name: newName,
+      email: newEmail,
+      phone: newPhone,
+      avatar: newAvatar
+    }
+  });
+});
+
 // Danh sách các hũ
 app.get('/api/jars', async (c) => {
   const db = c.env.DB;
@@ -755,7 +805,7 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
@@ -773,7 +823,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.0.4.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.0.5.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -785,8 +835,8 @@ app.get('/api/download-apk', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.4',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
+    version: '1.0.5',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

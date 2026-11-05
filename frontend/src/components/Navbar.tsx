@@ -1,5 +1,6 @@
 import React from 'react';
 import { Bell, RefreshCw } from 'lucide-react';
+import { UserProfile } from '../types';
 
 interface NavbarProps {
   pendingCount: number;
@@ -7,6 +8,7 @@ interface NavbarProps {
   onOpenSettings: () => void;
   onRefresh?: () => void;
   isSyncing?: boolean;
+  userProfile?: UserProfile;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -14,24 +16,41 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenInbox,
   onOpenSettings,
   onRefresh,
-  isSyncing = false
+  isSyncing = false,
+  userProfile
 }) => {
+  const initial = (userProfile?.name?.trim() || 'A')[0].toUpperCase();
+  const displayName = userProfile?.name?.trim();
+  const greeting = displayName
+    ? (displayName.toLowerCase().startsWith('chào') ? displayName : `Chào ${displayName}`)
+    : 'Chào anh';
+
   return (
     <header className="flex items-center justify-between px-5 pt-4 pb-3">
       <div className="flex items-center gap-3">
         <button
           onClick={onOpenSettings}
           title="Tài khoản & Cài đặt"
-          className="w-10 h-10 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm active:scale-95 transition-transform"
+          className="w-10 h-10 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm active:scale-95 transition-transform overflow-hidden relative"
         >
-          A
+          {userProfile?.avatar ? (
+            <img
+              src={userProfile.avatar}
+              alt={displayName || 'Avatar'}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <span>{initial}</span>
+          )}
         </button>
         <div>
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-[#869699] font-medium">Hôm nay</span>
-            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">v1.0.4</span>
+            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">v1.0.5</span>
           </div>
-          <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight">Chào anh</div>
+          <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight truncate max-w-[150px]">
+            {greeting}
+          </div>
         </div>
       </div>
 

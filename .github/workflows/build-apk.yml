@@ -34,32 +34,31 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.4.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.5.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.0.4.apk
+          path: qltc-v1.0.5.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.4
-          name: "QLTC v1.0.4 - Cố định chữ ký số (Sửa triệt để xung đột gói) & Tùy biến toàn diện hũ"
+          tag_name: v1.0.5
+          name: "QLTC v1.0.5 - Tùy chỉnh thông tin cá nhân (Tên, SĐT, Avatar, Gmail) & Chứng chỉ chuẩn"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.4 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.5 - Android APK
 
-            Bản cập nhật v1.0.4 giải quyết triệt để vấn đề cài đặt và bổ sung các tính năng đột phá:
-            - **Cố định chứng chỉ ký số (Permanent Keystore):** Khắc phục hoàn toàn lỗi "xung đột với một gói hiện có" khi cài đè các phiên bản sau này.
-            - **Chủ động thêm & xóa hũ:** Người dùng có thể tạo thêm các hũ mới hoặc xóa hũ hiện tại tùy ý.
-            - **Tùy biến tỷ lệ % mục tiêu:** Tự do đặt tỷ lệ % chia tiền cho từng hũ (không còn bị cố định).
-            - **Lưu trữ hạn mức bền vững:** Khắc phục triệt để lỗi không lưu hạn mức hũ Tiết kiệm, Hưởng thụ, Cho đi lên đám mây D1.
-            - **Hiển thị phiên bản v1.0.4 trực tiếp:** Dễ dàng nhận biết bản cập nhật mới trên thanh Navbar.
+            Bản cập nhật v1.0.5 bổ sung các tính năng cá nhân hóa cao cấp:
+            - **Hồ sơ thông tin cá nhân:** Cho phép cập nhật Họ tên, Số điện thoại, Gmail và Ảnh đại diện (Avatar). Có thể để mặc định hoặc tùy chỉnh linh hoạt.
+            - **Tải ảnh đại diện trực tiếp:** Chọn ảnh từ thiết bị hoặc chọn bộ avatar nhận diện đẹp mắt phong cách Dark Matte.
+            - **Chào mừng cá nhân hóa:** Lời chào trên Navbar tự động đồng bộ theo tên thật hoặc biệt danh của người dùng.
+            - **Chứng chỉ ký số cố định:** Cài đè trực tiếp mọi bản cập nhật mà không bao giờ bị lỗi xung đột gói.
           files: |
-            qltc-v1.0.4.apk
+            qltc-v1.0.5.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE,
   name TEXT NOT NULL,
+  phone TEXT,
+  avatar TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

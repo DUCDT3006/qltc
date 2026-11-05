@@ -128,32 +128,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
       if (res.ok) {
         const data = await res.json();
-        const latestTag = data.tag_name || '';
+        const latestTag = data.tag_name || 'v1.0.1';
         const apkAsset = Array.isArray(data.assets)
           ? data.assets.find((a: any) => a.name.endsWith('.apk'))
           : null;
-        const apkUrl = apkAsset ? apkAsset.browser_download_url : data.html_url;
+        const apkUrl = apkAsset ? apkAsset.browser_download_url : `https://github.com/DUCDT3006/qltc/releases/download/${latestTag}/qltc-${latestTag}.apk`;
 
-        const hasUpdate = latestTag !== CURRENT_VERSION && latestTag > CURRENT_VERSION;
+        // Lấy version native nếu chạy trong Android app
+        const nativeVer = (window as any).AndroidBridge && typeof (window as any).AndroidBridge.getNativeApkVersion === 'function'
+          ? (window as any).AndroidBridge.getNativeApkVersion()
+          : null;
+
+        const isOlder = nativeVer ? nativeVer !== latestTag.replace('v', '') : false;
 
         setLatestRelease({
           tagName: latestTag,
           apkUrl,
-          hasUpdate,
+          hasUpdate: true,
           body: data.body
         });
 
-        if (!hasUpdate) {
-          setUpdateCheckedMsg(`Anh đang sử dụng bản mới nhất (${CURRENT_VERSION})! Toàn bộ giao diện web luôn được tự động cập nhật tức thì.`);
+        if (isOlder) {
+          setUpdateCheckedMsg(`Điện thoại đang chạy bản cũ (${nativeVer}). Đã có bản mới (${latestTag})!`);
+        } else {
+          setUpdateCheckedMsg(`Phiên bản mới nhất trên máy chủ là ${latestTag}. Anh có thể tải cài đặt trực tiếp bên dưới.`);
         }
       } else {
-        setUpdateCheckedMsg('Không thể kiểm tra bản cập nhật lúc này.');
+        setUpdateCheckedMsg('Không thể kiểm tra bản cập nhật lúc này. Anh có thể tải trực tiếp bản mới bên dưới.');
       }
     } catch {
-      setUpdateCheckedMsg('Lỗi kết nối khi kiểm tra cập nhật.');
+      setUpdateCheckedMsg('Không thể kết nối máy chủ GitHub. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
+  };
+
+  const handleDownloadApk = (url: string) => {
+    if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
+      (window as any).AndroidBridge.openExternalUrl(url);
+      return;
+    }
+    window.open(url, '_blank');
   };
 
   if (!isOpen) return null;
@@ -346,37 +361,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             ⚡ <strong>Cập nhật tức thì (OTA):</strong> Giao diện và các tính năng mới luôn tự động cập nhật qua mạng mỗi khi anh vuốt làm mới hoặc mở app.
           </div>
 
-          <button
-            onClick={handleCheckUpdate}
-            disabled={isCheckingUpdate}
-            className="w-full py-2 rounded-xl bg-[#232E31] hover:bg-[#2C383C] border border-[#8BA5AA]/25 text-xs font-semibold text-[#D5E1E3] flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
-          >
-            <RefreshCw size={13} className={isCheckingUpdate ? 'animate-spin' : ''} />
-            {isCheckingUpdate ? 'Đang kiểm tra...' : 'Kiểm tra phiên bản mới'}
-          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={handleCheckUpdate}
+              disabled={isCheckingUpdate}
+              className="py-2.5 rounded-xl bg-[#232E31] hover:bg-[#2C383C] border border-[#8BA5AA]/25 text-xs font-semibold text-[#D5E1E3] flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
+            >
+              <RefreshCw size={13} className={isCheckingUpdate ? 'animate-spin' : ''} />
+              {isCheckingUpdate ? 'Đang kiểm tra...' : 'Kiểm tra bản mới'}
+            </button>
 
-          {latestRelease?.hasUpdate && (
-            <div className="p-3 rounded-xl bg-[#8CC7AE]/15 border border-[#8CC7AE]/30 space-y-2 animate-fade-in">
-              <div className="flex items-center justify-between text-xs font-bold text-[#8CC7AE]">
-                <span>Đã có phiên bản mới ({latestRelease.tagName})!</span>
-              </div>
-              <div className="text-[11px] text-[#C4D0D2]">
-                Bản nâng cấp có cải tiến mới cho ứng dụng Android.
-              </div>
-              <a
-                href={latestRelease.apkUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="w-full py-2 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-95 transition-transform"
-              >
-                <ArrowUpCircle size={15} /> Tải & Cài đặt APK mới ngay
-              </a>
+            <button
+              onClick={() => handleDownloadApk(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.1/qltc-v1.0.1.apk')}
+              className="py-2.5 rounded-xl bg-[#657D81] hover:bg-[#769195] text-[#F2F5F5] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-98 transition-transform border border-[#8BA5AA]/30"
+            >
+              <ArrowUpCircle size={14} />
+              Tải APK {latestRelease?.tagName || 'v1.0.1'}
+            </button>
+          </div>
+
+          {updateCheckedMsg && (
+            <div className="text-[11px] text-[#8CC7AE] bg-[#8CC7AE]/10 border border-[#8CC7AE]/20 rounded-xl p-2.5 text-center leading-relaxed animate-fade-in">
+              {updateCheckedMsg}
             </div>
           )}
 
-          {updateCheckedMsg && (
-            <div className="text-[11px] text-[#869699] bg-[#121617] border border-[#8BA5AA]/15 rounded-lg p-2 text-center animate-fade-in">
-              {updateCheckedMsg}
+          {latestRelease && (
+            <div className="p-3 rounded-xl bg-[#1C2527] border border-[#8CC7AE]/25 space-y-2 animate-fade-in">
+              <div className="flex items-center justify-between text-xs font-bold text-[#8CC7AE]">
+                <span>Bản mới nhất: {latestRelease.tagName}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-[#8CC7AE]/15 text-[#8CC7AE]">Sẵn sàng tải</span>
+              </div>
+              <div className="text-[10.5px] text-[#869699] leading-relaxed">
+                Tự động bóc tách Techcombank, HDBank, SMS (Samsung, Xiaomi) & các ví điện tử.
+              </div>
+              <button
+                onClick={() => handleDownloadApk(latestRelease.apkUrl)}
+                className="w-full py-2.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-95 transition-transform"
+              >
+                <Download size={14} /> Tải & Cài đặt {latestRelease.tagName} ngay
+              </button>
             </div>
           )}
         </div>

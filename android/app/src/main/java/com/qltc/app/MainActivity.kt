@@ -9,6 +9,9 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -155,11 +158,66 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
             settings.cacheMode = WebSettings.LOAD_DEFAULT
-            webViewClient = WebViewClient()
-            webChromeClient = android.webkit.WebChromeClient()
+
+            // Xử lý mở trình duyệt ngoài khi người dùng bấm tải APK
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val uri = request?.url ?: return false
+                    val uriStr = uri.toString()
+                    if (uriStr.endsWith(".apk") || uri.host?.contains("github.com") == true) {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, uri)
+                            startActivity(intent)
+                            return true
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                    return false
+                }
+            }
+
+            webChromeClient = WebChromeClient()
+
+            // Lắng nghe sự kiện tải file để mở trình quản lý tải xuống / trình duyệt máy
+            setDownloadListener { downloadUrl, _, _, _, _ ->
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl))
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Không thể mở link tải: $downloadUrl", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            // Gắn Javascript Interface để Web biết được phiên bản APK native
+            addJavascriptInterface(AndroidBridge(this@MainActivity), "AndroidBridge")
         }
         setContentView(webView)
         webView.loadUrl(url)
+    }
+
+    class AndroidBridge(private val context: Context) {
+        @JavascriptInterface
+        fun getNativeApkVersion(): String {
+            return try {
+                val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                pInfo.versionName ?: "1.0.0"
+            } catch (e: Exception) {
+                "1.0.0"
+            }
+        }
+
+        @JavascriptInterface
+        fun openExternalUrl(url: String) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     override fun onBackPressed() {

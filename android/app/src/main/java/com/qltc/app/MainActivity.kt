@@ -156,6 +156,7 @@ class MainActivity : AppCompatActivity() {
             settings.databaseEnabled = true
             settings.cacheMode = WebSettings.LOAD_DEFAULT
             webViewClient = WebViewClient()
+            webChromeClient = android.webkit.WebChromeClient()
         }
         setContentView(webView)
         webView.loadUrl(url)

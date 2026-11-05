@@ -1,5 +1,15 @@
 import React, { useState } from 'react';
-import { X, RotateCcw, AlertTriangle, CheckCircle2, DollarSign, Wallet, TrendingUp, Trash2, Edit3, Save } from 'lucide-react';
+import {
+  X,
+  RotateCcw,
+  AlertTriangle,
+  CheckCircle2,
+  DollarSign,
+  Trash2,
+  Edit3,
+  Save,
+  ShieldAlert
+} from 'lucide-react';
 import { BankAccount, Holding } from '../types';
 import { formatVND } from '../mockData';
 
@@ -11,6 +21,7 @@ interface ResetModalProps {
   accounts: BankAccount[];
   holdings: Holding[];
   onRefreshAll: () => Promise<void>;
+  onDirectReset: (scope: 'transactions' | 'balances' | 'holdings' | 'all') => Promise<void>;
 }
 
 export const ResetModal: React.FC<ResetModalProps> = ({
@@ -18,11 +29,19 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   onClose,
   accounts,
   holdings,
-  onRefreshAll
+  onRefreshAll,
+  onDirectReset
 }) => {
   const [activeTab, setActiveTab] = useState<'reset' | 'accounts' | 'holdings'>('reset');
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  // In-app confirmation dialog state (KHÔNG dùng window.confirm để chạy mượt 100% trên Android)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    desc: string;
+    scope: 'transactions' | 'balances' | 'holdings' | 'all';
+  } | null>(null);
 
   // State chỉnh sửa số dư tài khoản
   const [editingAccId, setEditingAccId] = useState<string | null>(null);
@@ -38,36 +57,18 @@ export const ResetModal: React.FC<ResetModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Xử lý Reset dữ liệu
-  const handleReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'all') => {
-    const confirmText =
-      scope === 'transactions'
-        ? 'Anh có chắc muốn XÓA SẠCH toàn bộ giao dịch (cả chờ duyệt và lịch sử)?'
-        : scope === 'all'
-        ? 'Anh có chắc muốn ĐẶT LẠI TOÀN BỘ về 0 (Xóa giao dịch, số dư về 0, xóa tài sản đầu tư mẫu)?'
-        : 'Anh có chắc muốn thực hiện thao tác này?';
-
-    if (!window.confirm(confirmText)) return;
-
+  // Thực hiện Reset sau khi người dùng bấm xác nhận trong In-app dialog
+  const executeReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'all') => {
     setIsProcessing(true);
     setMessage(null);
+    setConfirmDialog(null);
 
     try {
-      const res = await fetch(`${API_BASE}/reset`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope, clearNotifications: scope === 'all' })
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        setMessage({ text: 'Đã thiết lập lại dữ liệu thành công!', type: 'success' });
-        await onRefreshAll();
-      } else {
-        setMessage({ text: 'Không thể reset: ' + data.message, type: 'error' });
-      }
+      // 1. Cập nhật state trực tiếp ngay lập tức để màn hình phản hồi tức thì
+      await onDirectReset(scope);
+      setMessage({ text: 'Đã thiết lập lại dữ liệu thành công!', type: 'success' });
     } catch {
-      setMessage({ text: 'Lỗi kết nối tới máy chủ.', type: 'error' });
+      setMessage({ text: 'Lỗi khi đặt lại dữ liệu.', type: 'error' });
     } finally {
       setIsProcessing(false);
     }
@@ -100,7 +101,6 @@ export const ResetModal: React.FC<ResetModalProps> = ({
 
   // Xóa tài khoản
   const handleDeleteAccount = async (accId: string, accName: string) => {
-    if (!window.confirm(`Anh có chắc muốn xóa tài khoản "${accName}" không?`)) return;
     try {
       await fetch(`${API_BASE}/accounts/${accId}`, { method: 'DELETE' });
       await onRefreshAll();
@@ -146,9 +146,10 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   };
 
   // Xóa tài sản đầu tư
-  const handleDeleteHolding = async (holdingId: string, symbol: string) => {
-    if (!window.confirm(`Xóa tài sản ${symbol} khỏi danh mục?`)) return;
+  const handleDeleteHolding = async (symbol: string) => {
     try {
+      const assetId = `ast_${symbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+      const holdingId = `hld_${assetId}`;
       await fetch(`${API_BASE}/holdings/${holdingId}`, { method: 'DELETE' });
       await onRefreshAll();
       setMessage({ text: `Đã xóa tài sản ${symbol}.`, type: 'success' });
@@ -207,7 +208,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
           </button>
         </div>
 
-        {/* Notification message */}
+        {/* Thông báo trạng thái */}
         {message && (
           <div
             className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
@@ -221,9 +222,41 @@ export const ResetModal: React.FC<ResetModalProps> = ({
           </div>
         )}
 
+        {/* IN-APP CONFIRMATION POPUP (Không bị phụ thuộc vào window.confirm của Android) */}
+        {confirmDialog && (
+          <div className="p-4 rounded-2xl bg-[#2D1F20] border border-[#E06D6D]/40 space-y-3 animate-fade-in shadow-xl">
+            <div className="flex items-start gap-2.5 text-[#E06D6D]">
+              <ShieldAlert size={20} className="shrink-0 mt-0.5" />
+              <div>
+                <div className="text-xs font-bold text-[#F2F5F5]">{confirmDialog.title}</div>
+                <div className="text-[11px] text-[#C4A8A8] mt-1 leading-relaxed">
+                  {confirmDialog.desc}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="py-2 rounded-xl bg-[#232D30] text-xs font-semibold text-[#D5E1E3] active:scale-95 transition-transform"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                disabled={isProcessing}
+                onClick={() => executeReset(confirmDialog.scope)}
+                className="py-2 rounded-xl bg-[#E06D6D] text-xs font-bold text-[#140E0E] active:scale-95 transition-transform"
+              >
+                {isProcessing ? 'Đang thực hiện...' : 'Đồng ý Đặt lại'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* TAB 1: RESET DỮ LIỆU */}
         {activeTab === 'reset' && (
           <div className="space-y-3">
+            {/* Lựa chọn 1: Reset Giao dịch */}
             <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-4 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="p-2 rounded-xl bg-[#657D81]/20 text-[#D5E1E3] mt-0.5">
@@ -232,37 +265,78 @@ export const ResetModal: React.FC<ResetModalProps> = ({
                 <div className="flex-1">
                   <div className="text-xs font-bold text-[#F2F5F5]">1. Xóa sạch lịch sử giao dịch</div>
                   <div className="text-[11px] text-[#869699] mt-0.5 leading-relaxed">
-                    Xóa toàn bộ các giao dịch mẫu & giao dịch thử nghiệm. Đưa số tiền đã tiêu trong tháng của 6 hũ về 0đ để bắt đầu theo dõi thu chi mới.
+                    Xóa sạch toàn bộ các giao dịch chờ duyệt và đã duyệt. Đưa số tiền đã chi tiêu tháng này của 6 hũ về 0đ để bắt đầu theo dõi thu chi mới.
                   </div>
                 </div>
               </div>
               <button
                 disabled={isProcessing}
-                onClick={() => handleReset('transactions')}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: 'Xóa toàn bộ giao dịch',
+                    desc: 'Toàn bộ danh sách giao dịch chờ duyệt và lịch sử giao dịch sẽ bị xóa sạch. 6 hũ chi tiêu sẽ trở về 0đ đã chi.',
+                    scope: 'transactions'
+                  })
+                }
                 className="w-full py-2.5 rounded-xl bg-[#283538] hover:bg-[#344448] text-xs font-semibold text-[#F2F5F5] border border-[#8BA5AA]/25 active:scale-98 transition-transform"
               >
-                {isProcessing ? 'Đang xử lý...' : 'Xóa sạch tất cả giao dịch'}
+                Xóa sạch tất cả giao dịch
               </button>
             </div>
 
+            {/* Lựa chọn 2: Reset Tài sản đầu tư mẫu */}
+            <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-4 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-[#8CC7AE]/20 text-[#8CC7AE] mt-0.5">
+                  <RotateCcw size={18} />
+                </div>
+                <div className="flex-1">
+                  <div className="text-xs font-bold text-[#F2F5F5]">2. Xóa sạch danh mục đầu tư mẫu</div>
+                  <div className="text-[11px] text-[#869699] mt-0.5 leading-relaxed">
+                    Xóa các mã cổ phiếu, quỹ, bitcoin, vàng mẫu (HPG, FPT, BTC, SJC...) về 0đ để anh tự thêm danh mục đầu tư thực tế của mình.
+                  </div>
+                </div>
+              </div>
+              <button
+                disabled={isProcessing}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: 'Xóa danh mục đầu tư mẫu',
+                    desc: 'Toàn bộ các tài sản đầu tư mẫu sẽ được xóa sạch về 0 để anh tự thêm mã thực tế ở Tab "Tài sản đầu tư".',
+                    scope: 'holdings'
+                  })
+                }
+                className="w-full py-2.5 rounded-xl bg-[#23312E] hover:bg-[#2C3E3A] text-xs font-semibold text-[#8CC7AE] border border-[#8CC7AE]/25 active:scale-98 transition-transform"
+              >
+                Xóa danh mục đầu tư về 0
+              </button>
+            </div>
+
+            {/* Lựa chọn 3: Đặt lại toàn bộ về 0 */}
             <div className="bg-[#241C1C] border border-[#E06D6D]/20 rounded-2xl p-4 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="p-2 rounded-xl bg-[#E06D6D]/20 text-[#E06D6D] mt-0.5">
                   <AlertTriangle size={18} />
                 </div>
                 <div className="flex-1">
-                  <div className="text-xs font-bold text-[#F2F5F5]">2. Đặt lại toàn bộ về 0 (Khởi tạo từ đầu)</div>
+                  <div className="text-xs font-bold text-[#F2F5F5]">3. Đặt lại toàn bộ về 0 (Khởi tạo từ đầu)</div>
                   <div className="text-[11px] text-[#A88C8C] mt-0.5 leading-relaxed">
-                    Xóa toàn bộ giao dịch, đặt số dư các tài khoản về 0đ và xóa toàn bộ tài sản đầu tư mẫu để anh tự nhập tình hình tài chính thực tế từ đầu.
+                    Xóa sạch toàn bộ giao dịch, đặt số dư các thẻ/ví về 0đ và xóa toàn bộ tài sản đầu tư mẫu để anh tự nhập tình hình tài chính thực tế từ đầu.
                   </div>
                 </div>
               </div>
               <button
                 disabled={isProcessing}
-                onClick={() => handleReset('all')}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: 'Khởi tạo lại toàn bộ sổ tài chính về 0',
+                    desc: 'Toàn bộ giao dịch, số dư ngân hàng và tài sản đầu tư mẫu sẽ được đưa về 0đ. Cấu trúc 6 hũ vẫn được bảo toàn để anh bắt đầu nhập mới.',
+                    scope: 'all'
+                  })
+                }
                 className="w-full py-2.5 rounded-xl bg-[#522525] hover:bg-[#682E2E] text-xs font-semibold text-[#FFBEBE] border border-[#E06D6D]/30 active:scale-98 transition-transform"
               >
-                {isProcessing ? 'Đang xử lý...' : 'Đặt lại toàn bộ sổ tài chính về 0'}
+                Đặt lại toàn bộ sổ tài chính về 0
               </button>
             </div>
           </div>
@@ -420,35 +494,41 @@ export const ResetModal: React.FC<ResetModalProps> = ({
               <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block">
                 Danh mục hiện tại ({holdings.length})
               </span>
-              {holdings.map((h) => (
-                <div
-                  key={h.symbol}
-                  className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-xl p-2.5 flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <div className="font-bold text-[#F2F5F5] flex items-center gap-1.5">
-                      <span>{h.symbol}</span>
-                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#232E31] text-[#869699] font-normal">
-                        {h.assetClass}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-[#869699]">
-                      {h.quantity} x {formatVND(h.currentPrice)}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-[#8CC7AE] num">
-                      {formatVND(h.quantity * h.currentPrice)}
-                    </span>
-                    <button
-                      onClick={() => handleDeleteHolding(h.symbol, h.symbol)}
-                      className="w-6 h-6 rounded bg-[#282121] text-[#E06D6D] flex items-center justify-center active:scale-90"
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
+              {holdings.length === 0 ? (
+                <div className="text-center py-4 text-xs text-[#869699] bg-[#161C1E] rounded-xl border border-[#8BA5AA]/10">
+                  Danh mục đầu tư đang trống (0đ)
                 </div>
-              ))}
+              ) : (
+                holdings.map((h) => (
+                  <div
+                    key={h.symbol}
+                    className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-xl p-2.5 flex items-center justify-between text-xs"
+                  >
+                    <div>
+                      <div className="font-bold text-[#F2F5F5] flex items-center gap-1.5">
+                        <span>{h.symbol}</span>
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#232E31] text-[#869699] font-normal">
+                          {h.assetClass}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-[#869699]">
+                        {h.quantity} x {formatVND(h.currentPrice)}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#8CC7AE] num">
+                        {formatVND(h.quantity * h.currentPrice)}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteHolding(h.symbol)}
+                        className="w-6 h-6 rounded bg-[#282121] text-[#E06D6D] flex items-center justify-center active:scale-90"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}

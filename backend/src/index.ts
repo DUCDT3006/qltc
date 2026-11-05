@@ -342,10 +342,13 @@ app.get('/api/transactions', async (c) => {
 app.put('/api/transactions/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
+  const userId = 'user_default';
   const body = await c.req.json<{
     status?: 'confirmed' | 'rejected';
     jarId?: string;
+    jarCode?: string;
     categoryId?: string;
+    categoryName?: string;
     notes?: string;
   }>();
 
@@ -359,6 +362,13 @@ app.put('/api/transactions/:id', async (c) => {
   if (body.jarId) {
     updates.push('jar_id = ?');
     params.push(body.jarId);
+  } else if (body.jarCode) {
+    const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
+      .bind(userId, body.jarCode).first<{ id: string }>();
+    if (jar) {
+      updates.push('jar_id = ?');
+      params.push(jar.id);
+    }
   }
   if (body.categoryId) {
     updates.push('category_id = ?');
@@ -463,7 +473,13 @@ app.get('/api/jars', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const { results } = await db.prepare(`
-    SELECT * FROM jars WHERE user_id = ? ORDER BY sort_order ASC
+    SELECT j.*,
+           COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.status = 'confirmed' AND strftime('%Y-%m', t.occurred_at) = strftime('%Y-%m', 'now') THEN t.amount ELSE 0 END), 0) as spent_this_month
+    FROM jars j
+    LEFT JOIN transactions t ON t.jar_id = j.id
+    WHERE j.user_id = ?
+    GROUP BY j.id
+    ORDER BY j.sort_order ASC
   `).bind(userId).all();
   return c.json({ jars: results });
 });
@@ -637,7 +653,7 @@ app.post('/api/reset', async (c) => {
   if (body.scope === 'transactions' || body.scope === 'all') {
     // 1. Xóa sạch lịch sử giao dịch
     await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
-    if (body.clearNotifications) {
+    if (body.clearNotifications || body.scope === 'all') {
       await db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId).run();
     }
   }
@@ -650,6 +666,7 @@ app.post('/api/reset', async (c) => {
   if (body.scope === 'holdings' || body.scope === 'all') {
     // 3. Xóa sạch tài sản đầu tư mẫu
     await db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId).run();
+    await db.prepare('DELETE FROM assets').run();
   }
 
   return c.json({

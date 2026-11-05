@@ -86,7 +86,7 @@ export function App() {
       const confRes = await fetch(`${API_BASE}/transactions?status=confirmed&limit=50`);
       if (confRes.ok) {
         const data = await confRes.json();
-        if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+        if (Array.isArray(data.transactions)) {
           const mapped: Transaction[] = data.transactions.map((t: any) => ({
             id: t.id,
             bankCode: t.bank_code || 'BANK',
@@ -109,7 +109,7 @@ export function App() {
       const accRes = await fetch(`${API_BASE}/accounts`);
       if (accRes.ok) {
         const data = await accRes.json();
-        if (Array.isArray(data.accounts) && data.accounts.length > 0) {
+        if (Array.isArray(data.accounts)) {
           setAccounts(data.accounts.map((a: any) => ({
             id: a.id,
             name: a.name,
@@ -125,7 +125,7 @@ export function App() {
       const jarsRes = await fetch(`${API_BASE}/jars`);
       if (jarsRes.ok) {
         const data = await jarsRes.json();
-        if (Array.isArray(data.jars) && data.jars.length > 0) {
+        if (Array.isArray(data.jars)) {
           setJars(data.jars.map((j: any) => ({
             id: j.id,
             code: j.code,
@@ -142,7 +142,7 @@ export function App() {
       const holdingsRes = await fetch(`${API_BASE}/holdings`);
       if (holdingsRes.ok) {
         const data = await holdingsRes.json();
-        if (Array.isArray(data.holdings) && data.holdings.length > 0) {
+        if (Array.isArray(data.holdings)) {
           setHoldings(data.holdings.map((h: any) => ({
             symbol: h.symbol,
             name: h.name,
@@ -186,13 +186,16 @@ export function App() {
   const netWorth = liquidCash + totalInvestments;
 
   // Xác nhận giao dịch (approve / swipe right)
-  const handleConfirmTransaction = async (id: string) => {
+  const handleConfirmTransaction = async (id: string, jarCode?: string, categoryName?: string) => {
     const txn = pendingTransactions.find(t => t.id === id);
     if (txn) {
+      const finalJarCode = jarCode || txn.suggestedJarCode || 'NEC';
+      const finalCategory = categoryName || txn.suggestedCategory;
+
       // 1. Cập nhật số tiền vào hũ nếu là expense
-      if (txn.type === 'expense' && txn.suggestedJarCode) {
+      if (txn.type === 'expense' && finalJarCode) {
         setJars(prev => prev.map(j => {
-          if (j.code === txn.suggestedJarCode) {
+          if (j.code === finalJarCode) {
             return { ...j, spentThisMonth: j.spentThisMonth + txn.amount };
           }
           return j;
@@ -200,7 +203,13 @@ export function App() {
       }
 
       // 2. Chuyển sang danh sách đã xác nhận
-      setConfirmedTransactions(prev => [{ ...txn, status: 'confirmed' }, ...prev]);
+      const confirmedTxn: Transaction = {
+        ...txn,
+        suggestedJarCode: finalJarCode,
+        suggestedCategory: finalCategory,
+        status: 'confirmed'
+      };
+      setConfirmedTransactions(prev => [confirmedTxn, ...prev]);
 
       // 3. Trừ khỏi danh sách chờ
       setPendingTransactions(prev => prev.filter(t => t.id !== id));
@@ -210,7 +219,11 @@ export function App() {
         await fetch(`${API_BASE}/transactions/${id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'confirmed' })
+          body: JSON.stringify({
+            status: 'confirmed',
+            jarCode: finalJarCode,
+            categoryName: finalCategory
+          })
         });
       } catch (err) {
         console.error('Lỗi cập nhật giao dịch:', err);
@@ -231,6 +244,35 @@ export function App() {
       });
     } catch (err) {
       console.error('Lỗi từ chối giao dịch:', err);
+    }
+  };
+
+  // Thực hiện Reset trực tiếp (Zero out state)
+  const handleDirectReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'all') => {
+    // 1. Cập nhật ngay trên bộ nhớ React để UI cập nhật về 0 tức thì
+    if (scope === 'transactions' || scope === 'all') {
+      setPendingTransactions([]);
+      setConfirmedTransactions([]);
+      setJars(prev => prev.map(j => ({ ...j, spentThisMonth: 0 })));
+    }
+    if (scope === 'balances' || scope === 'all') {
+      setAccounts(prev => prev.map(a => ({ ...a, balance: 0 })));
+    }
+    if (scope === 'holdings' || scope === 'all') {
+      setHoldings([]);
+    }
+
+    // 2. Gửi lệnh xóa lên Cloudflare D1
+    try {
+      await fetch(`${API_BASE}/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, clearNotifications: true })
+      });
+      // Tải lại để đồng bộ hoàn toàn với database
+      await loadDataFromBackend();
+    } catch (err) {
+      console.error('Lỗi gọi API reset:', err);
     }
   };
 
@@ -371,6 +413,8 @@ export function App() {
             onReject={handleRejectTransaction}
             onDeleteConfirmed={handleDeleteConfirmed}
             onBack={() => setCurrentTab('dashboard')}
+            jars={jars}
+            incomeSources={incomeSources}
           />
         )}
 
@@ -428,6 +472,7 @@ export function App() {
         accounts={accounts}
         holdings={holdings}
         onRefreshAll={loadDataFromBackend}
+        onDirectReset={handleDirectReset}
       />
     </div>
   );

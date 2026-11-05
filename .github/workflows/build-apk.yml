@@ -34,38 +34,40 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.0.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.1.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.0.0.apk
+          path: qltc-v1.0.1.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.0
-          name: "QLTC v1.0.0 - Bản cài đặt Android"
+          tag_name: v1.0.1
+          name: "QLTC v1.0.1 - Nâng cấp tự động đọc thông báo Techcombank, HDBank & Tất cả ngân hàng"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) - Android APK
-            
-            Bản cài đặt ứng dụng Android chính thức tích hợp:
-            - **Đọc thông báo tự động:** Lắng nghe biến động số dư từ Vietcombank, MB, Techcombank, ACB, TPBank, VPBank... (bảo mật tuyệt đối, tự động loại bỏ mã OTP).
-            - **Giao diện Dark Matte Luxury:** Tone màu chuẩn `#657D81`.
-            - **Đa nguồn thu & 6 hũ chi tiêu:** Quản lý dòng tiền, đầu tư Cổ phiếu/Quỹ/Crypto/Vàng.
-            
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.1 - Android APK
+
+            Bản cập nhật v1.0.1 khắc phục và nâng cấp toàn diện:
+            - **Hỗ trợ trọn vẹn Techcombank & HDBank:** Bóc tách chính xác số tiền dù nằm ở tiêu đề hay nội dung riêng biệt.
+            - **Hỗ trợ thêm các app SMS & Ví:** Samsung Messages, Xiaomi SMS, Cake, Timo, MoMo, ZaloPay, Viettel Money.
+            - **Loại bỏ tin nhắn/cuộc gọi cá nhân:** Không còn bị nhầm cuộc gọi Zalo hay tin nhắn thường.
+            - **Đồng bộ thời gian thực:** Kết nối giao diện trực tiếp với Cloudflare D1 để hiển thị tức thì mọi giao dịch chờ duyệt.
+            - **Nhật ký thông báo trực tiếp (Live Logs):** Người dùng có thể tự xem các thông báo app đã bắt được ngay trong Cài đặt.
+
             ### 📥 Hướng dẫn cài đặt nhanh:
-            1. Bấm vào file **`qltc-v1.0.0.apk`** bên dưới để tải về điện thoại.
-            2. Mở file APK vừa tải và chọn **Cài đặt** (Nếu Android hiện cảnh báo ứng dụng ngoài CH Play -> Bấm "Vẫn cài đặt" hoặc "Cho phép cài đặt từ nguồn này").
-            3. Mở app QLTC lần đầu:
-               - Bấm nút **"1. Bật Quyền Truy Cập Thông Báo"** -> Gạt bật cho **QLTC**.
-               - Bấm nút **"2. Tắt Tối Ưu Pin"** -> Chọn Không tối ưu (để app nhận thông báo ngầm liên tục khi tắt màn hình).
-               - Bấm **"3. Mở Ứng Dụng"** để bắt đầu sử dụng!
+            1. Bấm vào file **`qltc-v1.0.1.apk`** bên dưới để tải về điện thoại.
+            2. Mở file APK vừa tải và chọn **Cập nhật** / **Cài đặt**.
+            3. Nếu là Android 13/14+ và công tắc bị mờ:
+               - Bấm nút **"⭐ Mở cài đặt app"** trên màn hình quyền.
+               - Bấm dấu **3 chấm góc phải trên cùng** -> Chọn **"Cho phép cài đặt bị hạn chế"** (Allow restricted settings).
+               - Quay lại bật quyền **Truy cập thông báo** và sử dụng!
           files: |
-            qltc-v1.0.0.apk
+            qltc-v1.0.1.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

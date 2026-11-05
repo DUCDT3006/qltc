@@ -8,7 +8,7 @@ export interface CategorizationResult {
 export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode: string }[] = [
   // 1. DI CHUYỂN (Thiết yếu)
   {
-    keywords: ['GRAB', 'BE GROUP', 'BE VIETNAM', 'TAXI', 'MAI LINH', 'VINASUN', 'XANG', 'PETROLIMEX', 'XEMAY', 'PVOIL', 'VE XE', 'GUI XE'],
+    keywords: ['GRAB', 'BE GROUP', 'BE VIETNAM', 'TAXI', 'MAI LINH', 'VINASUN', 'XANG', 'PETROLIMEX', 'XEMAY', 'PVOIL', 'VE XE', 'GUI XE', 'THUE XE'],
     categoryName: 'Di chuyển',
     jarCode: 'NEC'
   },
@@ -38,7 +38,7 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
   },
   // 6. GIÁO DỤC (EDU)
   {
-    keywords: ['HOC PHI', 'KHOA HOC', 'SACH', 'TIKI BOOKS', 'FAHASA', 'UDEMY', 'COURSERA', 'ENGLISH', 'TIENG ANH'],
+    keywords: ['HOC PHI', 'KHOA HOC', 'SACH', 'TIKI BOOKS', 'FAHASA', 'UDEMY', 'COURSERA', 'ENGLISH', 'TIENG ANH', 'TIEN HOC', 'HOC MO'],
     categoryName: 'Học tập & Sách',
     jarCode: 'EDU'
   },
@@ -69,8 +69,8 @@ export function categorizeTransaction(description: string, type: 'income' | 'exp
     if (upper.includes('CHO THUE') || upper.includes('TIEN NHA')) {
       return { categoryName: 'Cho thuê tài sản', jarCode: 'FFA', confidence: 0.92, matchedKeyword: 'CHO THUE' };
     }
-    if (upper.includes('CO TUC') || upper.includes('LAI TIEN GUI') || upper.includes('LAI TK')) {
-      return { categoryName: 'Thu nhập thụ động & Lãi', jarCode: 'FFA', confidence: 0.95, matchedKeyword: 'CO TUC' };
+    if (upper.includes('CO TUC') || upper.includes('LAI TIEN GUI') || upper.includes('LAI TK') || upper.includes('LOI NHUAN') || upper.includes('SINH LOI')) {
+      return { categoryName: 'Thu nhập thụ động & Lãi', jarCode: 'FFA', confidence: 0.95, matchedKeyword: 'SINH LOI' };
     }
     return { categoryName: 'Thu nhập khác', jarCode: 'NEC', confidence: 0.5 };
   }

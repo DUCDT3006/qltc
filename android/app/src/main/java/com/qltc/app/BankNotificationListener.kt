@@ -2,7 +2,6 @@ package com.qltc.app
 
 import android.app.Notification
 import android.content.Context
-import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -19,7 +18,7 @@ class BankNotificationListener : NotificationListenerService() {
     companion object {
         private const val TAG = "QLTC_Notification"
 
-        // Danh sách các package ngân hàng phổ biến tại Việt Nam
+        // Danh sách các package ngân hàng, ví điện tử & ứng dụng SMS tại Việt Nam
         val SUPPORTED_BANK_PACKAGES = setOf(
             "com.VCB",                         // Vietcombank Digibank
             "com.vcb.digibank",
@@ -37,8 +36,15 @@ class BankNotificationListener : NotificationListenerService() {
             "com.ocb.omni",                     // OCB OMNI
             "vn.vib.vivid",                     // VIB
             "vn.com.sacombank.mbanking",        // Sacombank Pay
-            "com.zing.zalo",                    // Zalo (nếu NH gửi OTT qua Zalo ZNS)
-            "com.google.android.apps.messaging" // SMS mặc định của Android
+            "vn.be.cake",                       // Cake by VPBank
+            "timo.vn.bank",                     // Timo
+            "vn.com.vng.zalopay",               // ZaloPay (loại bỏ com.zing.zalo để tránh cuộc gọi/chat riêng)
+            "com.mservice.momotransfer",        // MoMo
+            "com.viettel.viettelmoney",         // Viettel Money
+            "com.vnpay.bill",                   // VNPAY
+            "com.google.android.apps.messaging",// SMS Google
+            "com.samsung.android.messaging",    // SMS Samsung
+            "com.android.mms"                   // SMS Xiaomi / OPPO / Vivo
         )
     }
 
@@ -59,21 +65,24 @@ class BankNotificationListener : NotificationListenerService() {
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
 
         val fullBody = if (bigText.isNotBlank()) bigText else text
+        if (fullBody.isBlank() && title.isBlank()) return
 
-        if (fullBody.isBlank()) return
+        val combined = "$title $fullBody"
 
         // 2. Tuyệt đối lọc bỏ mã OTP / mã xác thực để đảm bảo an toàn tuyệt đối
-        if (fullBody.contains("OTP", ignoreCase = true) ||
-            fullBody.contains("mã xác nhận", ignoreCase = true) ||
-            fullBody.contains("ma xac thuc", ignoreCase = true)) {
+        if (combined.contains("OTP", ignoreCase = true) ||
+            combined.contains("mã xác nhận", ignoreCase = true) ||
+            combined.contains("ma xac thuc", ignoreCase = true) ||
+            combined.contains("mã kích hoạt", ignoreCase = true)) {
             Log.d(TAG, "Đã bỏ qua thông báo OTP vì lý do bảo mật.")
             return
         }
 
-        // 3. Chỉ nhận diện nếu có dấu hiệu số tiền (+, -, VND, đ)
-        val hasMoneySign = fullBody.contains("+") || fullBody.contains("-") ||
-                           fullBody.contains("VND", ignoreCase = true) ||
-                           fullBody.contains("đ") || fullBody.contains("dong", ignoreCase = true)
+        // 3. Nhận diện dấu hiệu số tiền (+, -, VND, VNĐ, số + đ) ở cả Title lẫn Body
+        val hasMoneySign = combined.contains("+") || combined.contains("-") ||
+                           combined.contains("VND", ignoreCase = true) ||
+                           combined.contains("VNĐ", ignoreCase = true) ||
+                           Regex("""\d+\s*[đd]""").containsMatchIn(combined)
 
         if (!hasMoneySign) {
             return

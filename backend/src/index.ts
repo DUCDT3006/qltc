@@ -129,14 +129,30 @@ app.post('/api/notifications/ingest', async (c) => {
     return c.json({ success: true, duplicate: true, message: 'Giao dịch đã được ghi nhận trước đó', txnId: existing.id });
   }
 
-  // 4. Tìm tài khoản khớp số đuôi
-  const account = await db.prepare(`
-    SELECT id FROM accounts
+  // 4. Tìm tài khoản khớp số đuôi hoặc mã ngân hàng (nếu chưa có thì tự động tạo mới)
+  let account = await db.prepare(`
+    SELECT id, balance FROM accounts
     WHERE user_id = ? AND (bank_code = ? OR account_number_mask = ?) AND is_active = 1
     LIMIT 1
-  `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string }>();
+  `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string; balance: number }>();
 
-  const accountId = account ? account.id : 'acc_vcb';
+  let accountId: string;
+  if (account) {
+    accountId = account.id;
+    // Cập nhật số dư tài khoản nếu thông báo có chứa số dư sau GD
+    if (parsed.balanceAfter !== undefined && parsed.balanceAfter > 0) {
+      await db.prepare('UPDATE accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(parsed.balanceAfter, accountId).run();
+    }
+  } else {
+    // Tự động thêm tài khoản ngân hàng mới vào danh sách tài khoản
+    accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
+    const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
+    await db.prepare(`
+      INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
+      VALUES (?, ?, ?, 'bank', ?, ?, ?)
+    `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, parsed.balanceAfter || 0).run();
+  }
 
   // 5. Tự động phân loại danh mục & hũ
   const cat = categorizeTransaction(parsed.description, parsed.type);
@@ -167,8 +183,9 @@ app.post('/api/notifications/ingest', async (c) => {
     notifId
   ).run();
 
-  // Đánh dấu đã parse thành công
-  await db.prepare('UPDATE raw_notifications SET is_parsed = 1 WHERE id = ?').bind(notifId).run();
+  // Đánh dấu đã parse thành công và ghi mã ngân hàng
+  await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ? WHERE id = ?')
+    .bind(parsed.bankCode, notifId).run();
 
   return c.json({
     success: true,
@@ -186,6 +203,110 @@ app.post('/api/notifications/ingest', async (c) => {
   });
 });
 
+// Xem nhật ký các thông báo Android gần đây (dùng để kiểm tra và debug trên app)
+app.get('/api/notifications/recent', async (c) => {
+  const db = c.env.DB;
+  const limit = parseInt(c.req.query('limit') || '30', 10);
+  const { results } = await db.prepare(`
+    SELECT id, package_name, title, raw_body, bank_code, is_parsed, parse_error, received_at
+    FROM raw_notifications
+    ORDER BY received_at DESC
+    LIMIT ?
+  `).bind(limit).all();
+
+  return c.json({ notifications: results });
+});
+
+// Xử lý lại (reprocess) các thông báo chưa parse được trong quá khứ
+app.post('/api/notifications/reprocess', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+
+  const { results } = await db.prepare(`
+    SELECT id, package_name, title, raw_body FROM raw_notifications
+    WHERE is_parsed = 0
+    ORDER BY received_at ASC
+  `).all<{ id: string; package_name: string; title: string; raw_body: string }>();
+
+  let parsedCount = 0;
+  const createdTxns: any[] = [];
+
+  for (const notif of results) {
+    const parsed = parseBankNotification(notif.package_name, notif.title, notif.raw_body);
+    if (parsed) {
+      const dedupeHash = await generateDedupeHash(
+        parsed.bankCode,
+        parsed.accountMask,
+        parsed.amount,
+        parsed.type,
+        parsed.occurredAt,
+        parsed.description
+      );
+
+      const existing = await db.prepare('SELECT id FROM transactions WHERE dedupe_hash = ?')
+        .bind(dedupeHash).first();
+
+      if (!existing) {
+        // Tìm hoặc tạo tài khoản
+        let account = await db.prepare(`
+          SELECT id FROM accounts
+          WHERE user_id = ? AND (bank_code = ? OR account_number_mask = ?)
+          LIMIT 1
+        `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string }>();
+
+        let accountId: string;
+        if (account) {
+          accountId = account.id;
+        } else {
+          accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
+          const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
+          await db.prepare(`
+            INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
+            VALUES (?, ?, ?, 'bank', ?, ?, ?)
+          `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, parsed.balanceAfter || 0).run();
+        }
+
+        const cat = categorizeTransaction(parsed.description, parsed.type);
+        const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
+          .bind(userId, cat.jarCode).first<{ id: string }>();
+        const jarId = jar ? jar.id : 'jar_nec';
+
+        const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        await db.prepare(`
+          INSERT INTO transactions (
+            id, user_id, account_id, type, amount, occurred_at, description,
+            jar_id, dedupe_hash, status, raw_notification_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        `).bind(
+          txnId,
+          userId,
+          accountId,
+          parsed.type,
+          parsed.amount,
+          parsed.occurredAt,
+          parsed.description,
+          jarId,
+          dedupeHash,
+          notif.id
+        ).run();
+
+        createdTxns.push({ id: txnId, bank: parsed.bankCode, amount: parsed.amount, desc: parsed.description });
+      }
+
+      await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ?, parse_error = NULL WHERE id = ?')
+        .bind(parsed.bankCode, notif.id).run();
+      parsedCount++;
+    }
+  }
+
+  return c.json({
+    success: true,
+    reprocessed: results.length,
+    parsedCount,
+    createdTxns
+  });
+});
+
 // Lấy danh sách giao dịch
 app.get('/api/transactions', async (c) => {
   const db = c.env.DB;
@@ -194,10 +315,13 @@ app.get('/api/transactions', async (c) => {
   const userId = 'user_default';
 
   let query = `
-    SELECT t.*, a.name as account_name, a.bank_code, j.name as jar_name, j.color as jar_color
+    SELECT t.*, a.name as account_name, a.bank_code, a.account_number_mask,
+           j.name as jar_name, j.color as jar_color, j.code as jar_code,
+           r.raw_body
     FROM transactions t
     LEFT JOIN accounts a ON t.account_id = a.id
     LEFT JOIN jars j ON t.jar_id = j.id
+    LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
     WHERE t.user_id = ?
   `;
   const params: any[] = [userId];

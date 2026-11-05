@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { QuickAddModal } from './components/QuickAddModal';
@@ -17,11 +17,34 @@ import {
 } from './mockData';
 import { TabType, Transaction, Jar, BankAccount, Holding, IncomeSource } from './types';
 
+const API_BASE = 'https://qltc-backend.dtd-store.workers.dev/api';
+
+function formatOccurredTime(dateStr?: string): string {
+  if (!dateStr) return 'Vừa xong';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const hours = String(d.getHours()).padStart(2, '0');
+    const mins = String(d.getMinutes()).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    if (isToday) {
+      return `Hôm nay · ${hours}:${mins}`;
+    }
+    return `${day}/${month} · ${hours}:${mins}`;
+  } catch {
+    return dateStr;
+  }
+}
+
 export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // States
   const [jars, setJars] = useState<Jar[]>(INITIAL_JARS);
@@ -31,6 +54,110 @@ export function App() {
   const [confirmedTransactions, setConfirmedTransactions] = useState<Transaction[]>(INITIAL_CONFIRMED_TRANSACTIONS);
   const [holdings, setHoldings] = useState<Holding[]>(INITIAL_HOLDINGS);
 
+  // Tải dữ liệu thật từ Cloudflare D1
+  const loadDataFromBackend = useCallback(async () => {
+    try {
+      // 1. Giao dịch chờ duyệt (Pending)
+      const pendingRes = await fetch(`${API_BASE}/transactions?status=pending`);
+      if (pendingRes.ok) {
+        const data = await pendingRes.json();
+        if (Array.isArray(data.transactions)) {
+          const mapped: Transaction[] = data.transactions.map((t: any) => ({
+            id: t.id,
+            bankCode: t.bank_code || 'BANK',
+            accountMask: t.account_number_mask || '****',
+            accountName: t.account_name || `${t.bank_code || 'Ngân hàng'} · *${t.account_number_mask || ''}`,
+            type: t.type,
+            amount: t.amount,
+            description: t.description,
+            rawQuote: t.raw_body,
+            suggestedCategory: t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu'),
+            suggestedJarCode: t.jar_code || 'NEC',
+            occurredAt: formatOccurredTime(t.occurred_at),
+            status: 'pending'
+          }));
+          setPendingTransactions(mapped);
+        }
+      }
+
+      // 2. Giao dịch đã duyệt (Confirmed)
+      const confRes = await fetch(`${API_BASE}/transactions?status=confirmed&limit=50`);
+      if (confRes.ok) {
+        const data = await confRes.json();
+        if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+          const mapped: Transaction[] = data.transactions.map((t: any) => ({
+            id: t.id,
+            bankCode: t.bank_code || 'BANK',
+            accountMask: t.account_number_mask || '****',
+            accountName: t.account_name || `${t.bank_code || 'Ngân hàng'} · *${t.account_number_mask || ''}`,
+            type: t.type,
+            amount: t.amount,
+            description: t.description,
+            rawQuote: t.raw_body,
+            suggestedCategory: t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu'),
+            suggestedJarCode: t.jar_code || 'NEC',
+            occurredAt: formatOccurredTime(t.occurred_at),
+            status: 'confirmed'
+          }));
+          setConfirmedTransactions(mapped);
+        }
+      }
+
+      // 3. Danh sách tài khoản ngân hàng thật
+      const accRes = await fetch(`${API_BASE}/accounts`);
+      if (accRes.ok) {
+        const data = await accRes.json();
+        if (Array.isArray(data.accounts) && data.accounts.length > 0) {
+          setAccounts(data.accounts.map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            bankCode: a.bank_code,
+            accountNumberMask: a.account_number_mask,
+            balance: a.balance || 0,
+            type: a.type || 'bank'
+          })));
+        }
+      }
+
+      // 4. Danh sách các hũ chi tiêu thật
+      const jarsRes = await fetch(`${API_BASE}/jars`);
+      if (jarsRes.ok) {
+        const data = await jarsRes.json();
+        if (Array.isArray(data.jars) && data.jars.length > 0) {
+          setJars(data.jars.map((j: any) => ({
+            id: j.id,
+            code: j.code,
+            name: j.name,
+            targetPercent: j.target_percent,
+            monthlyLimit: j.monthly_limit,
+            spentThisMonth: j.spent_this_month || 0,
+            color: j.color
+          })));
+        }
+      }
+    } catch (err) {
+      console.warn('Backend chưa sẵn sàng, tiếp tục với bộ nhớ máy:', err);
+    }
+  }, []);
+
+  // Tự động nạp dữ liệu khi mở app
+  useEffect(() => {
+    loadDataFromBackend();
+  }, [loadDataFromBackend]);
+
+  // Nút Làm mới & Đồng bộ
+  const handleRefresh = async () => {
+    setIsSyncing(true);
+    try {
+      // Reprocess unparsed notifications nếu có
+      await fetch(`${API_BASE}/notifications/reprocess`, { method: 'POST' });
+    } catch {
+      // ignore
+    }
+    await loadDataFromBackend();
+    setIsSyncing(false);
+  };
+
   // Tính tổng số dư và tài sản ròng
   const liquidCash = accounts
     .filter(a => ['bank', 'cash', 'ewallet'].includes(a.type))
@@ -39,8 +166,8 @@ export function App() {
   const totalInvestments = holdings.reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
   const netWorth = liquidCash + totalInvestments;
 
-  // Xác nhận giao dịch (approve)
-  const handleConfirmTransaction = (id: string) => {
+  // Xác nhận giao dịch (approve / swipe right)
+  const handleConfirmTransaction = async (id: string) => {
     const txn = pendingTransactions.find(t => t.id === id);
     if (txn) {
       // 1. Cập nhật số tiền vào hũ nếu là expense
@@ -58,12 +185,34 @@ export function App() {
 
       // 3. Trừ khỏi danh sách chờ
       setPendingTransactions(prev => prev.filter(t => t.id !== id));
+
+      // 4. Lưu trạng thái 'confirmed' lên Cloudflare D1
+      try {
+        await fetch(`${API_BASE}/transactions/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'confirmed' })
+        });
+      } catch (err) {
+        console.error('Lỗi cập nhật giao dịch:', err);
+      }
     }
   };
 
-  // Bỏ qua giao dịch (reject)
-  const handleRejectTransaction = (id: string) => {
+  // Bỏ qua giao dịch (reject / swipe left)
+  const handleRejectTransaction = async (id: string) => {
     setPendingTransactions(prev => prev.filter(t => t.id !== id));
+
+    // Lưu trạng thái 'rejected' lên Cloudflare D1
+    try {
+      await fetch(`${API_BASE}/transactions/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'rejected' })
+      });
+    } catch (err) {
+      console.error('Lỗi từ chối giao dịch:', err);
+    }
   };
 
   // Xóa giao dịch đã duyệt
@@ -143,7 +292,7 @@ export function App() {
     const mockBanks = [
       { code: 'VCB', acc: '0071', name: 'Vietcombank · *0071', desc: 'PETROLIMEX DO XANG A95', amt: 70000, cat: 'Di chuyển', jar: 'NEC', raw: 'TK 0071... -70,000 VND luc 18:45 04/11. ND: PETROLIMEX CUA HANG SO 1' },
       { code: 'MB', acc: '0340', name: 'MB Bank · *0340', desc: 'NHAN TIEN FREELANCE WEB', amt: 5500000, cat: 'Thu nhập ngoài / Freelance', jar: 'FFA', raw: 'GD: +5,500,000VND vao 18:50 04/11. TK 0340... ND: THANH TOAN DU AN WEB' },
-      { code: 'TCB', acc: '1902', name: 'Techcombank · *1902', desc: 'KATINAT SAIGON CAFE', amt: 65000, cat: 'Cafe & Trà', jar: 'PLAY', raw: 'TK 1902... -65,000 VND vao 19:02 04/11. ND: KATINAT SAIGON' }
+      { code: 'TCB', acc: '2011', name: 'Techcombank · *2011', desc: 'KATINAT SAIGON CAFE', amt: 65000, cat: 'Cafe & Trà', jar: 'PLAY', raw: 'TK 2011... -65,000 VND vao 19:02 04/11. ND: KATINAT SAIGON' }
     ];
     const picked = mockBanks[Math.floor(Math.random() * mockBanks.length)];
     const newPending: Transaction = {
@@ -174,6 +323,8 @@ export function App() {
         pendingCount={pendingTransactions.length}
         onOpenInbox={() => setCurrentTab('transactions')}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onRefresh={handleRefresh}
+        isSyncing={isSyncing}
       />
 
       {/* Main View Area */}
@@ -247,6 +398,7 @@ export function App() {
         privacyMode={privacyMode}
         onTogglePrivacy={() => setPrivacyMode(!privacyMode)}
         onSimulateNotification={handleSimulateNotification}
+        onReprocessSuccess={loadDataFromBackend}
       />
     </div>
   );

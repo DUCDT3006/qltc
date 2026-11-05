@@ -1,5 +1,5 @@
 export default {
-  async fetch(request: Request, env: { ASSETS: Fetcher }): Promise<Response> {
+  async fetch(request: Request, env: { ASSETS: { fetch: (req: Request | string) => Promise<Response> } }): Promise<Response> {
     const url = new URL(request.url);
     // Serve static assets or fallback to index.html for SPA routing
     let response = await env.ASSETS.fetch(request);

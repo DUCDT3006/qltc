@@ -1,13 +1,21 @@
 import React from 'react';
-import { Bell } from 'lucide-react';
+import { Bell, RefreshCw } from 'lucide-react';
 
 interface NavbarProps {
   pendingCount: number;
   onOpenInbox: () => void;
   onOpenSettings: () => void;
+  onRefresh?: () => void;
+  isSyncing?: boolean;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ pendingCount, onOpenInbox, onOpenSettings }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  pendingCount,
+  onOpenInbox,
+  onOpenSettings,
+  onRefresh,
+  isSyncing = false
+}) => {
   return (
     <header className="flex items-center justify-between px-5 pt-4 pb-3">
       <div className="flex items-center gap-3">
@@ -19,12 +27,24 @@ export const Navbar: React.FC<NavbarProps> = ({ pendingCount, onOpenInbox, onOpe
           A
         </button>
         <div>
-          <div className="text-[11px] text-[#869699] font-medium">Thứ Tư, 04/11</div>
+          <div className="text-[11px] text-[#869699] font-medium">Hôm nay</div>
           <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight">Chào anh</div>
         </div>
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Nút Làm mới / Đồng bộ từ Cloudflare */}
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            disabled={isSyncing}
+            title="Đồng bộ thông báo từ ngân hàng"
+            className="w-9 h-9 rounded-full bg-[#1C2426]/80 border border-[#8BA5AA]/15 flex items-center justify-center text-[#C4D0D2] active:scale-95 transition-transform"
+          >
+            <RefreshCw size={15} className={isSyncing ? 'animate-spin text-[#8CC7AE]' : ''} />
+          </button>
+        )}
+
         {pendingCount > 0 && (
           <button
             onClick={onOpenInbox}

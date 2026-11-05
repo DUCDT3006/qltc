@@ -13,8 +13,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -55,10 +55,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionSetupScreen() {
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(0xFF0E1314.toInt())
+        }
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(60, 100, 60, 60)
-            setBackgroundColor(0xFF0E1314.toInt())
+            setPadding(50, 70, 50, 60)
         }
 
         val title = TextView(this).apply {
@@ -70,12 +73,14 @@ class MainActivity : AppCompatActivity() {
         layout.addView(title)
 
         val desc = TextView(this).apply {
-            text = "\nĐể QLTC có thể tự động ghi nhận giao dịch mỗi khi app ngân hàng thông báo tiền vào/ra, bạn cần cấp quyền 'Truy cập thông báo' 1 lần duy nhất.\n\nLưu ý: Ứng dụng tuyệt đối KHÔNG đọc tin nhắn OTP và chỉ xử lý thông báo số dư ngân hàng."
-            textSize = 14f
+            text = "\nĐể QLTC có thể tự động ghi nhận giao dịch mỗi khi app ngân hàng thông báo tiền vào/ra, bạn cần cấp quyền 'Truy cập thông báo' 1 lần duy nhất.\n\n⚠️ Lưu ý (Android 13/14+):\nNếu mục QLTC bị làm mờ chưa gạt được: Bấm nút 'Cài đặt bị hạn chế' bên dưới > Bấm dấu 3 chấm góc phải trên cùng > Chọn 'Cho phép cài đặt bị hạn chế' (Allow restricted settings), sau đó quay lại gạt bật quyền.\n\n🔒 An toàn tuyệt đối: Ứng dụng KHÔNG đọc mã OTP và KHÔNG yêu cầu mật khẩu ngân hàng."
+            textSize = 13.5f
             setTextColor(0xFF869699.toInt())
+            setLineSpacing(4f, 1.15f)
         }
         layout.addView(desc)
 
+        // 1. Nút mở Cài đặt thông báo
         val btnGrant = Button(this).apply {
             text = "1. Bật Quyền Truy Cập Thông Báo"
             setBackgroundColor(0xFF657D81.toInt())
@@ -86,16 +91,32 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(btnGrant)
 
+        // 2. Nút mở App Info để gỡ Restricted Settings trên Android 13/14+
+        val btnRestricted = Button(this).apply {
+            text = "⭐ Mở cài đặt app (Nếu bị mờ công tắc)"
+            setBackgroundColor(0xFF232E31.toInt())
+            setTextColor(0xFF8CC7AE.toInt())
+            setOnClickListener {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+        }
+        layout.addView(btnRestricted)
+
+        // 3. Tắt tối ưu pin
         val btnBattery = Button(this).apply {
-            text = "2. Tắt Tối Ưu Pin (Để chạy ngầm liên tục)"
-            setBackgroundColor(0xFF232D30.toInt())
-            setTextColor(0xFFF2F5F5.toInt())
+            text = "2. Tắt Tối Ưu Pin (Chạy ngầm liên tục)"
+            setBackgroundColor(0xFF1C2426.toInt())
+            setTextColor(0xFFD5E1E3.toInt())
             setOnClickListener {
                 requestIgnoreBatteryOptimizations()
             }
         }
         layout.addView(btnBattery)
 
+        // 4. Tiếp tục
         val btnContinue = Button(this).apply {
             text = "3. Tôi Đã Bật Xong › Mở Ứng Dụng"
             setBackgroundColor(0xFF8CC7AE.toInt())
@@ -110,7 +131,8 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(btnContinue)
 
-        setContentView(layout)
+        scrollView.addView(layout)
+        setContentView(scrollView)
     }
 
     private fun requestIgnoreBatteryOptimizations() {
@@ -137,5 +159,13 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(webView)
         webView.loadUrl(url)
+    }
+
+    override fun onBackPressed() {
+        if (::webView.isInitialized && webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            super.onBackPressed()
+        }
     }
 }

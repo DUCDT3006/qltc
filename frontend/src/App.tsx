@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { QuickAddModal } from './components/QuickAddModal';
 import { SettingsModal } from './components/SettingsModal';
+import { ResetModal } from './components/ResetModal';
 import { DashboardView } from './views/DashboardView';
 import { InboxSwipeView } from './views/InboxSwipeView';
 import { BudgetView } from './views/BudgetView';
@@ -43,6 +44,7 @@ export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isResetOpen, setIsResetOpen] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -132,6 +134,23 @@ export function App() {
             monthlyLimit: j.monthly_limit,
             spentThisMonth: j.spent_this_month || 0,
             color: j.color
+          })));
+        }
+      }
+
+      // 5. Danh mục đầu tư thật từ D1
+      const holdingsRes = await fetch(`${API_BASE}/holdings`);
+      if (holdingsRes.ok) {
+        const data = await holdingsRes.json();
+        if (Array.isArray(data.holdings) && data.holdings.length > 0) {
+          setHoldings(data.holdings.map((h: any) => ({
+            symbol: h.symbol,
+            name: h.name,
+            assetClass: h.asset_class,
+            quantity: h.quantity,
+            avgCost: h.avg_cost,
+            currentPrice: h.current_price,
+            unit: h.asset_class === 'gold' ? 'chỉ' : 'cổ/coin'
           })));
         }
       }
@@ -399,6 +418,16 @@ export function App() {
         onTogglePrivacy={() => setPrivacyMode(!privacyMode)}
         onSimulateNotification={handleSimulateNotification}
         onReprocessSuccess={loadDataFromBackend}
+        onOpenResetModal={() => setIsResetOpen(true)}
+      />
+
+      {/* Reset & Financial Calibration Modal */}
+      <ResetModal
+        isOpen={isResetOpen}
+        onClose={() => setIsResetOpen(false)}
+        accounts={accounts}
+        holdings={holdings}
+        onRefreshAll={loadDataFromBackend}
       />
     </div>
   );

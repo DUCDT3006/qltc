@@ -478,6 +478,198 @@ app.get('/api/accounts', async (c) => {
   return c.json({ accounts: results });
 });
 
+// Thêm tài khoản mới
+app.post('/api/accounts', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    name: string;
+    balance?: number;
+    bank_code?: string;
+    account_number_mask?: string;
+    type?: string;
+  }>();
+
+  const id = `acc_${Date.now()}`;
+  await db.prepare(`
+    INSERT INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    id,
+    userId,
+    body.name,
+    body.type || 'bank',
+    body.bank_code || null,
+    body.account_number_mask || null,
+    body.balance || 0
+  ).run();
+
+  return c.json({ success: true, id, message: 'Đã thêm tài khoản mới' });
+});
+
+// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên...)
+app.put('/api/accounts/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    name?: string;
+    balance?: number;
+    bank_code?: string;
+    account_number_mask?: string;
+    type?: string;
+  }>();
+
+  const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+  const params: any[] = [];
+
+  if (body.name !== undefined) {
+    updates.push('name = ?');
+    params.push(body.name);
+  }
+  if (body.balance !== undefined) {
+    updates.push('balance = ?');
+    params.push(body.balance);
+  }
+  if (body.bank_code !== undefined) {
+    updates.push('bank_code = ?');
+    params.push(body.bank_code);
+  }
+  if (body.account_number_mask !== undefined) {
+    updates.push('account_number_mask = ?');
+    params.push(body.account_number_mask);
+  }
+  if (body.type !== undefined) {
+    updates.push('type = ?');
+    params.push(body.type);
+  }
+
+  params.push(id);
+  params.push(userId);
+
+  await db.prepare(`UPDATE accounts SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
+  return c.json({ success: true, message: 'Đã cập nhật tài khoản' });
+});
+
+// Xóa tài khoản
+app.delete('/api/accounts/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await db.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true, message: 'Đã xóa tài khoản' });
+});
+
+// Cập nhật hạn mức hũ chi tiêu
+app.put('/api/jars/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  const body = await c.req.json<{ monthly_limit?: number }>();
+  if (body.monthly_limit !== undefined) {
+    await db.prepare('UPDATE jars SET monthly_limit = ? WHERE id = ? AND user_id = ?')
+      .bind(body.monthly_limit, id, userId).run();
+  }
+  return c.json({ success: true, message: 'Đã cập nhật hạn mức hũ' });
+});
+
+// Danh sách tài sản đầu tư
+app.get('/api/holdings', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const { results } = await db.prepare(`
+    SELECT h.id, h.quantity, h.avg_cost, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price
+    FROM holdings h
+    JOIN assets a ON h.asset_id = a.id
+    WHERE h.user_id = ?
+  `).bind(userId).all();
+  return c.json({ holdings: results });
+});
+
+// Lưu / cập nhật tài sản đầu tư
+app.post('/api/holdings', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    symbol: string;
+    name: string;
+    assetClass: 'stock' | 'fund' | 'crypto' | 'gold';
+    quantity: number;
+    avgCost: number;
+    currentPrice: number;
+  }>();
+
+  const assetId = `ast_${body.symbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  await db.prepare(`
+    INSERT INTO assets (id, symbol, name, asset_class, current_price, price_updated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(symbol) DO UPDATE SET current_price = excluded.current_price, name = excluded.name
+  `).bind(assetId, body.symbol.toUpperCase(), body.name, body.assetClass, body.currentPrice).run();
+
+  const holdingId = `hld_${assetId}`;
+  await db.prepare(`
+    INSERT INTO holdings (id, user_id, asset_id, quantity, avg_cost, updated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(id) DO UPDATE SET quantity = excluded.quantity, avg_cost = excluded.avg_cost
+  `).bind(holdingId, userId, assetId, body.quantity, body.avgCost).run();
+
+  return c.json({ success: true, message: 'Đã lưu tài sản đầu tư' });
+});
+
+// Xóa 1 tài sản đầu tư
+app.delete('/api/holdings/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await db.prepare('DELETE FROM holdings WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true, message: 'Đã xóa tài sản đầu tư' });
+});
+
+// RESET & KHỞI TẠO TÀI CHÍNH THỰC TẾ
+app.post('/api/reset', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    scope: 'transactions' | 'balances' | 'holdings' | 'all';
+    clearNotifications?: boolean;
+  }>();
+
+  if (body.scope === 'transactions' || body.scope === 'all') {
+    // 1. Xóa sạch lịch sử giao dịch
+    await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
+    if (body.clearNotifications) {
+      await db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId).run();
+    }
+  }
+
+  if (body.scope === 'balances' || body.scope === 'all') {
+    // 2. Đặt toàn bộ số dư tài khoản về 0
+    await db.prepare('UPDATE accounts SET balance = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').bind(userId).run();
+  }
+
+  if (body.scope === 'holdings' || body.scope === 'all') {
+    // 3. Xóa sạch tài sản đầu tư mẫu
+    await db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId).run();
+  }
+
+  return c.json({
+    success: true,
+    message: 'Đã thiết lập lại dữ liệu thành công',
+    scope: body.scope
+  });
+});
+
+// Thông tin phiên bản & link cập nhật
+app.get('/api/version', (c) => {
+  return c.json({
+    version: '1.0.1',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.1/qltc-v1.0.1.apk',
+    releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
+    otaUpdated: true,
+    message: 'Giao diện web cập nhật tức thì qua mạng (OTA).'
+  });
+});
+
 export default {
   fetch: app.fetch,
   // Cron Trigger để cập nhật giá cổ phiếu, coin, vàng

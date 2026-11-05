@@ -1,5 +1,21 @@
 import React, { useState, useEffect } from 'react';
-import { X, ShieldCheck, Eye, EyeOff, Download, Plus, Smartphone, RefreshCw, CheckCircle2, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import {
+  X,
+  ShieldCheck,
+  Eye,
+  EyeOff,
+  Download,
+  Plus,
+  Smartphone,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  Sparkles,
+  ArrowUpCircle
+} from 'lucide-react';
 import { BankAccount } from '../types';
 import { formatVND } from '../mockData';
 
@@ -23,6 +39,7 @@ interface SettingsModalProps {
   onTogglePrivacy: () => void;
   onSimulateNotification: () => void;
   onReprocessSuccess?: () => void;
+  onOpenResetModal: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -33,7 +50,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   privacyMode,
   onTogglePrivacy,
   onSimulateNotification,
-  onReprocessSuccess
+  onReprocessSuccess,
+  onOpenResetModal
 }) => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [name, setName] = useState('');
@@ -47,6 +65,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessMsg, setReprocessMsg] = useState('');
+
+  // Version check state
+  const CURRENT_VERSION = 'v1.0.1';
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [latestRelease, setLatestRelease] = useState<{
+    tagName: string;
+    apkUrl: string;
+    hasUpdate: boolean;
+    body?: string;
+  } | null>(null);
+  const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
 
   const fetchLogs = async () => {
     setIsLoadingLogs(true);
@@ -88,6 +117,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setReprocessMsg('Lỗi kết nối tới máy chủ.');
     } finally {
       setIsReprocessing(false);
+    }
+  };
+
+  // Kiểm tra phiên bản mới từ GitHub Release
+  const handleCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateCheckedMsg('');
+    try {
+      const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
+      if (res.ok) {
+        const data = await res.json();
+        const latestTag = data.tag_name || '';
+        const apkAsset = Array.isArray(data.assets)
+          ? data.assets.find((a: any) => a.name.endsWith('.apk'))
+          : null;
+        const apkUrl = apkAsset ? apkAsset.browser_download_url : data.html_url;
+
+        const hasUpdate = latestTag !== CURRENT_VERSION && latestTag > CURRENT_VERSION;
+
+        setLatestRelease({
+          tagName: latestTag,
+          apkUrl,
+          hasUpdate,
+          body: data.body
+        });
+
+        if (!hasUpdate) {
+          setUpdateCheckedMsg(`Anh đang sử dụng bản mới nhất (${CURRENT_VERSION})! Toàn bộ giao diện web luôn được tự động cập nhật tức thì.`);
+        }
+      } else {
+        setUpdateCheckedMsg('Không thể kiểm tra bản cập nhật lúc này.');
+      }
+    } catch {
+      setUpdateCheckedMsg('Lỗi kết nối khi kiểm tra cập nhật.');
+    } finally {
+      setIsCheckingUpdate(false);
     }
   };
 
@@ -140,6 +205,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <X size={18} />
           </button>
         </div>
+
+        {/* Nút mở Thiết lập lại tài chính & Reset dữ liệu */}
+        <button
+          onClick={() => {
+            onClose();
+            onOpenResetModal();
+          }}
+          className="w-full p-3.5 rounded-2xl bg-gradient-to-r from-[#232E31] via-[#1E282A] to-[#1C2527] border border-[#8BA5AA]/25 flex items-center justify-between text-left active:scale-98 transition-transform shadow-md"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-[#657D81]/25 border border-[#8BA5AA]/30 flex items-center justify-center text-[#8CC7AE]">
+              <RotateCcw size={17} />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-[#F2F5F5]">Thiết lập lại tài chính thực tế</div>
+              <div className="text-[10.5px] text-[#869699]">
+                Xóa giao dịch mẫu, chỉnh số dư các tài khoản & tài sản thực
+              </div>
+            </div>
+          </div>
+          <span className="text-xs font-semibold text-[#8CC7AE] px-2.5 py-1 rounded-lg bg-[#8CC7AE]/10 border border-[#8CC7AE]/20">
+            Đặt lại ›
+          </span>
+        </button>
 
         {/* Android Notification Listener Service Status Card */}
         <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-2.5">
@@ -237,6 +326,57 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   ))}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+
+        {/* In-app Version Checker & Quick Update */}
+        <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Sparkles size={16} className="text-[#D4A373]" />
+              <span className="text-xs font-semibold text-[#F2F5F5]">Cập nhật ứng dụng</span>
+            </div>
+            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md bg-[#232E31] text-[#BFD0D3] border border-[#8BA5AA]/20">
+              {CURRENT_VERSION}
+            </span>
+          </div>
+
+          <div className="text-[11px] text-[#869699] leading-relaxed">
+            ⚡ <strong>Cập nhật tức thì (OTA):</strong> Giao diện và các tính năng mới luôn tự động cập nhật qua mạng mỗi khi anh vuốt làm mới hoặc mở app.
+          </div>
+
+          <button
+            onClick={handleCheckUpdate}
+            disabled={isCheckingUpdate}
+            className="w-full py-2 rounded-xl bg-[#232E31] hover:bg-[#2C383C] border border-[#8BA5AA]/25 text-xs font-semibold text-[#D5E1E3] flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
+          >
+            <RefreshCw size={13} className={isCheckingUpdate ? 'animate-spin' : ''} />
+            {isCheckingUpdate ? 'Đang kiểm tra...' : 'Kiểm tra phiên bản mới'}
+          </button>
+
+          {latestRelease?.hasUpdate && (
+            <div className="p-3 rounded-xl bg-[#8CC7AE]/15 border border-[#8CC7AE]/30 space-y-2 animate-fade-in">
+              <div className="flex items-center justify-between text-xs font-bold text-[#8CC7AE]">
+                <span>Đã có phiên bản mới ({latestRelease.tagName})!</span>
+              </div>
+              <div className="text-[11px] text-[#C4D0D2]">
+                Bản nâng cấp có cải tiến mới cho ứng dụng Android.
+              </div>
+              <a
+                href={latestRelease.apkUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-95 transition-transform"
+              >
+                <ArrowUpCircle size={15} /> Tải & Cài đặt APK mới ngay
+              </a>
+            </div>
+          )}
+
+          {updateCheckedMsg && (
+            <div className="text-[11px] text-[#869699] bg-[#121617] border border-[#8BA5AA]/15 rounded-lg p-2 text-center animate-fade-in">
+              {updateCheckedMsg}
             </div>
           )}
         </div>

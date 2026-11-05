@@ -68,7 +68,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [reprocessMsg, setReprocessMsg] = useState('');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.0.3';
+  const CURRENT_VERSION = 'v1.0.4';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -76,8 +76,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.0.3',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk',
+    tagName: 'v1.0.4',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -139,8 +139,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.0.3';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk';
+      let latestTag = 'v1.0.4';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk';
       let releaseBody = '';
 
       try {
@@ -191,11 +191,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.0.3',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk',
+        tagName: 'v1.0.4',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.0.3. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.0.4. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -210,7 +210,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk');
       return;
     }
 

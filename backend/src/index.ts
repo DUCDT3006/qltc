@@ -755,7 +755,7 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
@@ -773,7 +773,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.0.3.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.0.4.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -785,8 +785,8 @@ app.get('/api/download-apk', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.3',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.3/qltc-v1.0.3.apk',
+    version: '1.0.4',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.4/qltc-v1.0.4.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

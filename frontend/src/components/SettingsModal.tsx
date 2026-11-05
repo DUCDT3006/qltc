@@ -14,7 +14,8 @@ import {
   ChevronUp,
   RotateCcw,
   Sparkles,
-  ArrowUpCircle
+  ArrowUpCircle,
+  Copy
 } from 'lucide-react';
 import { BankAccount } from '../types';
 import { formatVND } from '../mockData';
@@ -80,6 +81,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
+
+  // Download & Progress state
+  const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'completed' | 'error'>('idle');
+  const [downloadPercent, setDownloadPercent] = useState(0);
+  const [downloadLoadedBytes, setDownloadLoadedBytes] = useState(0);
+  const [downloadTotalBytes, setDownloadTotalBytes] = useState(5632636);
+  const [downloadBlobUrl, setDownloadBlobUrl] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState('');
+  const [isCopied, setIsCopied] = useState(false);
 
   const fetchLogs = async () => {
     setIsLoadingLogs(true);
@@ -197,12 +207,109 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, [isOpen]);
 
+  const triggerInstall = (blobUrl: string) => {
+    // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
+    if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk');
+      return;
+    }
+
+    // 2. Tự động kích hoạt tải file Blob về máy
+    try {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `qltc-${latestRelease?.tagName || 'v1.0.2'}.apk`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+      }, 500);
+    } catch (e) {
+      console.warn('Không thể click download blob:', e);
+    }
+  };
+
+  // Tải gói APK với thanh hiển thị % tiến trình thực tế
+  const startDownload = async () => {
+    setDownloadStatus('downloading');
+    setDownloadPercent(0);
+    setDownloadLoadedBytes(0);
+    setDownloadError('');
+
+    try {
+      const downloadEndpoint = 'https://qltc-backend.dtd-store.workers.dev/api/download-apk';
+      const response = await fetch(downloadEndpoint);
+
+      if (!response.ok) {
+        throw new Error(`Máy chủ trả về mã lỗi: ${response.status}`);
+      }
+
+      const contentLength = response.headers.get('content-length');
+      const total = parseInt(contentLength || '5632636', 10);
+      setDownloadTotalBytes(total);
+
+      if (!response.body) {
+        throw new Error('Trình duyệt không hỗ trợ đọc stream tải về');
+      }
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let loaded = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          loaded += value.length;
+          setDownloadLoadedBytes(loaded);
+          const pct = Math.min(99, Math.round((loaded / total) * 100));
+          setDownloadPercent(pct);
+        }
+      }
+
+      // Hoàn tất 100%
+      setDownloadPercent(100);
+      setDownloadLoadedBytes(total);
+      const blob = new Blob(chunks as any, { type: 'application/vnd.android.package-archive' });
+      const blobUrl = URL.createObjectURL(blob);
+      setDownloadBlobUrl(blobUrl);
+      setDownloadStatus('completed');
+
+      // Tự động kích hoạt lưu / mở file
+      triggerInstall(blobUrl);
+
+    } catch (err: any) {
+      console.error('Lỗi tải APK:', err);
+      setDownloadStatus('error');
+      setDownloadError(err?.message || 'Không thể tải gói cập nhật');
+    }
+  };
+
+  const handleCopyLink = () => {
+    const apkUrl = latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk';
+    navigator.clipboard.writeText(apkUrl).then(() => {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 3000);
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = apkUrl;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 3000);
+    });
+  };
+
   const handleDownloadApk = (url: string) => {
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
       (window as any).AndroidBridge.openExternalUrl(url);
       return;
     }
-    window.open(url, '_blank');
+    // Nếu chưa có bridge, kích hoạt trình tải % trong app
+    startDownload();
   };
 
   if (!isOpen) return null;
@@ -380,7 +487,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* In-app Version Checker & Quick Update */}
-        <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-2.5">
+        <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Sparkles size={16} className="text-[#D4A373]" />
@@ -406,11 +513,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
 
             <button
-              onClick={() => handleDownloadApk(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk')}
-              className="py-2.5 rounded-xl bg-[#657D81] hover:bg-[#769195] text-[#F2F5F5] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-98 transition-transform border border-[#8BA5AA]/30"
+              onClick={handleCopyLink}
+              className="py-2.5 rounded-xl bg-[#232E31] hover:bg-[#2C383C] text-[#8CC7AE] border border-[#8CC7AE]/30 text-xs font-semibold flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
             >
-              <ArrowUpCircle size={14} />
-              Tải APK {latestRelease?.tagName || 'v1.0.2'}
+              {isCopied ? <CheckCircle2 size={13} className="text-[#8CC7AE]" /> : <Copy size={13} />}
+              {isCopied ? 'Đã chép link!' : 'Sao chép link tải'}
             </button>
           </div>
 
@@ -420,17 +527,106 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {latestRelease && (
+          {/* GIAO DIỆN THANH TIẾN TRÌNH % ĐANG TẢI */}
+          {downloadStatus === 'downloading' && (
+            <div className="p-3.5 rounded-2xl bg-[#1C2527] border border-[#8CC7AE]/35 space-y-2.5 animate-fade-in shadow-md">
+              <div className="flex items-center justify-between text-xs font-bold text-[#F2F5F5]">
+                <span className="flex items-center gap-2 text-[#8CC7AE]">
+                  <RefreshCw size={14} className="animate-spin text-[#8CC7AE]" />
+                  Đang tải gói cập nhật {latestRelease?.tagName || 'v1.0.2'}...
+                </span>
+                <span className="font-mono text-sm font-bold text-[#8CC7AE]">{downloadPercent}%</span>
+              </div>
+
+              {/* Thanh % tiến trình */}
+              <div className="w-full bg-[#14191A] rounded-full h-3.5 overflow-hidden border border-[#8BA5AA]/25 p-0.5 shadow-inner">
+                <div
+                  className="bg-gradient-to-r from-[#657D81] via-[#8CC7AE] to-[#8CC7AE] h-full rounded-full transition-all duration-150 relative overflow-hidden"
+                  style={{ width: `${downloadPercent}%` }}
+                >
+                  <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-[#869699]">
+                <span>
+                  {(downloadLoadedBytes / (1024 * 1024)).toFixed(1)} MB / {(downloadTotalBytes / (1024 * 1024)).toFixed(1)} MB
+                </span>
+                <span className="text-[#8CC7AE] font-medium">
+                  {downloadPercent < 100 ? `Đang nhận dữ liệu (${downloadPercent}%)` : 'Hoàn tất!'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* GIAO DIỆN KHI ĐÃ TẢI HOÀN TẤT 100% */}
+          {downloadStatus === 'completed' && (
+            <div className="p-3.5 rounded-2xl bg-[#182322] border border-[#8CC7AE]/45 space-y-3 animate-fade-in shadow-lg">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-[#8CC7AE]/20 border border-[#8CC7AE]/30 flex items-center justify-center text-[#8CC7AE] shrink-0">
+                  <CheckCircle2 size={18} />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-[#F2F5F5]">
+                    Đã tải hoàn tất 100% ({latestRelease?.tagName || 'v1.0.2'})!
+                  </div>
+                  <div className="text-[10.5px] text-[#869699]">
+                    Kích thước: {(downloadTotalBytes / (1024 * 1024)).toFixed(1)} MB · Sẵn sàng nâng cấp
+                  </div>
+                </div>
+              </div>
+
+              {downloadBlobUrl && (
+                <a
+                  href={downloadBlobUrl}
+                  download={`qltc-${latestRelease?.tagName || 'v1.0.2'}.apk`}
+                  className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-2 shadow active:scale-95 transition-transform"
+                >
+                  <Download size={15} /> 1. Bấm vào đây để Cài Đặt File APK
+                </a>
+              )}
+
+              <button
+                onClick={handleCopyLink}
+                className="w-full py-2 rounded-xl bg-[#232E31] hover:bg-[#2C383C] text-[#8CC7AE] border border-[#8CC7AE]/30 text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform"
+              >
+                {isCopied ? <CheckCircle2 size={14} className="text-[#8CC7AE]" /> : <Copy size={14} />}
+                {isCopied ? '✓ Đã sao chép link tải vào bộ nhớ!' : '📋 2. Sao chép Link tải (Dán vào Chrome)'}
+              </button>
+
+              <div className="text-[10px] text-[#869699] bg-[#161C1E]/80 p-2.5 rounded-xl border border-[#8BA5AA]/15 leading-relaxed">
+                💡 <strong>Mẹo nhỏ:</strong> Nếu bấm (1) mà điện thoại chưa tự hiện cửa sổ cài đặt, anh bấm <strong>"Sao chép Link tải"</strong> (2) rồi mở Chrome dán vào là tải & cài đặt thành công 100% ạ!
+              </div>
+            </div>
+          )}
+
+          {/* GIAO DIỆN LỖI */}
+          {downloadStatus === 'error' && (
+            <div className="p-3 rounded-2xl bg-[#291B1D] border border-[#E07A5F]/40 space-y-2 text-xs">
+              <div className="text-[#E07A5F] font-semibold flex items-center gap-1.5">
+                <AlertCircle size={14} /> Có lỗi: {downloadError}
+              </div>
+              <button
+                onClick={handleCopyLink}
+                className="w-full py-2 rounded-xl bg-[#232E31] text-[#E07A5F] border border-[#E07A5F]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
+              >
+                {isCopied ? '✓ Đã sao chép!' : '📋 Sao chép link để tải qua Chrome'}
+              </button>
+            </div>
+          )}
+
+          {/* NÚT TẢI & CÀI ĐẶT BAN ĐẦU */}
+          {latestRelease && downloadStatus === 'idle' && (
             <div className="p-3 rounded-xl bg-[#1C2527] border border-[#8CC7AE]/25 space-y-2 animate-fade-in">
               <div className="flex items-center justify-between text-xs font-bold text-[#8CC7AE]">
                 <span>Bản mới nhất: {latestRelease.tagName}</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#8CC7AE]/15 text-[#8CC7AE]">Sẵn sàng tải</span>
               </div>
               <div className="text-[10.5px] text-[#869699] leading-relaxed">
-                Tự động bóc tách Techcombank, HDBank, SMS (Samsung, Xiaomi) & các ví điện tử.
+                Tự động bóc tách Techcombank, HDBank, SMS & hỗ trợ tải cập nhật trực tiếp.
               </div>
               <button
-                onClick={() => handleDownloadApk(latestRelease.apkUrl)}
+                onClick={startDownload}
                 className="w-full py-2.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-95 transition-transform"
               >
                 <Download size={14} /> Tải & Cài đặt {latestRelease.tagName} ngay

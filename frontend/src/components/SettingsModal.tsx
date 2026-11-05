@@ -287,7 +287,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleCopyLink = () => {
-    const apkUrl = latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk';
+    const apkUrl = 'https://qltc-app.dtd-store.workers.dev/apk';
     navigator.clipboard.writeText(apkUrl).then(() => {
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 3000);

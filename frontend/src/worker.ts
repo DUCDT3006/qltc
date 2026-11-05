@@ -1,6 +1,12 @@
 export default {
   async fetch(request: Request, env: { ASSETS: { fetch: (req: Request | string) => Promise<Response> } }): Promise<Response> {
     const url = new URL(request.url);
+
+    // Đường dẫn rút gọn tải file APK trực tiếp
+    if (url.pathname === '/apk' || url.pathname === '/download') {
+      return Response.redirect('https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk', 302);
+    }
+
     // Serve static assets or fallback to index.html for SPA routing
     let response = await env.ASSETS.fetch(request);
     if (response.status === 404 && !url.pathname.includes('.')) {

@@ -679,8 +679,8 @@ app.post('/api/reset', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.1',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.1/qltc-v1.0.1.apk',
+    version: '1.0.2',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,
     message: 'Giao diện web cập nhật tức thì qua mạng (OTA).'

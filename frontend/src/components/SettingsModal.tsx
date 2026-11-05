@@ -67,14 +67,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [reprocessMsg, setReprocessMsg] = useState('');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.0.1';
+  const CURRENT_VERSION = 'v1.0.2';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
     apkUrl: string;
     hasUpdate: boolean;
     body?: string;
-  } | null>(null);
+  } | null>({
+    tagName: 'v1.0.2',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk',
+    hasUpdate: true
+  });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
 
   const fetchLogs = async () => {
@@ -120,48 +124,78 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // Kiểm tra phiên bản mới từ GitHub Release
+  // Kiểm tra phiên bản mới từ GitHub Release & Fallback Cloudflare Worker
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
-      if (res.ok) {
-        const data = await res.json();
-        const latestTag = data.tag_name || 'v1.0.1';
-        const apkAsset = Array.isArray(data.assets)
-          ? data.assets.find((a: any) => a.name.endsWith('.apk'))
-          : null;
-        const apkUrl = apkAsset ? apkAsset.browser_download_url : `https://github.com/DUCDT3006/qltc/releases/download/${latestTag}/qltc-${latestTag}.apk`;
+      let latestTag = 'v1.0.2';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk';
+      let releaseBody = '';
 
-        // Lấy version native nếu chạy trong Android app
-        const nativeVer = (window as any).AndroidBridge && typeof (window as any).AndroidBridge.getNativeApkVersion === 'function'
-          ? (window as any).AndroidBridge.getNativeApkVersion()
-          : null;
-
-        const isOlder = nativeVer ? nativeVer !== latestTag.replace('v', '') : false;
-
-        setLatestRelease({
-          tagName: latestTag,
-          apkUrl,
-          hasUpdate: true,
-          body: data.body
-        });
-
-        if (isOlder) {
-          setUpdateCheckedMsg(`Điện thoại đang chạy bản cũ (${nativeVer}). Đã có bản mới (${latestTag})!`);
+      try {
+        const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
+        if (res.ok) {
+          const data = await res.json();
+          latestTag = data.tag_name || 'v1.0.2';
+          const apkAsset = Array.isArray(data.assets)
+            ? data.assets.find((a: any) => a.name.endsWith('.apk'))
+            : null;
+          apkUrl = apkAsset ? apkAsset.browser_download_url : `https://github.com/DUCDT3006/qltc/releases/download/${latestTag}/qltc-${latestTag}.apk`;
+          releaseBody = data.body || '';
         } else {
-          setUpdateCheckedMsg(`Phiên bản mới nhất trên máy chủ là ${latestTag}. Anh có thể tải cài đặt trực tiếp bên dưới.`);
+          const bRes = await fetch('https://qltc-backend.dtd-store.workers.dev/api/version');
+          if (bRes.ok) {
+            const bData = await bRes.json();
+            latestTag = bData.version.startsWith('v') ? bData.version : `v${bData.version}`;
+            apkUrl = bData.latestApkUrl;
+          }
         }
+      } catch {
+        const bRes = await fetch('https://qltc-backend.dtd-store.workers.dev/api/version');
+        if (bRes.ok) {
+          const bData = await bRes.json();
+          latestTag = bData.version.startsWith('v') ? bData.version : `v${bData.version}`;
+          apkUrl = bData.latestApkUrl;
+        }
+      }
+
+      // Lấy version native nếu chạy trong Android app
+      const nativeVer = (window as any).AndroidBridge && typeof (window as any).AndroidBridge.getNativeApkVersion === 'function'
+        ? (window as any).AndroidBridge.getNativeApkVersion()
+        : null;
+
+      const isOlder = nativeVer ? nativeVer !== latestTag.replace('v', '') : false;
+
+      setLatestRelease({
+        tagName: latestTag,
+        apkUrl,
+        hasUpdate: true,
+        body: releaseBody
+      });
+
+      if (isOlder) {
+        setUpdateCheckedMsg(`Điện thoại đang chạy bản v${nativeVer}. Đã có bản mới (${latestTag}) sẵn sàng tải về!`);
       } else {
-        setUpdateCheckedMsg('Không thể kiểm tra bản cập nhật lúc này. Anh có thể tải trực tiếp bản mới bên dưới.');
+        setUpdateCheckedMsg(`Phiên bản mới nhất trên máy chủ: ${latestTag}. Anh có thể bấm tải ngay file APK bên dưới.`);
       }
     } catch {
-      setUpdateCheckedMsg('Không thể kết nối máy chủ GitHub. Anh có thể tải trực tiếp file APK bên dưới.');
+      setLatestRelease({
+        tagName: 'v1.0.2',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk',
+        hasUpdate: true
+      });
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.0.2. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
   };
+
+  useEffect(() => {
+    if (isOpen) {
+      handleCheckUpdate();
+    }
+  }, [isOpen]);
 
   const handleDownloadApk = (url: string) => {
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
@@ -372,11 +406,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
 
             <button
-              onClick={() => handleDownloadApk(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.1/qltc-v1.0.1.apk')}
+              onClick={() => handleDownloadApk(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.2/qltc-v1.0.2.apk')}
               className="py-2.5 rounded-xl bg-[#657D81] hover:bg-[#769195] text-[#F2F5F5] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-98 transition-transform border border-[#8BA5AA]/30"
             >
               <ArrowUpCircle size={14} />
-              Tải APK {latestRelease?.tagName || 'v1.0.1'}
+              Tải APK {latestRelease?.tagName || 'v1.0.2'}
             </button>
           </div>
 

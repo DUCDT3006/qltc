@@ -34,31 +34,31 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.5.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.0.6.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.0.5.apk
+          path: qltc-v1.0.6.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.5
-          name: "QLTC v1.0.5 - Tùy chỉnh thông tin cá nhân (Tên, SĐT, Avatar, Gmail) & Chứng chỉ chuẩn"
+          tag_name: v1.0.6
+          name: "QLTC v1.0.6 - Tự động ghép cặp chuyển tiền nội bộ & Nút tách giao dịch thông minh"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.5 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.0.6 - Android APK
 
-            Bản cập nhật v1.0.5 bổ sung các tính năng cá nhân hóa cao cấp:
-            - **Hồ sơ thông tin cá nhân:** Cho phép cập nhật Họ tên, Số điện thoại, Gmail và Ảnh đại diện (Avatar). Có thể để mặc định hoặc tùy chỉnh linh hoạt.
-            - **Tải ảnh đại diện trực tiếp:** Chọn ảnh từ thiết bị hoặc chọn bộ avatar nhận diện đẹp mắt phong cách Dark Matte.
-            - **Chào mừng cá nhân hóa:** Lời chào trên Navbar tự động đồng bộ theo tên thật hoặc biệt danh của người dùng.
-            - **Chứng chỉ ký số cố định:** Cài đè trực tiếp mọi bản cập nhật mà không bao giờ bị lỗi xung đột gói.
+            Bản cập nhật v1.0.6 nâng cấp toàn diện hệ thống xử lý dòng tiền nội bộ:
+            - **Tự động ghép cặp chuyển khoản nội bộ (Auto-pairing):** Kết hợp Phương án 1 (thời gian/số tiền đối ứng) và Phương án 3 (từ khóa nội dung) để tự động nhận diện tiền chuyển giữa các tài khoản của bạn.
+            - **Triệt tiêu trùng lặp thu/chi:** Tiền chuyển giữa các tài khoản không bị tính nhân đôi thành 1 khoản Thu và 1 khoản Chi, bảo toàn chính xác 100% hạn mức các hũ.
+            - **Nút tách 2 giao dịch (Unpair):** Nếu hệ thống tự động ghép nhầm, người dùng chỉ cần bấm nút "Tách 2 giao dịch" trên thẻ chờ duyệt để phân tách lại thành 2 giao dịch độc lập.
+            - **Tùy chọn chuyển tiền thủ công:** Cho phép chủ động chọn tài khoản nhận ngay tại màn hình phê duyệt.
           files: |
-            qltc-v1.0.5.apk
+            qltc-v1.0.6.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

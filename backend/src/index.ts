@@ -187,16 +187,65 @@ app.post('/api/notifications/ingest', async (c) => {
   await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ? WHERE id = ?')
     .bind(parsed.bankCode, notifId).run();
 
+  // 7. TỰ ĐỘNG GHÉP CẶP CHUYỂN TIỀN NỘI BỘ (Phương án 1 & 3)
+  let isAutoPaired = false;
+  let pairId: string | null = null;
+  const counterType = parsed.type === 'expense' ? 'income' : 'expense';
+
+  // Tìm giao dịch pending đối ứng: Cùng số tiền, khác tài khoản, ngược loại income/expense
+  const candidate = await db.prepare(`
+    SELECT t.id, t.account_id, t.description, t.occurred_at, a.bank_code, a.name as account_name
+    FROM transactions t
+    JOIN accounts a ON t.account_id = a.id
+    WHERE t.user_id = ?
+      AND t.status = 'pending'
+      AND t.transfer_pair_id IS NULL
+      AND t.amount = ?
+      AND t.account_id != ?
+      AND (t.type = ? OR t.type = 'transfer')
+    ORDER BY t.occurred_at DESC
+    LIMIT 1
+  `).bind(userId, parsed.amount, accountId, counterType).first<{
+    id: string;
+    account_id: string;
+    description: string;
+    occurred_at: string;
+    bank_code: string;
+    account_name: string;
+  }>();
+
+  if (candidate) {
+    pairId = `pair_${Date.now()}`;
+    const pairNote = `[Tự động ghép cặp] ${parsed.type === 'expense' ? parsed.bankCode : candidate.bank_code} ➔ ${parsed.type === 'income' ? parsed.bankCode : candidate.bank_code}`;
+
+    // Đánh dấu cả 2 thành loại transfer và liên kết qua transfer_pair_id
+    await db.prepare(`
+      UPDATE transactions 
+      SET type = 'transfer', transfer_pair_id = ?, notes = ?
+      WHERE id = ?
+    `).bind(pairId, pairNote, txnId).run();
+
+    await db.prepare(`
+      UPDATE transactions 
+      SET type = 'transfer', transfer_pair_id = ?, notes = ?
+      WHERE id = ?
+    `).bind(pairId, pairNote, candidate.id).run();
+
+    isAutoPaired = true;
+  }
+
   return c.json({
     success: true,
     duplicate: false,
+    autoPaired: isAutoPaired,
+    transferPairId: pairId,
     transaction: {
       id: txnId,
       amount: parsed.amount,
-      type: parsed.type,
+      type: isAutoPaired ? 'transfer' : parsed.type,
       description: parsed.description,
       bankCode: parsed.bankCode,
-      suggestedCategory: cat.categoryName,
+      suggestedCategory: isAutoPaired ? 'Chuyển khoản nội bộ' : cat.categoryName,
       jarCode: cat.jarCode,
       confidence: cat.confidence
     }
@@ -317,11 +366,18 @@ app.get('/api/transactions', async (c) => {
   let query = `
     SELECT t.*, a.name as account_name, a.bank_code, a.account_number_mask,
            j.name as jar_name, j.color as jar_color, j.code as jar_code,
-           r.raw_body
+           r.raw_body,
+           p.id as paired_txn_id,
+           pa.name as paired_account_name,
+           pa.bank_code as paired_bank_code,
+           pa.account_number_mask as paired_account_mask,
+           p.type as paired_type
     FROM transactions t
     LEFT JOIN accounts a ON t.account_id = a.id
     LEFT JOIN jars j ON t.jar_id = j.id
     LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
+    LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
+    LEFT JOIN accounts pa ON p.account_id = pa.id
     WHERE t.user_id = ?
   `;
   const params: any[] = [userId];
@@ -358,6 +414,13 @@ app.put('/api/transactions/:id', async (c) => {
   if (body.status) {
     updates.push('status = ?');
     params.push(body.status);
+
+    // Đồng bộ trạng thái cho giao dịch ghép cặp đối ứng nếu có
+    const currentTxn = await db.prepare('SELECT transfer_pair_id FROM transactions WHERE id = ?').bind(id).first<{ transfer_pair_id: string | null }>();
+    if (currentTxn?.transfer_pair_id) {
+      await db.prepare('UPDATE transactions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND user_id = ?')
+        .bind(body.status, currentTxn.transfer_pair_id, userId).run();
+    }
   }
   if (body.jarId) {
     updates.push('jar_id = ?');
@@ -385,6 +448,101 @@ app.put('/api/transactions/:id', async (c) => {
   await db.prepare(`UPDATE transactions SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
 
   return c.json({ success: true, message: 'Đã cập nhật giao dịch' });
+});
+
+// Tách 2 giao dịch nếu auto-pairing bị nhầm (Unpair)
+app.post('/api/transactions/:id/unpair', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+
+  const txn = await db.prepare('SELECT id, transfer_pair_id, description FROM transactions WHERE id = ? AND user_id = ?')
+    .bind(id, userId).first<{ id: string; transfer_pair_id: string | null; description: string }>();
+
+  if (!txn || !txn.transfer_pair_id) {
+    return c.json({ success: false, message: 'Giao dịch này không nằm trong cặp chuyển khoản nào' }, 400);
+  }
+
+  const pairId = txn.transfer_pair_id;
+  const pairedTxns = await db.prepare(`
+    SELECT t.id, t.raw_notification_id, r.raw_body, t.description
+    FROM transactions t
+    LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
+    WHERE t.transfer_pair_id = ? AND t.user_id = ?
+  `).bind(pairId, userId).all<{ id: string; raw_notification_id: string | null; raw_body: string | null; description: string }>();
+
+  for (const t of pairedTxns.results) {
+    const text = (t.raw_body || t.description || '').toLowerCase();
+    const isIncome = text.includes('+') || text.includes('cộng') || text.includes('nhận') || text.includes('vao');
+    const origType = isIncome ? 'income' : 'expense';
+    const jarId = isIncome ? null : 'jar_nec';
+
+    await db.prepare(`
+      UPDATE transactions 
+      SET transfer_pair_id = NULL,
+          type = ?,
+          jar_id = ?,
+          notes = 'Đã tách thủ công từ cặp chuyển tiền'
+      WHERE id = ?
+    `).bind(origType, jarId, t.id).run();
+  }
+
+  return c.json({
+    success: true,
+    message: 'Đã tách 2 giao dịch thành công'
+  });
+});
+
+// Ghép cặp thủ công 1 giao dịch chi thành chuyển khoản sang tài khoản khác (Phương án 2)
+app.post('/api/transactions/:id/pair-transfer', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  const { toAccountId } = await c.req.json<{ toAccountId: string }>();
+
+  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
+    .bind(id, userId).first<any>();
+
+  if (!txn) {
+    return c.json({ success: false, message: 'Không tìm thấy giao dịch' }, 404);
+  }
+
+  const targetAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
+    .bind(toAccountId, userId).first<any>();
+
+  if (!targetAcc) {
+    return c.json({ success: false, message: 'Không tìm thấy tài khoản nhận' }, 404);
+  }
+
+  const pairId = `pair_${Date.now()}`;
+  const counterTxnId = `txn_pair_${Date.now()}`;
+
+  // 1. Cập nhật giao dịch nguồn thành transfer
+  await db.prepare(`
+    UPDATE transactions 
+    SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, notes = ?
+    WHERE id = ?
+  `).bind(pairId, `Chuyển sang ${targetAcc.name}`, id).run();
+
+  // 2. Tạo giao dịch đối ứng ở tài khoản nhận
+  await db.prepare(`
+    INSERT INTO transactions (
+      id, user_id, account_id, type, amount, occurred_at, description,
+      status, transfer_pair_id, notes
+    ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    counterTxnId,
+    userId,
+    toAccountId,
+    txn.amount,
+    txn.occurred_at,
+    `Nhận chuyển khoản đối ứng từ ${txn.account_id}`,
+    txn.status,
+    pairId,
+    `Nhận từ đối ứng ${id}`
+  ).run();
+
+  return c.json({ success: true, message: 'Đã tạo chuyển khoản nội bộ thành công' });
 });
 
 // Thống kê tổng quan (Dashboard)
@@ -805,7 +963,7 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.6/qltc-v1.0.6.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
@@ -817,13 +975,13 @@ app.get('/api/download-apk', async (c) => {
     return c.text('Không thể tải file APK từ GitHub', 502);
   }
 
-  const contentLength = response.headers.get('content-length') || '5632636';
+  const contentLength = response.headers.get('content-length') || '5632640';
 
   return new Response(response.body, {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.0.5.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.0.6.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -835,8 +993,8 @@ app.get('/api/download-apk', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.5',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.5/qltc-v1.0.5.apk',
+    version: '1.0.6',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.6/qltc-v1.0.6.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

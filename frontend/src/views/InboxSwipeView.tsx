@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Transaction, Jar, IncomeSource } from '../types';
+import { Transaction, Jar, IncomeSource, BankAccount } from '../types';
 import { formatVND } from '../mockData';
-import { Check, X, ArrowLeft, Trash2, Layers, DollarSign, CheckCircle2 } from 'lucide-react';
+import { Check, X, ArrowLeft, Trash2, Layers, DollarSign, CheckCircle2, ArrowRightLeft, Scissors, Repeat, ArrowRight } from 'lucide-react';
 
 interface InboxSwipeViewProps {
   pendingTransactions: Transaction[];
@@ -12,6 +12,9 @@ interface InboxSwipeViewProps {
   onBack: () => void;
   jars?: Jar[];
   incomeSources?: IncomeSource[];
+  accounts?: BankAccount[];
+  onUnpair?: (id: string) => void;
+  onPairTransfer?: (id: string, toAccountId: string) => void;
 }
 
 export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
@@ -22,7 +25,10 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   onDeleteConfirmed,
   onBack,
   jars,
-  incomeSources
+  incomeSources,
+  accounts,
+  onUnpair,
+  onPairTransfer
 }) => {
   const [subTab, setSubTab] = useState<'pending' | 'history'>('pending');
   const [searchQuery, setSearchQuery] = useState('');
@@ -159,57 +165,139 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                         <div className="text-[11px] text-[#869699]">{activeTxn.occurredAt}</div>
                       </div>
                     </div>
-                    <span className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-medium border ${
+                    <span className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-medium border flex items-center gap-1 ${
                       activeTxn.type === 'income'
                         ? 'bg-[#8CC7AE]/15 text-[#8CC7AE] border-[#8CC7AE]/25'
+                        : activeTxn.type === 'transfer'
+                        ? 'bg-[#8CC7AE]/20 text-[#8CC7AE] border-[#8CC7AE]/40 font-semibold'
                         : 'bg-[#657D81]/25 text-[#BFD0D3] border-[#8BA5AA]/20'
                     }`}>
-                      {activeTxn.type === 'income' ? 'Tiền vào' : activeTxn.type === 'transfer' ? 'Chuyển khoản' : 'Khoản chi'}
+                      {activeTxn.type === 'income' ? (
+                        'Tiền vào'
+                      ) : activeTxn.type === 'transfer' ? (
+                        <>
+                          <Repeat size={11} /> Chuyển nội bộ (Auto-paired)
+                        </>
+                      ) : (
+                        'Khoản chi'
+                      )}
                     </span>
                   </div>
 
-                  <div className={`num text-[29px] font-bold tracking-tight my-2 ${
-                    activeTxn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
+                  <div className={`num text-[29px] font-bold tracking-tight my-2 flex items-center gap-2 ${
+                    activeTxn.type === 'income'
+                      ? 'text-[#8CC7AE]'
+                      : activeTxn.type === 'transfer'
+                      ? 'text-[#8CC7AE]'
+                      : 'text-[#F2F5F5]'
                   }`}>
-                    {activeTxn.type === 'income' ? '+' : '−'}{formatVND(activeTxn.amount)}
+                    {activeTxn.type === 'transfer' ? (
+                      <ArrowRightLeft size={24} className="text-[#8CC7AE]" />
+                    ) : activeTxn.type === 'income' ? (
+                      '+'
+                    ) : (
+                      '−'
+                    )}
+                    {formatVND(activeTxn.amount)}
                   </div>
                   <div className="text-[13.5px] font-medium text-[#C4D0D2] mb-3">
                     {activeTxn.description}
                   </div>
 
-                  {activeTxn.rawQuote && (
-                    <div className="bg-[#0C1011]/60 border border-[#8BA5AA]/15 rounded-xl p-2.5 text-[11px] font-mono text-[#97A8AB] leading-relaxed mb-3">
-                      "{activeTxn.rawQuote}"
+                  {/* KHI LÀ GIAO DỊCH CHUYỂN TIỀN NỘI BỘ (TRANSFER) */}
+                  {activeTxn.type === 'transfer' ? (
+                    <div className="bg-[#12191B] border border-[#8CC7AE]/25 rounded-2xl p-3.5 my-3 space-y-3 animate-fade-in shadow-inner">
+                      <div className="flex items-center justify-between text-xs">
+                        {/* Tài khoản nguồn */}
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-lg bg-[#232E31] text-[#D5E1E3] font-bold text-xs flex items-center justify-center border border-[#8BA5AA]/20">
+                            {activeTxn.bankCode}
+                          </div>
+                          <div>
+                            <div className="font-semibold text-[#F2F5F5] text-xs">{activeTxn.accountName}</div>
+                            <div className="text-[10px] text-[#E07A5F]">Tài khoản trừ tiền</div>
+                          </div>
+                        </div>
+
+                        {/* Mũi tên điều chuyển */}
+                        <div className="flex flex-col items-center px-2 text-[#8CC7AE]">
+                          <ArrowRight size={16} />
+                          <span className="text-[9px] font-mono">Điều chuyển</span>
+                        </div>
+
+                        {/* Tài khoản nhận */}
+                        <div className="flex items-center gap-2 text-right">
+                          <div>
+                            <div className="font-semibold text-[#F2F5F5] text-xs">
+                              {activeTxn.pairedAccountName || 'Tài khoản nhận'}
+                            </div>
+                            <div className="text-[10px] text-[#8CC7AE]">Tài khoản cộng tiền</div>
+                          </div>
+                          <div className="w-8 h-8 rounded-lg bg-[#1B2B28] text-[#8CC7AE] font-bold text-xs flex items-center justify-center border border-[#8CC7AE]/30">
+                            {activeTxn.pairedBankCode || 'ĐÍCH'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-[11px] text-[#869699] bg-[#0A0E0F]/60 rounded-xl p-2.5 leading-relaxed">
+                        ✨ <strong>Tự động ghép cặp thông minh:</strong> Hệ thống nhận diện đây là khoản chuyển tiền giữa các tài khoản của anh để phân bổ quỹ. Giao dịch này <strong>không tính vào thu nhập hay chi tiêu</strong> của tháng và không làm lệch hạn mức các hũ.
+                      </div>
+
+                      {/* NÚT TÁCH 2 GIAO DỊCH NẾU AUTO-PAIRING BỊ NHẦM */}
+                      {onUnpair && (
+                        <div className="pt-1 flex items-center justify-between border-t border-[#8BA5AA]/15">
+                          <span className="text-[10.5px] text-[#869699]">Ghép nhầm giao dịch?</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm('Anh có chắc muốn tách giao dịch này ra thành 2 khoản độc lập (1 khoản trừ + 1 khoản cộng) không?')) {
+                                onUnpair(activeTxn.id);
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-[#291B1D] hover:bg-[#382124] border border-[#E07A5F]/35 text-[#E07A5F] text-xs font-semibold flex items-center gap-1.5 active:scale-95 transition-transform shadow-sm"
+                          >
+                            <Scissors size={13} /> Tách 2 giao dịch
+                          </button>
+                        </div>
+                      )}
                     </div>
+                  ) : (
+                    <>
+                      {activeTxn.rawQuote && (
+                        <div className="bg-[#0C1011]/60 border border-[#8BA5AA]/15 rounded-xl p-2.5 text-[11px] font-mono text-[#97A8AB] leading-relaxed mb-3">
+                          "{activeTxn.rawQuote}"
+                        </div>
+                      )}
+
+                      {/* PHÂN BỔ HŨ CHI HOẶC NGUỒN THU */}
+                      <div className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider mb-2">
+                        {activeTxn.type === 'income' ? 'Phân bổ nguồn thu nhập' : 'Phân bổ hũ chi tiêu'}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 mb-4">
+                        {activeTxn.type === 'income' ? (
+                          // Hiển thị nguồn thu
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#8CC7AE]/20 text-[#8CC7AE] border border-[#8CC7AE]/30">
+                            <DollarSign size={13} /> {selectedCategoryName || 'Thu nhập'}
+                          </span>
+                        ) : (
+                          // Hiển thị hũ chi tiêu
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#657D81]/25 text-[#DCE6E8] border border-[#8BA5AA]/30">
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: activeJarObj?.color || '#657D81' }}></span>
+                            {activeJarObj ? `Hũ ${activeJarObj.name}` : `Hũ ${selectedJarCode}`}
+                            {selectedCategoryName && selectedCategoryName !== activeJarObj?.name ? ` · ${selectedCategoryName}` : ''}
+                          </span>
+                        )}
+
+                        <button
+                          onClick={() => setIsPickerOpen(true)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#D5E1E3] bg-[#232E31] border border-[#8BA5AA]/30 active:scale-95 transition-transform"
+                        >
+                          {activeTxn.type === 'income' ? 'Đổi nguồn thu ▾' : 'Đổi hũ chi / Chuyển nội bộ ▾'}
+                        </button>
+                      </div>
+                    </>
                   )}
-
-                  {/* PHÂN BỔ HŨ CHI HOẶC NGUỒN THU */}
-                  <div className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider mb-2">
-                    {activeTxn.type === 'income' ? 'Phân bổ nguồn thu nhập' : 'Phân bổ hũ chi tiêu'}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2 mb-4">
-                    {activeTxn.type === 'income' ? (
-                      // Hiển thị nguồn thu
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#8CC7AE]/20 text-[#8CC7AE] border border-[#8CC7AE]/30">
-                        <DollarSign size={13} /> {selectedCategoryName || 'Thu nhập'}
-                      </span>
-                    ) : (
-                      // Hiển thị hũ chi tiêu
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#657D81]/25 text-[#DCE6E8] border border-[#8BA5AA]/30">
-                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: activeJarObj?.color || '#657D81' }}></span>
-                        {activeJarObj ? `Hũ ${activeJarObj.name}` : `Hũ ${selectedJarCode}`}
-                        {selectedCategoryName && selectedCategoryName !== activeJarObj?.name ? ` · ${selectedCategoryName}` : ''}
-                      </span>
-                    )}
-
-                    <button
-                      onClick={() => setIsPickerOpen(true)}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#D5E1E3] bg-[#232E31] border border-[#8BA5AA]/30 active:scale-95 transition-transform"
-                    >
-                      {activeTxn.type === 'income' ? 'Đổi nguồn thu ▾' : 'Đổi hũ chi ▾'}
-                    </button>
-                  </div>
 
                   {/* Nút Bỏ qua / Xác nhận */}
                   <div className="flex items-center justify-between pt-3 border-t border-[#8BA5AA]/15">
@@ -225,7 +313,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       className="h-10 px-6 rounded-xl flex items-center gap-1.5 text-xs font-semibold bg-[#657D81] text-[#F2F5F5] border border-[#BFD0D3]/35 shadow-[0_6px_16px_rgba(101,125,129,0.35)] active:scale-95 transition-transform"
                     >
                       <Check size={16} strokeWidth={2.4} />
-                      Xác nhận duyệt
+                      {activeTxn.type === 'transfer' ? 'Xác nhận chuyển nội bộ' : 'Xác nhận duyệt'}
                     </button>
                   </div>
                 </div>
@@ -298,9 +386,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                   </div>
                   <div className="text-right flex items-center gap-2">
                     <div className={`num text-xs font-bold ${
-                      txn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
+                      txn.type === 'income' || txn.type === 'transfer' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
                     }`}>
-                      {txn.type === 'income' ? '+' : '−'}{formatVND(txn.amount)}
+                      {txn.type === 'income' ? '+' : txn.type === 'transfer' ? '⇄ ' : '−'}{formatVND(txn.amount)}
                     </div>
                     {onDeleteConfirmed && (
                       <button
@@ -393,6 +481,49 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     </button>
                   );
                 })}
+
+                {/* TÙY CHỌN ĐIỀU CHUYỂN NỘI BỘ (PHƯƠNG ÁN 2) */}
+                {onPairTransfer && accounts && accounts.length > 1 && (
+                  <div className="pt-3 border-t border-[#8BA5AA]/20 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-[#8CC7AE] uppercase tracking-wider flex items-center gap-1">
+                        <ArrowRightLeft size={13} /> Hoặc chuyển khoản nội bộ sang:
+                      </span>
+                      <span className="text-[10px] text-[#869699]">Không trừ hũ</span>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      {accounts
+                        .filter(acc => acc.name !== activeTxn.accountName && (acc.accountNumberMask ? !activeTxn.accountName.includes(acc.accountNumberMask) : true))
+                        .map((targetAcc) => (
+                          <button
+                            key={targetAcc.id}
+                            type="button"
+                            onClick={() => {
+                              onPairTransfer(activeTxn.id, targetAcc.id);
+                              setIsPickerOpen(false);
+                            }}
+                            className="w-full p-2.5 rounded-xl bg-[#1C2527] hover:bg-[#233134] border border-[#8CC7AE]/30 flex items-center justify-between text-left active:scale-98 transition-all"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-7 h-7 rounded-lg bg-[#232E31] text-[#8CC7AE] font-bold text-[11px] flex items-center justify-center border border-[#8CC7AE]/20">
+                                {targetAcc.bankCode || 'VÍ'}
+                              </div>
+                              <div>
+                                <div className="text-xs font-semibold text-[#F2F5F5]">{targetAcc.name}</div>
+                                <div className="text-[10px] text-[#869699]">
+                                  {targetAcc.accountNumberMask ? `*${targetAcc.accountNumberMask}` : 'Tài khoản'}
+                                </div>
+                              </div>
+                            </div>
+                            <span className="text-[11px] font-medium text-[#8CC7AE] px-2.5 py-1 rounded-lg bg-[#8CC7AE]/10 border border-[#8CC7AE]/20">
+                              Chọn làm ví nhận ›
+                            </span>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               /* DANH SÁCH NGUỒN THU CHO KHOẢN THU (INCOME) */

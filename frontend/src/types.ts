@@ -41,6 +41,12 @@ export interface Transaction {
   suggestedJarCode: string;
   occurredAt: string;
   status: 'pending' | 'confirmed' | 'rejected';
+  transferPairId?: string | null;
+  pairedTxnId?: string | null;
+  pairedAccountName?: string | null;
+  pairedBankCode?: string | null;
+  pairedAccountMask?: string | null;
+  pairedType?: string | null;
 }
 
 export interface Holding {

@@ -101,12 +101,29 @@ export function App() {
             amount: t.amount,
             description: t.description,
             rawQuote: t.raw_body,
-            suggestedCategory: t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu'),
+            suggestedCategory: t.type === 'transfer' ? 'Chuyển khoản nội bộ' : (t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu')),
             suggestedJarCode: t.jar_code || 'NEC',
             occurredAt: formatOccurredTime(t.occurred_at),
-            status: 'pending'
+            status: 'pending',
+            transferPairId: t.transfer_pair_id,
+            pairedTxnId: t.paired_txn_id,
+            pairedAccountName: t.paired_account_name,
+            pairedBankCode: t.paired_bank_code,
+            pairedAccountMask: t.paired_account_mask,
+            pairedType: t.paired_type
           }));
-          setPendingTransactions(mapped);
+
+          // Mỗi cặp chuyển khoản chỉ hiện 1 thẻ trong hàng chờ duyệt
+          const seenPairs = new Set<string>();
+          const dedupedPending: Transaction[] = [];
+          for (const item of mapped) {
+            if (item.transferPairId) {
+              if (seenPairs.has(item.transferPairId)) continue;
+              seenPairs.add(item.transferPairId);
+            }
+            dedupedPending.push(item);
+          }
+          setPendingTransactions(dedupedPending);
         }
       }
 
@@ -124,10 +141,16 @@ export function App() {
             amount: t.amount,
             description: t.description,
             rawQuote: t.raw_body,
-            suggestedCategory: t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu'),
+            suggestedCategory: t.type === 'transfer' ? 'Chuyển khoản nội bộ' : (t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu')),
             suggestedJarCode: t.jar_code || 'NEC',
             occurredAt: formatOccurredTime(t.occurred_at),
-            status: 'confirmed'
+            status: 'confirmed',
+            transferPairId: t.transfer_pair_id,
+            pairedTxnId: t.paired_txn_id,
+            pairedAccountName: t.paired_account_name,
+            pairedBankCode: t.paired_bank_code,
+            pairedAccountMask: t.paired_account_mask,
+            pairedType: t.paired_type
           }));
           setConfirmedTransactions(mapped);
         }
@@ -518,6 +541,36 @@ export function App() {
     }
   };
 
+  // Tách 2 giao dịch nếu auto-pairing bị nhầm
+  const handleUnpairTransaction = async (txnId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/transactions/${txnId}/unpair`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        await loadDataFromBackend();
+      }
+    } catch (err) {
+      console.error('Lỗi tách giao dịch:', err);
+    }
+  };
+
+  // Ghép cặp thủ công thành chuyển khoản nội bộ
+  const handlePairTransfer = async (txnId: string, toAccountId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/transactions/${txnId}/pair-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toAccountId })
+      });
+      if (res.ok) {
+        await loadDataFromBackend();
+      }
+    } catch (err) {
+      console.error('Lỗi ghép cặp chuyển khoản:', err);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#161C1E] via-[#0E1314] to-[#0A0D0E] text-[#F2F5F5] flex flex-col justify-between max-w-md mx-auto relative shadow-2xl overflow-x-hidden">
       {/* Glow effect at top */}
@@ -562,6 +615,9 @@ export function App() {
             onBack={() => setCurrentTab('dashboard')}
             jars={jars}
             incomeSources={incomeSources}
+            accounts={accounts}
+            onUnpair={handleUnpairTransaction}
+            onPairTransfer={handlePairTransfer}
           />
         )}
 

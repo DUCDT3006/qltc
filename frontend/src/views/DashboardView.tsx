@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Sparkline } from '../components/Sparkline';
-import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
+import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount, getMonthlyIncomeAmount } from '../types';
 import { formatVND } from '../mockData';
 import { computeExact100Percentages } from './BudgetView';
 import {
@@ -166,7 +166,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // ============================================================================
   // 2. SO SÁNH NGUỒN THU THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM)
   // ============================================================================
-  const baseMonthlyExpectedIncome = incomeSources.reduce((sum, s) => sum + s.expectedAmount, 0);
+  const baseMonthlyExpectedIncome = incomeSources.reduce((sum, s) => sum + getMonthlyIncomeAmount(s.expectedAmount, s.recurrence), 0);
   const expectedIncomeForPeriod = baseMonthlyExpectedIncome * periodMultiplier;
 
   const actualIncomeTxns = periodTransactions.filter(t => t.type === 'income');
@@ -176,9 +176,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ? Math.round((actualIncomeForPeriod / expectedIncomeForPeriod) * 100)
     : 0;
 
-  // So sánh từng nguồn thu dự kiến với thực tế
+  // So sánh từng nguồn thu dự kiến với thực tế (quy đổi theo kỳ: tháng * 1, quý * 3, năm * 12)
   const incomeSourceComparison = incomeSources.map(src => {
-    const expected = src.expectedAmount * periodMultiplier;
+    const monthlyExpected = getMonthlyIncomeAmount(src.expectedAmount, src.recurrence);
+    const expected = monthlyExpected * periodMultiplier;
     const matchedActual = actualIncomeTxns
       .filter(t => {
         const cat = (t.suggestedCategory || '').toLowerCase();
@@ -190,6 +191,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const pct = expected > 0 ? Math.round((matchedActual / expected) * 100) : 0;
     return {
       ...src,
+      monthlyExpected,
       expected,
       actual: matchedActual,
       pct
@@ -561,8 +563,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {incomeSourceComparison.map(item => (
               <div key={item.id} className="space-y-1">
                 <div className="flex items-center justify-between text-[11.5px]">
-                  <span className="text-[#D5E1E3] font-medium truncate max-w-[140px]">{item.name}</span>
-                  <div className="num text-right">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[#D5E1E3] font-medium truncate max-w-[130px]">{item.name}</span>
+                    <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#141A1C] text-[#8CC7AE] border border-[#8CC7AE]/20 shrink-0">
+                      {item.recurrence}
+                    </span>
+                  </div>
+                  <div className="num text-right shrink-0">
                     <b className="text-[#F2F5F5]">{formatVND(item.actual)}</b>
                     <span className="text-[#869699]"> / {formatVND(item.expected)}</span>{' '}
                     <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>

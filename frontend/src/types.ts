@@ -30,6 +30,32 @@ export interface IncomeSource {
   color?: string;
 }
 
+export const RECURRENCE_PRESETS: Array<{ value: string; label: string; divisor: number; hint: string }> = [
+  { value: 'Hàng tháng', label: 'Hàng tháng', divisor: 1, hint: 'Nhận đều mỗi tháng' },
+  { value: 'Hàng quý', label: 'Hàng quý (3 tháng/lần)', divisor: 3, hint: 'Tự động chia 3 cho hàng tháng' },
+  { value: 'Hàng năm', label: 'Hàng năm (12 tháng/lần)', divisor: 12, hint: 'Tự động chia 12 cho hàng tháng' },
+  { value: 'Nửa năm (6 tháng)', label: 'Nửa năm (6 tháng/lần)', divisor: 6, hint: 'Tự động chia 6 cho hàng tháng' },
+  { value: 'Hàng tuần', label: 'Hàng tuần', divisor: 12 / 52, hint: 'Quy đổi 4.33 tuần/tháng' }
+];
+
+export function getMonthlyIncomeAmount(amount: number, recurrence?: string): number {
+  if (!amount || amount <= 0) return 0;
+  const rec = (recurrence || '').toLowerCase().trim();
+  if (rec.includes('năm') || rec.includes('year')) {
+    return Math.round(amount / 12);
+  }
+  if (rec.includes('quý') || rec.includes('quarter')) {
+    return Math.round(amount / 3);
+  }
+  if (rec.includes('6 tháng') || rec.includes('nửa năm') || rec.includes('semiannual')) {
+    return Math.round(amount / 6);
+  }
+  if (rec.includes('tuần') || rec.includes('week')) {
+    return Math.round((amount * 52) / 12);
+  }
+  return amount; // Mặc định Hàng tháng
+}
+
 export interface PlannedExpense {
   id: string;
   name: string;

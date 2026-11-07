@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Jar, IncomeSource, PlannedExpense, Transaction } from '../types';
+import { Jar, IncomeSource, PlannedExpense, Transaction, getMonthlyIncomeAmount, RECURRENCE_PRESETS } from '../types';
 import { formatVND } from '../mockData';
 import {
   Sparkles,
   Check,
   Edit2,
+  Edit3,
   X,
   Settings2,
   Trash2,
@@ -97,7 +98,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [newJarLimitStr, setNewJarLimitStr] = useState('');
   const [newJarColor, setNewJarColor] = useState('#8CC7AE');
 
-  // Form thêm nguồn thu dự kiến
+  // Form thêm / sửa nguồn thu dự kiến
+  const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
   const [newSourceName, setNewSourceName] = useState('');
   const [newSourceKind, setNewSourceKind] = useState<'fixed' | 'irregular' | 'passive'>('fixed');
   const [newSourceAmount, setNewSourceAmount] = useState('');
@@ -109,8 +111,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [newExpJarCode, setNewExpJarCode] = useState('NEC');
   const [newExpRecurrence, setNewExpRecurrence] = useState('Hàng tháng');
 
-  // --- SỐ LIỆU DỰ KIẾN ---
-  const totalExpectedIncome = incomeSources.reduce((sum, s) => sum + s.expectedAmount, 0);
+  // --- SỐ LIỆU DỰ KIẾN (Quy đổi toàn bộ các nguồn thu về dòng tiền hàng tháng để phân bổ hũ) ---
+  const totalExpectedIncome = incomeSources.reduce((sum, s) => sum + getMonthlyIncomeAmount(s.expectedAmount, s.recurrence), 0);
   const totalPlannedExpenses = plannedExpenses.reduce((sum, e) => sum + e.expectedAmount, 0);
   const totalLimit = jars.reduce((sum, j) => sum + j.monthlyLimit, 0);
   const totalTargetPercent = Math.round(jars.reduce((sum, j) => sum + (j.targetPercent * 100), 0));
@@ -198,21 +200,36 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setTimeout(() => setAllocatedSuccess(false), 3000);
   };
 
+  const handleStartEditIncomeSource = (s: IncomeSource) => {
+    setEditingSourceId(s.id);
+    setNewSourceName(s.name);
+    setNewSourceKind(s.kind);
+    setNewSourceAmount(new Intl.NumberFormat('vi-VN').format(s.expectedAmount));
+    setNewSourceRecurrence(s.recurrence || 'Hàng tháng');
+  };
+
+  const handleCancelEditIncomeSource = () => {
+    setEditingSourceId(null);
+    setNewSourceName('');
+    setNewSourceAmount('');
+    setNewSourceKind('fixed');
+    setNewSourceRecurrence('Hàng tháng');
+  };
+
   const handleCreateIncomeSource = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSourceName.trim()) return;
     const amount = parseInt(newSourceAmount.replace(/[^\d]/g, ''), 10) || 0;
 
     onAddIncomeSource({
-      id: `inc_${Date.now()}`,
+      id: editingSourceId || `inc_${Date.now()}`,
       name: newSourceName.trim(),
       kind: newSourceKind,
       expectedAmount: amount,
       recurrence: newSourceRecurrence
     });
 
-    setNewSourceName('');
-    setNewSourceAmount('');
+    handleCancelEditIncomeSource();
     setShowIncomeModal(false);
   };
 
@@ -342,10 +359,11 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               <div>
                 <div className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider flex items-center gap-1">
                   <ArrowUpRight size={12} className="text-[#8CC7AE]" />
-                  Tổng Thu Dự Kiến ({incomeSources.length} khoản)
+                  Tổng Thu Dự Kiến ({incomeSources.length} nguồn)
                 </div>
                 <div className="num text-[22px] font-bold text-[#F2F5F5] mt-0.5">
-                  {formatVND(totalExpectedIncome)}
+                  {formatVND(totalExpectedIncome)}{' '}
+                  <span className="text-xs text-[#869699] font-normal">/tháng</span>
                 </div>
               </div>
               <button
@@ -358,12 +376,22 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
             </div>
 
             {totalExpectedIncome > 0 ? (
-              <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#869699]">
-                {incomeSources.map((s) => (
-                  <span key={s.id}>
-                    • {s.name}: <b className="text-[#D5E1E3] num">{formatVND(s.expectedAmount)}</b>
-                  </span>
-                ))}
+              <div className="flex flex-wrap gap-x-3 gap-y-1.5 text-[11px] text-[#869699]">
+                {incomeSources.map((s) => {
+                  const monthly = getMonthlyIncomeAmount(s.expectedAmount, s.recurrence);
+                  const isMonthly = (s.recurrence || '').toLowerCase().includes('tháng') && !s.recurrence.toLowerCase().includes('6 tháng');
+                  return (
+                    <span key={s.id} className="inline-flex items-center gap-1 bg-[#161C1E]/60 px-2 py-0.5 rounded-lg border border-[#8BA5AA]/10">
+                      <span>• {s.name}:</span>
+                      <b className="text-[#D5E1E3] num">{formatVND(monthly)}/th</b>
+                      {!isMonthly && (
+                        <span className="text-[#8CC7AE] text-[9.5px]">
+                          ({formatVND(s.expectedAmount)}/{s.recurrence})
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             ) : (
               <div className="text-[11px] text-[#869699]">
@@ -615,97 +643,229 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       )}
 
       {/* MODAL 1: Quản lý Nguồn thu Dự kiến */}
-      {showIncomeModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-[#F2F5F5]">Khoản Thu Dự Kiến</span>
-              <button
-                onClick={() => setShowIncomeModal(false)}
-                className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
-              >
-                <X size={18} />
-              </button>
-            </div>
+      {showIncomeModal && (() => {
+        const rawInputAmount = parseInt(newSourceAmount.replace(/[^\d]/g, ''), 10) || 0;
+        const convertedMonthly = getMonthlyIncomeAmount(rawInputAmount, newSourceRecurrence);
+        const isMonthly = (newSourceRecurrence || '').toLowerCase().includes('tháng') && !newSourceRecurrence.toLowerCase().includes('6 tháng');
 
-            <div className="space-y-2">
-              {incomeSources.length === 0 ? (
-                <div className="text-center py-6 text-xs text-[#869699] bg-[#1C2426]/50 rounded-2xl border border-[#8BA5AA]/10">
-                  Chưa có khoản thu dự kiến nào. Anh thêm ở bên dưới nhé!
+        return (
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+            <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-base font-bold text-[#F2F5F5] block">Khoản Thu Dự Kiến</span>
+                  <span className="text-[11px] text-[#869699]">
+                    Tổng quy đổi: <b className="text-[#8CC7AE] num">{formatVND(totalExpectedIncome)} / tháng</b>
+                  </span>
                 </div>
-              ) : (
-                incomeSources.map((s) => (
-                  <div key={s.id} className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 flex items-center justify-between">
-                    <div>
-                      <div className="text-xs font-semibold text-[#F2F5F5]">{s.name}</div>
-                      <div className="text-[10.5px] text-[#869699]">
-                        {s.recurrence} · {s.kind === 'fixed' ? 'Cố định' : s.kind === 'passive' ? 'Thụ động' : 'Không đều'}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="num text-xs font-bold text-[#8CC7AE]">
-                        {formatVND(s.expectedAmount)}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => onDeleteIncomeSource(s.id)}
-                        className="w-7 h-7 rounded-lg bg-[#282121] text-[#E06D6D] hover:bg-[#3B2525] flex items-center justify-center active:scale-90 transition-transform"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <form onSubmit={handleCreateIncomeSource} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5">
-              <span className="text-xs font-bold text-[#F2F5F5] block">Thêm khoản thu dự kiến</span>
-              <input
-                type="text"
-                placeholder="Tên nguồn thu (VD: Lương, Cho thuê nhà, Cổ tức...)"
-                value={newSourceName}
-                onChange={(e) => setNewSourceName(e.target.value)}
-                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <select
-                  value={newSourceKind}
-                  onChange={(e) => setNewSourceKind(e.target.value as any)}
-                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
+                <button
+                  onClick={() => {
+                    handleCancelEditIncomeSource();
+                    setShowIncomeModal(false);
+                  }}
+                  className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
                 >
-                  <option value="fixed">Cố định</option>
-                  <option value="irregular">Không đều</option>
-                  <option value="passive">Thụ động</option>
-                </select>
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Danh sách các nguồn thu hiện có */}
+              <div className="space-y-2">
+                <span className="text-[10.5px] font-bold text-[#869699] uppercase tracking-wider block">
+                  Các khoản thu đã tạo ({incomeSources.length})
+                </span>
+                {incomeSources.length === 0 ? (
+                  <div className="text-center py-6 text-xs text-[#869699] bg-[#1C2426]/50 rounded-2xl border border-[#8BA5AA]/10">
+                    Chưa có khoản thu dự kiến nào. Anh thêm ở form bên dưới nhé!
+                  </div>
+                ) : (
+                  incomeSources.map((s) => {
+                    const monthly = getMonthlyIncomeAmount(s.expectedAmount, s.recurrence);
+                    const isItemMonthly = (s.recurrence || '').toLowerCase().includes('tháng') && !s.recurrence.toLowerCase().includes('6 tháng');
+                    const isBeingEdited = editingSourceId === s.id;
+
+                    return (
+                      <div
+                        key={s.id}
+                        className={`bg-[#1C2426] border rounded-2xl p-3 flex items-center justify-between transition-colors ${
+                          isBeingEdited ? 'border-[#8CC7AE] bg-[#22302D]' : 'border-[#8BA5AA]/12'
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0 pr-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-semibold text-[#F2F5F5] truncate">{s.name}</span>
+                            <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#232D30] text-[#8CC7AE] border border-[#8CC7AE]/20 shrink-0">
+                              {s.recurrence}
+                            </span>
+                          </div>
+                          <div className="text-[10.5px] text-[#869699] mt-0.5">
+                            {s.kind === 'fixed' ? 'Cố định' : s.kind === 'passive' ? 'Thụ động' : 'Không đều'}
+                            {!isItemMonthly && (
+                              <span className="text-[#8CC7AE] font-semibold ml-1">
+                                · Quy đổi ~{formatVND(monthly)}/tháng
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right">
+                            <div className="num text-xs font-bold text-[#8CC7AE]">
+                              {formatVND(s.expectedAmount)}
+                            </div>
+                            {!isItemMonthly && (
+                              <div className="text-[9.5px] text-[#869699]">
+                                /{s.recurrence}
+                              </div>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditIncomeSource(s)}
+                            className="w-7 h-7 rounded-lg bg-[#20292B] text-[#8CC7AE] hover:bg-[#2B383B] flex items-center justify-center active:scale-90 transition-transform"
+                            title="Sửa nội dung khoản thu này"
+                          >
+                            <Edit3 size={13} />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => onDeleteIncomeSource(s.id)}
+                            className="w-7 h-7 rounded-lg bg-[#282121] text-[#E06D6D] hover:bg-[#3B2525] flex items-center justify-center active:scale-90 transition-transform"
+                            title="Xóa khoản thu này"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Form Thêm / Sửa nguồn thu */}
+              <form onSubmit={handleCreateIncomeSource} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#F2F5F5] block">
+                    {editingSourceId ? `✏️ Sửa khoản thu: ${newSourceName || '...'}` : '➕ Thêm khoản thu mới'}
+                  </span>
+                  {editingSourceId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditIncomeSource}
+                      className="text-[11px] text-[#DEB48A] hover:underline"
+                    >
+                      Hủy sửa (Thêm mới)
+                    </button>
+                  )}
+                </div>
+
+                {/* Tên nguồn thu */}
                 <input
                   type="text"
-                  placeholder="Chu kỳ (Hàng tháng)"
-                  value={newSourceRecurrence}
-                  onChange={(e) => setNewSourceRecurrence(e.target.value)}
-                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
+                  placeholder="Tên nguồn thu (VD: Lương, Thưởng Tết, Cổ tức, Cho thuê nhà...)"
+                  value={newSourceName}
+                  onChange={(e) => setNewSourceName(e.target.value)}
+                  className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
                 />
-              </div>
-              <input
-                type="text"
-                placeholder="Số tiền dự kiến mỗi tháng (₫)"
-                value={newSourceAmount}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/[^\d]/g, '');
-                  setNewSourceAmount(raw ? new Intl.NumberFormat('vi-VN').format(parseInt(raw, 10)) : '');
-                }}
-                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow active:scale-98 transition-transform"
-              >
-                + Lưu khoản thu dự kiến
-              </button>
-            </form>
+
+                {/* Loại thu nhập & Thời gian nhận (Chu kỳ) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-[#869699] uppercase font-semibold block mb-1">
+                      Loại thu nhập
+                    </label>
+                    <select
+                      value={newSourceKind}
+                      onChange={(e) => setNewSourceKind(e.target.value as any)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
+                    >
+                      <option value="fixed">Cố định</option>
+                      <option value="passive">Thụ động</option>
+                      <option value="irregular">Không đều</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-[#869699] uppercase font-semibold block mb-1">
+                      Thời gian nhận
+                    </label>
+                    <select
+                      value={newSourceRecurrence}
+                      onChange={(e) => setNewSourceRecurrence(e.target.value)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5] font-semibold"
+                    >
+                      {RECURRENCE_PRESETS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Pills chọn nhanh thời gian nhận */}
+                <div className="flex gap-1.5 overflow-x-auto py-0.5 no-scrollbar">
+                  {RECURRENCE_PRESETS.map((opt) => (
+                    <button
+                      type="button"
+                      key={opt.value}
+                      onClick={() => setNewSourceRecurrence(opt.value)}
+                      className={`px-2 py-1 rounded-lg text-[10.5px] whitespace-nowrap transition-all border ${
+                        newSourceRecurrence === opt.value
+                          ? 'bg-[#657D81] text-[#F2F5F5] border-[#8CC7AE]/50 font-bold'
+                          : 'bg-[#161C1E] text-[#869699] border-[#8BA5AA]/15'
+                      }`}
+                    >
+                      {opt.value}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Số tiền dự kiến */}
+                <div>
+                  <label className="text-[10px] text-[#869699] uppercase font-semibold block mb-1">
+                    Số tiền dự kiến mỗi kỳ ({newSourceRecurrence})
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={`Số tiền mỗi kỳ ${newSourceRecurrence} (₫)`}
+                    value={newSourceAmount}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/[^\d]/g, '');
+                      setNewSourceAmount(raw ? new Intl.NumberFormat('vi-VN').format(parseInt(raw, 10)) : '');
+                    }}
+                    className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] num focus:outline-none font-bold"
+                  />
+                </div>
+
+                {/* Gợi ý quy đổi tự động */}
+                {rawInputAmount > 0 && (
+                  <div className="p-2.5 rounded-xl bg-[#161C1E] border border-[#8CC7AE]/30 text-[11px] space-y-1">
+                    <div className="text-[#8CC7AE] font-semibold flex items-center justify-between">
+                      <span>💡 Tự động chia cho hàng tháng:</span>
+                      <b className="num text-xs text-[#F2F5F5]">{formatVND(convertedMonthly)} / tháng</b>
+                    </div>
+                    <div className="text-[10px] text-[#869699]">
+                      {isMonthly
+                        ? 'Khoản thu tính trọn vẹn vào dòng tiền mỗi tháng để chia hũ.'
+                        : `Khoản thu ${newSourceRecurrence} được tự động chia đều về hàng tháng (${formatVND(convertedMonthly)}/tháng) để thiết lập hạn mức 6 hũ chi tiêu.`}
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 rounded-xl bg-[#657D81] hover:bg-[#789397] text-[#F2F5F5] text-xs font-bold shadow active:scale-98 transition-transform"
+                >
+                  {editingSourceId ? '✓ Lưu cập nhật khoản thu' : '+ Lưu khoản thu dự kiến'}
+                </button>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL 1B: Quản lý Khoản Chi Dự Kiến */}
       {showPlannedExpModal && (

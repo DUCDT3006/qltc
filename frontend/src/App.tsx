@@ -431,9 +431,17 @@ export function App() {
     }
   };
 
-  // Thêm / xóa nguồn thu dự kiến
+  // Thêm / sửa / xóa nguồn thu dự kiến
   const handleAddIncomeSource = async (newSource: IncomeSource) => {
-    setIncomeSources(prev => [...prev, newSource]);
+    setIncomeSources(prev => {
+      const idx = prev.findIndex(s => s.id === newSource.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = newSource;
+        return copy;
+      }
+      return [...prev, newSource];
+    });
     try {
       await fetch(`${API_BASE}/income-sources`, {
         method: 'POST',

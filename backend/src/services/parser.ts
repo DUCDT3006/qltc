@@ -10,10 +10,13 @@ export interface ParsedBankNotification {
   rawText: string;
 }
 
-// Hàm làm sạch chuỗi số tiền Việt Nam (ví dụ: "85,000", "25.000.000", "85000VND")
+// Hàm làm sạch chuỗi số tiền Việt Nam (ví dụ: "85,000", "25.000.000", "85000VND", "150,000.00")
 export function parseVndAmount(raw: string): number {
   if (!raw) return 0;
-  const cleaned = raw.replace(/[^\d]/g, '');
+  let str = raw.trim();
+  // Loại bỏ phần thập phân .00 hoặc ,00 ở cuối chuỗi tiền tệ (tránh nhân 100 lần thành 15.000.000 ₫)
+  str = str.replace(/([,\d]+)\.\d{1,2}$/, '$1').replace(/([.\d]+),\d{1,2}$/, '$1');
+  const cleaned = str.replace(/[^\d]/g, '');
   const parsed = parseInt(cleaned, 10);
   return isNaN(parsed) ? 0 : parsed;
 }
@@ -50,7 +53,8 @@ export function detectBankCode(packageName: string, text: string): string {
 export function parseBankNotification(
   packageName: string,
   title: string,
-  body: string
+  body: string,
+  occurredAtOverride?: string
 ): ParsedBankNotification | null {
   const cleanTitle = (title || '').trim();
   const cleanBody = (body || '').trim();
@@ -210,7 +214,7 @@ export function parseBankNotification(
     type,
     amount,
     balanceAfter,
-    occurredAt: new Date().toISOString(),
+    occurredAt: occurredAtOverride || new Date().toISOString(),
     description,
     externalRef,
     rawText: fullText

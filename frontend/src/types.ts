@@ -10,6 +10,7 @@ export interface Jar {
   monthlyLimit: number;
   spentThisMonth: number;
   color: string;
+  isDefault?: boolean;
 }
 
 export interface BankAccount {
@@ -18,7 +19,7 @@ export interface BankAccount {
   bankCode?: string;
   accountNumberMask?: string;
   balance: number;
-  type: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto';
+  type: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings';
 }
 
 export interface IncomeSource {
@@ -56,6 +57,10 @@ export function getMonthlyIncomeAmount(amount: number, recurrence?: string): num
   return amount; // Mặc định Hàng tháng
 }
 
+export function normalizeToMonthlyAmount(amount: number, recurrence?: string): number {
+  return getMonthlyIncomeAmount(amount, recurrence);
+}
+
 export interface PlannedExpense {
   id: string;
   name: string;
@@ -76,6 +81,12 @@ export interface Transaction {
   rawQuote?: string;
   suggestedCategory: string;
   suggestedJarCode: string;
+  jarId?: string;
+  toAccountId?: string;
+  toAccountName?: string;
+  incomeSourceId?: string;
+  originalType?: 'income' | 'expense';
+  balanceAfter?: number;
   occurredAt: string;
   occurredAtIso?: string;
   status: 'pending' | 'confirmed' | 'rejected';
@@ -98,6 +109,7 @@ export interface Holding {
   unit: string;
   priceUpdatedAt?: string;
   source?: string;
+  autoSync?: boolean;
 }
 
 export interface FmarketFund {

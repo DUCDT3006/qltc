@@ -90,43 +90,90 @@ class BankNotificationListener : NotificationListenerService() {
 
         Log.i(TAG, "Phát hiện biến động số dư từ $packageName: $title - $fullBody")
 
-        // 4. Gửi lên Cloudflare Worker backend
-        sendToBackend(packageName, title, fullBody)
+        // 4. Gửi lên Cloudflare Worker backend kèm thời gian thực tế xảy ra thông báo
+        val postTime = sbn.postTime
+        sendToBackend(packageName, title, fullBody, postTime)
     }
 
-    private fun sendToBackend(packageName: String, title: String, text: String) {
+    private fun sendToBackend(packageName: String, title: String, text: String, postTime: Long = System.currentTimeMillis()) {
         val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
         val backendUrl = prefs.getString("backend_url", "https://qltc-backend.dtd-store.workers.dev") ?: "https://qltc-backend.dtd-store.workers.dev"
 
         CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val url = URL("$backendUrl/api/notifications/ingest")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json; utf-8")
-                conn.setRequestProperty("Accept", "application/json")
-                conn.doOutput = true
-                conn.connectTimeout = 10000
-                conn.readTimeout = 10000
+            // Thử đẩy các thông báo offline tồn đọng trước đó (nếu có)
+            flushOfflineQueue(backendUrl, prefs)
 
-                val payload = JSONObject().apply {
-                    put("packageName", packageName)
-                    put("title", title)
-                    put("text", text)
-                    put("userId", prefs.getString("user_id", "user_default"))
-                }
-
-                OutputStreamWriter(conn.outputStream).use { writer ->
-                    writer.write(payload.toString())
-                    writer.flush()
-                }
-
-                val responseCode = conn.responseCode
-                Log.d(TAG, "Kết quả gửi lên backend: $responseCode")
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "Lỗi khi gửi thông báo lên backend: ${e.message}")
+            val payload = JSONObject().apply {
+                put("packageName", packageName)
+                put("title", title)
+                put("text", text)
+                put("occurredAt", postTime)
+                put("userId", prefs.getString("user_id", "user_default"))
             }
+
+            val success = postJsonToBackend("$backendUrl/api/notifications/ingest", payload)
+            if (!success) {
+                // Nếu mất mạng hoặc gửi thất bại, lưu vào hàng đợi offline trong SharedPreferences
+                enqueueOfflineNotif(prefs, payload)
+            }
+        }
+    }
+
+    private fun postJsonToBackend(endpoint: String, payload: JSONObject): Boolean {
+        return try {
+            val url = URL(endpoint)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+            conn.setRequestProperty("Accept", "application/json")
+            conn.doOutput = true
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+
+            OutputStreamWriter(conn.outputStream).use { writer ->
+                writer.write(payload.toString())
+                writer.flush()
+            }
+
+            val responseCode = conn.responseCode
+            conn.disconnect()
+            responseCode in 200..299
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi gửi thông báo: ${e.message}")
+            false
+        }
+    }
+
+    private fun enqueueOfflineNotif(prefs: android.content.SharedPreferences, payload: JSONObject) {
+        try {
+            val existing = prefs.getString("offline_notif_queue", "[]") ?: "[]"
+            val jsonArray = org.json.JSONArray(existing)
+            jsonArray.put(payload)
+            prefs.edit().putString("offline_notif_queue", jsonArray.toString()).apply()
+            Log.w(TAG, "Đã lưu thông báo vào hàng đợi offline (Tổng: ${jsonArray.length()})")
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi lưu offline: ${e.message}")
+        }
+    }
+
+    private fun flushOfflineQueue(backendUrl: String, prefs: android.content.SharedPreferences) {
+        val existing = prefs.getString("offline_notif_queue", null) ?: return
+        try {
+            val jsonArray = org.json.JSONArray(existing)
+            if (jsonArray.length() == 0) return
+
+            Log.i(TAG, "Đang gửi lại ${jsonArray.length()} thông báo offline...")
+            val remaining = org.json.JSONArray()
+            for (i in 0 until jsonArray.length()) {
+                val item = jsonArray.getJSONObject(i)
+                val ok = postJsonToBackend("$backendUrl/api/notifications/ingest", item)
+                if (!ok) {
+                    remaining.put(item)
+                }
+            }
+            prefs.edit().putString("offline_notif_queue", remaining.toString()).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi flush offline queue: ${e.message}")
         }
     }
 }

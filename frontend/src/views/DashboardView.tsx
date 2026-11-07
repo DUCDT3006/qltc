@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { Sparkline } from '../components/Sparkline';
-import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount, getMonthlyIncomeAmount } from '../types';
-import { formatVND } from '../mockData';
-import { computeExact100Percentages } from './BudgetView';
+import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
+import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from '../utils/financeMath';
+import { isTxnInPeriod, getPeriodDisplayLabel, getVietnamDate } from '../utils/dateUtils';
+import { CurrencyInput } from '../components/CurrencyInput';
 import {
   RefreshCw,
   ChevronLeft,
@@ -16,7 +17,8 @@ import {
   Check,
   X,
   ArrowUpRight,
-  Scale
+  Scale,
+  Plus
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -33,7 +35,7 @@ interface DashboardViewProps {
   privacyMode: boolean;
   isSyncingPrices?: boolean;
   onSyncMarketPrices: () => Promise<void>;
-  onUpdateAccountBalance: (accountId: string, newBalance: number, name?: string, type?: 'bank' | 'cash' | 'ewallet') => Promise<void>;
+  onUpdateAccountBalance: (accountId: string, newBalance: number, name?: string, type?: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings') => Promise<void>;
   onAddAccount: (acc: BankAccount) => void;
   onOpenInbox: () => void;
   onOpenBudget: () => void;
@@ -62,19 +64,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenBudget,
   onOpenInvestments
 }) => {
-  const now = new Date();
+  const nowVN = getVietnamDate();
   const [periodMode, setPeriodMode] = useState<PeriodMode>('month');
-  const [selectedYear, setSelectedYear] = useState<number>(now.getFullYear());
-  const [selectedMonth, setSelectedMonth] = useState<number>(now.getMonth() + 1); // 1..12
-  const [selectedQuarter, setSelectedQuarter] = useState<number>(Math.floor(now.getMonth() / 3) + 1); // 1..4
+  const [selectedYear, setSelectedYear] = useState<number>(nowVN.getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState<number>(nowVN.getMonth() + 1); // 1..12
+  const [selectedQuarter, setSelectedQuarter] = useState<number>(Math.floor(nowVN.getMonth() / 3) + 1); // 1..4
 
   // Modal chỉnh nhanh số dư Ngân hàng / Tiền mặt ngay tại Tổng quan
   const [showQuickCashModal, setShowQuickCashModal] = useState(false);
   const [editingAccId, setEditingAccId] = useState<string>('');
-  const [editingBalanceStr, setEditingBalanceStr] = useState<string>('');
+  const [editingBalance, setEditingBalance] = useState<number>(0);
   const [newCashName, setNewCashName] = useState('');
-  const [newCashType, setNewCashType] = useState<'bank' | 'cash'>('cash');
-  const [newCashBalanceStr, setNewCashBalanceStr] = useState('');
+  const [newCashType, setNewCashType] = useState<'bank' | 'cash' | 'savings'>('cash');
+  const [newCashBalance, setNewCashBalance] = useState<number>(0);
   const [syncDone, setSyncDone] = useState(false);
 
   // Điều hướng kỳ thống kê
@@ -128,45 +130,75 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const isCurrentMonthPeriod =
     periodMode === 'month' &&
-    selectedYear === now.getFullYear() &&
-    selectedMonth === now.getMonth() + 1;
+    selectedYear === nowVN.getFullYear() &&
+    selectedMonth === nowVN.getMonth() + 1;
 
-  // Lọc các giao dịch đã duyệt nằm trong kỳ được chọn
-  const periodTransactions = confirmedTransactions.filter(t => {
-    const rawDate = t.occurredAtIso ? new Date(t.occurredAtIso) : now;
-    const d = isNaN(rawDate.getTime()) ? now : rawDate;
-    const y = d.getFullYear();
-    const m = d.getMonth() + 1;
-    const q = Math.floor((m - 1) / 3) + 1;
+  // Lọc các giao dịch đã duyệt nằm trong kỳ được chọn (chuẩn múi giờ UTC+7)
+  const targetDateForPeriod = new Date(
+    selectedYear,
+    periodMode === 'month' ? selectedMonth - 1 : periodMode === 'quarter' ? (selectedQuarter - 1) * 3 : 0,
+    15
+  );
 
-    if (periodMode === 'month') return y === selectedYear && m === selectedMonth;
-    if (periodMode === 'quarter') return y === selectedYear && q === selectedQuarter;
-    return y === selectedYear;
-  });
+  const periodTransactions = confirmedTransactions.filter(t =>
+    isTxnInPeriod(t.occurredAt, periodMode, targetDateForPeriod)
+  );
 
   // ============================================================================
-  // 1. THỐNG KÊ TÀI SẢN THỰC TẾ HIỆN CÓ (6 NHÓM TÀI SẢN)
+  // 1. THỐNG KÊ TÀI SẢN THỰC TẾ HIỆN CÓ (6 NHÓM TÀI SẢN TOÀN DIỆN)
   // ============================================================================
-  const bankAccounts = accounts.filter(a => a.type === 'bank' || a.type === 'ewallet');
+  const bankAccounts = accounts.filter(a => a.type === 'bank' || a.type === 'ewallet' || a.type === 'savings');
   const cashAccounts = accounts.filter(a => a.type === 'cash');
+  const securitiesCashAccounts = accounts.filter(a => a.type === 'securities' || a.type === 'crypto');
 
   const bankTotal = bankAccounts.reduce((sum, a) => sum + (a.balance || 0), 0);
   const cashTotal = cashAccounts.reduce((sum, a) => sum + (a.balance || 0), 0);
+  const securitiesCashTotal = securitiesCashAccounts.reduce((sum, a) => sum + (a.balance || 0), 0);
 
   const financialHoldings = holdings.filter(h => ['fund', 'stock', 'crypto'].includes(h.assetClass));
   const goldHoldings = holdings.filter(h => h.assetClass === 'gold');
   const silverHoldings = holdings.filter(h => h.assetClass === 'silver');
   const landHoldings = holdings.filter(h => h.assetClass === 'land');
 
-  const financialTotal = financialHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
+  const financialHoldingsTotal = financialHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
+  const financialTotal = financialHoldingsTotal + securitiesCashTotal;
   const goldTotal = goldHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
   const silverTotal = silverHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
   const landTotal = landHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
 
+  const totalCalculatedNetWorth = bankTotal + cashTotal + financialTotal + goldTotal + silverTotal + landTotal;
+
+  // ============================================================================
+  // TÍNH ĐIỂM DỮ LIỆU THẬT CHO SPARKLINE
+  // ============================================================================
+  const sparklinePoints: number[] = (() => {
+    if (periodTransactions.length === 0) {
+      return [0, 0, 0, 0, 0, 0, 0];
+    }
+    // Lấy 7 mốc biến động số dư theo thời gian của kỳ
+    const sorted = [...periodTransactions].sort((a, b) => {
+      const ta = new Date(a.occurredAtIso || a.occurredAt).getTime();
+      const tb = new Date(b.occurredAtIso || b.occurredAt).getTime();
+      return ta - tb;
+    });
+
+    let runningBal = 0;
+    const pts = sorted.map(t => {
+      if (t.type === 'income') runningBal += t.amount;
+      else if (t.type === 'expense') runningBal -= t.amount;
+      return runningBal;
+    });
+
+    return pts.length >= 2 ? pts : [0, runningBal];
+  })();
+
   // ============================================================================
   // 2. SO SÁNH NGUỒN THU THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM)
   // ============================================================================
-  const baseMonthlyExpectedIncome = incomeSources.reduce((sum, s) => sum + getMonthlyIncomeAmount(s.expectedAmount, s.recurrence), 0);
+  const baseMonthlyExpectedIncome = incomeSources.reduce(
+    (sum, s) => sum + normalizeToMonthlyAmount(s.expectedAmount, s.recurrence),
+    0
+  );
   const expectedIncomeForPeriod = baseMonthlyExpectedIncome * periodMultiplier;
 
   const actualIncomeTxns = periodTransactions.filter(t => t.type === 'income');
@@ -176,12 +208,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ? Math.round((actualIncomeForPeriod / expectedIncomeForPeriod) * 100)
     : 0;
 
-  // So sánh từng nguồn thu dự kiến với thực tế (quy đổi theo kỳ: tháng * 1, quý * 3, năm * 12)
+  // So sánh từng nguồn thu dự kiến với thực tế
   const incomeSourceComparison = incomeSources.map(src => {
-    const monthlyExpected = getMonthlyIncomeAmount(src.expectedAmount, src.recurrence);
+    const monthlyExpected = normalizeToMonthlyAmount(src.expectedAmount, src.recurrence);
     const expected = monthlyExpected * periodMultiplier;
     const matchedActual = actualIncomeTxns
       .filter(t => {
+        if (t.incomeSourceId && t.incomeSourceId === src.id) return true;
         const cat = (t.suggestedCategory || '').toLowerCase();
         const desc = (t.description || '').toLowerCase();
         const nameLower = src.name.toLowerCase();
@@ -198,6 +231,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     };
   });
 
+  const matchedActualTotal = incomeSourceComparison.reduce((s, i) => s + i.actual, 0);
+  const unmatchedActual = Math.max(0, actualIncomeForPeriod - matchedActualTotal);
+
   // ============================================================================
   // 3. SO SÁNH CÁC HŨ THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM)
   // ============================================================================
@@ -205,7 +241,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const jarActualAmounts = jars.map(jar => {
     const fromPeriodTxns = actualExpenseTxns
-      .filter(t => t.suggestedJarCode === jar.code)
+      .filter(t => t.jarId === jar.id || t.suggestedJarCode === jar.code)
       .reduce((s, t) => s + t.amount, 0);
     if (isCurrentMonthPeriod) {
       return Math.max(jar.spentThisMonth || 0, fromPeriodTxns);
@@ -236,7 +272,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     : 0;
 
   const totalPlannedExpensesForPeriod =
-    plannedExpenses.reduce((s, e) => s + e.expectedAmount, 0) * periodMultiplier;
+    plannedExpenses.reduce((s, e) => s + normalizeToMonthlyAmount(e.expectedAmount, e.recurrence), 0) * periodMultiplier;
 
   const handleSyncPricesClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -248,29 +284,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const handleSaveQuickAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (editingAccId) {
-      const bal = parseInt(editingBalanceStr.replace(/[^\d]/g, ''), 10) || 0;
-      await onUpdateAccountBalance(editingAccId, bal);
+      await onUpdateAccountBalance(editingAccId, editingBalance);
       setEditingAccId('');
-      setEditingBalanceStr('');
+      setEditingBalance(0);
     }
   };
 
   const handleCreateQuickCashOrBank = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCashName.trim()) return;
-    const bal = parseInt(newCashBalanceStr.replace(/[^\d]/g, ''), 10) || 0;
     onAddAccount({
       id: `acc_${Date.now()}`,
       name: newCashName.trim(),
       type: newCashType,
-      balance: bal
+      balance: newCashBalance
     });
     setNewCashName('');
-    setNewCashBalanceStr('');
+    setNewCashBalance(0);
   };
 
   return (
-    <div className="space-y-3.5 pb-24 px-4">
+    <div className="space-y-3.5 pb-24 px-4 select-none">
       {/* Pending Banner if any */}
       {pendingCount > 0 && (
         <div
@@ -338,8 +372,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Tổng Tài Sản Thực Tế Hiện Có
             </span>
             <div className="num text-[28px] font-bold text-[#F2F5F5] tracking-tight mt-0.5">
-              {privacyMode ? '••••••••••' : new Intl.NumberFormat('vi-VN').format(Math.round(netWorth))}{' '}
-              <span className="text-[18px] font-normal text-[#95B0B4]">₫</span>
+              {privacyMode ? '••••••••••' : formatVND(totalCalculatedNetWorth > 0 ? totalCalculatedNetWorth : netWorth)}
             </div>
           </div>
 
@@ -362,7 +395,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
 
-        <Sparkline />
+        {/* Dynamic Sparkline */}
+        <Sparkline points={sparklinePoints} />
 
         {/* Bảng chi tiết 6 nhóm Tài sản thực tế */}
         <div className="pt-2 border-t border-[#8BA5AA]/15 space-y-2">
@@ -380,22 +414,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span className="text-[#869699]">·</span>
               <button
                 onClick={onOpenInvestments}
-                className="text-[10.5px] text-[#DEB48A] font-semibold hover:underline"
+                className="text-[10.5px] text-[#D5E1E3] font-semibold hover:underline"
               >
-                Sửa Vàng/Bạc/Đất/Quỹ ›
+                Đầu tư ›
               </button>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            {/* 1. Tài khoản ngân hàng */}
+            {/* 1. Tài khoản ngân hàng / Ví */}
             <div
               onClick={() => setShowQuickCashModal(true)}
               className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
             >
               <div className="flex items-center justify-between text-[11px] text-[#869699]">
                 <span className="flex items-center gap-1">
-                  <Landmark size={12} className="text-[#95B0B4]" /> TK Ngân hàng
+                  <Landmark size={12} className="text-[#657D81]" /> Ngân hàng & Ví
                 </span>
                 <span>{bankAccounts.length} TK</span>
               </div>
@@ -420,7 +454,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             </div>
 
-            {/* 3. Tài sản tài chính (Fmarket, CP, Crypto) */}
+            {/* 3. Tài sản tài chính (Fmarket, CP, Crypto + tiền trong TK CK) */}
             <div
               onClick={onOpenInvestments}
               className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
@@ -551,42 +585,50 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 {formatVND(actualIncomeForPeriod - expectedIncomeForPeriod)}
               </b>
             </span>
-            <button onClick={onOpenBudget} className="text-[#8CC7AE] hover:underline">
-              Chỉnh thu dự kiến ›
+            <button onClick={onOpenBudget} className="text-[#8CC7AE] hover:underline font-semibold flex items-center gap-0.5">
+              <Plus size={11} /> Thêm / Sửa khoản thu ›
             </button>
           </div>
         </div>
 
         {/* Chi tiết từng nguồn thu dự kiến */}
-        {incomeSourceComparison.length > 0 && (
-          <div className="pt-2 border-t border-[#8BA5AA]/12 space-y-2">
-            {incomeSourceComparison.map(item => (
-              <div key={item.id} className="space-y-1">
-                <div className="flex items-center justify-between text-[11.5px]">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[#D5E1E3] font-medium truncate max-w-[130px]">{item.name}</span>
-                    <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#141A1C] text-[#8CC7AE] border border-[#8CC7AE]/20 shrink-0">
-                      {item.recurrence}
-                    </span>
-                  </div>
-                  <div className="num text-right shrink-0">
-                    <b className="text-[#F2F5F5]">{formatVND(item.actual)}</b>
-                    <span className="text-[#869699]"> / {formatVND(item.expected)}</span>{' '}
-                    <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>
-                      ({item.pct}%)
-                    </span>
-                  </div>
+        <div className="pt-2 border-t border-[#8BA5AA]/12 space-y-2">
+          {incomeSourceComparison.map(item => (
+            <div key={item.id} className="space-y-1">
+              <div className="flex items-center justify-between text-[11.5px]">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[#D5E1E3] font-medium truncate max-w-[130px]">{item.name}</span>
+                  <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#141A1C] text-[#8CC7AE] border border-[#8CC7AE]/20 shrink-0">
+                    {item.recurrence}
+                  </span>
                 </div>
-                <div className="h-1 rounded-full bg-[#141A1C] overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-[#8CC7AE]"
-                    style={{ width: `${Math.min(100, item.pct)}%` }}
-                  />
+                <div className="num text-right shrink-0">
+                  <b className="text-[#F2F5F5]">{formatVND(item.actual)}</b>
+                  <span className="text-[#869699]"> / {formatVND(item.expected)}</span>{' '}
+                  <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>
+                    ({item.pct}%)
+                  </span>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
+              <div className="h-1 rounded-full bg-[#141A1C] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[#8CC7AE]"
+                  style={{ width: `${Math.min(100, item.pct)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+
+          {/* Khoản thu ngoài dự kiến / khác nếu có */}
+          {unmatchedActual > 0 && (
+            <div className="space-y-1 pt-1 border-t border-dashed border-[#8BA5AA]/15">
+              <div className="flex items-center justify-between text-[11.5px]">
+                <span className="text-[#8CC7AE] font-medium">✨ Thu ngoài dự kiến / Khác</span>
+                <b className="num text-[#8CC7AE]">+{formatVND(unmatchedActual)}</b>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ==========================================================================
@@ -712,15 +754,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* MODAL CẬP NHẬT NHANH SỐ DƯ TÀI KHOẢN NGÂN HÀNG & TIỀN MẶT */}
       {showQuickCashModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in">
-          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <span className="text-base font-bold text-[#F2F5F5]">
                 Cập nhật Tài khoản Ngân hàng & Tiền mặt
               </span>
               <button
                 onClick={() => setShowQuickCashModal(false)}
-                className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center active:scale-90"
               >
                 <X size={18} />
               </button>
@@ -741,19 +783,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                   {editingAccId === acc.id ? (
                     <form onSubmit={handleSaveQuickAccount} className="flex items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={editingBalanceStr}
-                        onChange={(e) => {
-                          const raw = e.target.value.replace(/[^\d]/g, '');
-                          setEditingBalanceStr(raw ? new Intl.NumberFormat('vi-VN').format(parseInt(raw, 10)) : '');
-                        }}
-                        className="w-28 bg-[#141A1C] border border-[#8CC7AE] rounded-lg px-2 py-1 text-xs font-bold num text-[#F2F5F5] text-right"
-                        autoFocus
-                      />
+                      <div className="w-32">
+                        <CurrencyInput
+                          value={editingBalance}
+                          onChange={setEditingBalance}
+                          autoFocus
+                          showQuickChips={false}
+                          className="py-1.5 text-xs text-right"
+                        />
+                      </div>
                       <button
                         type="submit"
-                        className="px-2.5 py-1 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
                       >
                         Lưu
                       </button>
@@ -766,9 +807,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       <button
                         onClick={() => {
                           setEditingAccId(acc.id);
-                          setEditingBalanceStr(new Intl.NumberFormat('vi-VN').format(acc.balance));
+                          setEditingBalance(acc.balance);
                         }}
-                        className="px-2 py-1 rounded-lg bg-[#232D30] text-[11px] text-[#D5E1E3]"
+                        className="px-2 py-1 rounded-lg bg-[#232D30] text-[11px] text-[#D5E1E3] hover:bg-[#2C3B3F]"
                       >
                         Sửa
                       </button>
@@ -786,30 +827,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <select
                   value={newCashType}
-                  onChange={(e) => setNewCashType(e.target.value as 'bank' | 'cash')}
+                  onChange={(e) => setNewCashType(e.target.value as any)}
                   className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2.5 py-2 text-xs text-[#F2F5F5]"
                 >
                   <option value="cash">💵 Ví Tiền mặt</option>
                   <option value="bank">🏦 TK Ngân hàng</option>
+                  <option value="savings">💰 Sổ Tiết kiệm</option>
                 </select>
                 <input
                   type="text"
-                  placeholder="Tên (VD: Tiền mặt két sắt, VCB...)"
+                  placeholder="Tên (VD: Tiền mặt két sắt...)"
                   value={newCashName}
                   onChange={(e) => setNewCashName(e.target.value)}
                   className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
                 />
               </div>
-              <input
-                type="text"
-                placeholder="Số dư thực tế hiện có (₫)"
-                value={newCashBalanceStr}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/[^\d]/g, '');
-                  setNewCashBalanceStr(raw ? new Intl.NumberFormat('vi-VN').format(parseInt(raw, 10)) : '');
-                }}
-                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] num"
-              />
+              <div>
+                <label className="text-[10px] text-[#869699] uppercase block mb-1">Số dư ban đầu</label>
+                <CurrencyInput
+                  value={newCashBalance}
+                  onChange={setNewCashBalance}
+                  className="text-sm font-bold"
+                />
+              </div>
               <button
                 type="submit"
                 className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow active:scale-98"

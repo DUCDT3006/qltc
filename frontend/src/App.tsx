@@ -4,6 +4,7 @@ import { BottomNav } from './components/BottomNav';
 import { QuickAddModal } from './components/QuickAddModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ResetModal } from './components/ResetModal';
+import { ToastProvider, useToast } from './components/Toast';
 import { DashboardView } from './views/DashboardView';
 import { InboxSwipeView } from './views/InboxSwipeView';
 import { BudgetView } from './views/BudgetView';
@@ -12,8 +13,6 @@ import {
   INITIAL_JARS,
   INITIAL_ACCOUNTS,
   INITIAL_INCOME_SOURCES,
-  INITIAL_PENDING_TRANSACTIONS,
-  INITIAL_CONFIRMED_TRANSACTIONS,
   INITIAL_HOLDINGS
 } from './mockData';
 import {
@@ -27,66 +26,87 @@ import {
   UserProfile,
   FmarketFund
 } from './types';
+import { formatOccurredTime } from './utils/dateUtils';
+import { formatVND } from './utils/financeMath';
 
 const API_BASE = 'https://qltc-backend.dtd-store.workers.dev/api';
 
-function formatOccurredTime(dateStr?: string): string {
-  if (!dateStr) return 'Vừa xong';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    const hours = String(d.getHours()).padStart(2, '0');
-    const mins = String(d.getMinutes()).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    if (isToday) {
-      return `Hôm nay · ${hours}:${mins}`;
-    }
-    return `${day}/${month} · ${hours}:${mins}`;
-  } catch {
-    return dateStr;
-  }
+export function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
+  );
 }
 
-export function App() {
+function AppContent() {
+  const { success, error, info, undoToast } = useToast();
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
+  const [quickAddInitialType, setQuickAddInitialType] = useState<'expense' | 'income' | 'transfer'>('expense');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isResetOpen, setIsResetOpen] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSyncingPrices, setIsSyncingPrices] = useState(false);
 
-  // States
-  const [jars, setJars] = useState<Jar[]>(INITIAL_JARS);
+  // States - khởi tạo từ localStorage cache nếu có để tránh flash dữ liệu mẫu
+  const [jars, setJars] = useState<Jar[]>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_cached_jars');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return INITIAL_JARS;
+  });
+
   const [incomeSources, setIncomeSources] = useState<IncomeSource[]>(() => {
-    const saved = localStorage.getItem('qltc_income_sources');
-    if (saved !== null) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return [];
-      }
-    }
+    try {
+      const saved = localStorage.getItem('qltc_income_sources');
+      if (saved) return JSON.parse(saved);
+    } catch {}
     return INITIAL_INCOME_SOURCES;
   });
+
   const [plannedExpenses, setPlannedExpenses] = useState<PlannedExpense[]>(() => {
-    const saved = localStorage.getItem('qltc_planned_expenses');
-    if (saved !== null) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return [];
-      }
-    }
+    try {
+      const saved = localStorage.getItem('qltc_planned_expenses');
+      if (saved) return JSON.parse(saved);
+    } catch {}
     return [];
   });
-  const [accounts, setAccounts] = useState<BankAccount[]>(INITIAL_ACCOUNTS);
-  const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>(INITIAL_PENDING_TRANSACTIONS);
-  const [confirmedTransactions, setConfirmedTransactions] = useState<Transaction[]>(INITIAL_CONFIRMED_TRANSACTIONS);
-  const [holdings, setHoldings] = useState<Holding[]>(INITIAL_HOLDINGS);
+
+  const [accounts, setAccounts] = useState<BankAccount[]>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_cached_accounts');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return INITIAL_ACCOUNTS;
+  });
+
+  const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_cached_pending');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
+  const [confirmedTransactions, setConfirmedTransactions] = useState<Transaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_cached_confirmed');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
+  const [holdings, setHoldings] = useState<Holding[]>(() => {
+    try {
+      const saved = localStorage.getItem('qltc_cached_holdings');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return INITIAL_HOLDINGS;
+  });
+
   const [fmarketFunds, setFmarketFunds] = useState<FmarketFund[]>([]);
 
   // Thông tin người dùng
@@ -98,292 +118,305 @@ export function App() {
     return {
       name: 'Anh Đức',
       email: 'duc@qltc.local',
-      phone: '',
-      avatar: ''
+      phone: '0988.xxx.xxx',
+      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&q=80'
     };
   });
 
+  // Ghi nhớ cache để tải siêu tốc
   useEffect(() => {
-    localStorage.setItem('qltc_income_sources', JSON.stringify(incomeSources));
-  }, [incomeSources]);
+    try {
+      localStorage.setItem('qltc_cached_jars', JSON.stringify(jars));
+    } catch {}
+  }, [jars]);
 
   useEffect(() => {
-    localStorage.setItem('qltc_planned_expenses', JSON.stringify(plannedExpenses));
-  }, [plannedExpenses]);
+    try {
+      localStorage.setItem('qltc_cached_accounts', JSON.stringify(accounts));
+    } catch {}
+  }, [accounts]);
 
-  // Tải dữ liệu thật từ Cloudflare D1
+  useEffect(() => {
+    try {
+      localStorage.setItem('qltc_cached_pending', JSON.stringify(pendingTransactions));
+    } catch {}
+  }, [pendingTransactions]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('qltc_cached_confirmed', JSON.stringify(confirmedTransactions));
+    } catch {}
+  }, [confirmedTransactions]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('qltc_cached_holdings', JSON.stringify(holdings));
+    } catch {}
+  }, [holdings]);
+
+  // Android Hardware Back button / Gestures (L-11)
+  useEffect(() => {
+    (window as any).__handleBackPress = () => {
+      if (isQuickAddOpen) {
+        setIsQuickAddOpen(false);
+        return true;
+      }
+      if (isSettingsOpen) {
+        setIsSettingsOpen(false);
+        return true;
+      }
+      if (isResetOpen) {
+        setIsResetOpen(false);
+        return true;
+      }
+      if (currentTab !== 'dashboard') {
+        setCurrentTab('dashboard');
+        return true;
+      }
+      return false;
+    };
+
+    return () => {
+      delete (window as any).__handleBackPress;
+    };
+  }, [isQuickAddOpen, isSettingsOpen, isResetOpen, currentTab]);
+
+  // Đồng bộ dữ liệu từ Cloudflare Backend
   const loadDataFromBackend = useCallback(async () => {
     try {
-      // 1. Giao dịch chờ duyệt (Pending)
-      const pendingRes = await fetch(`${API_BASE}/transactions?status=pending`);
-      if (pendingRes.ok) {
-        const data = await pendingRes.json();
-        if (Array.isArray(data.transactions)) {
-          const mapped: Transaction[] = data.transactions.map((t: any) => ({
+      const [overviewRes, txnsRes, jarsRes, fmarketRes, profileRes] = await Promise.all([
+        fetch(`${API_BASE}/overview`).catch(() => null),
+        fetch(`${API_BASE}/transactions?limit=250`).catch(() => null),
+        fetch(`${API_BASE}/jars`).catch(() => null),
+        fetch(`${API_BASE}/investments/fmarket/top`).catch(() => null),
+        fetch(`${API_BASE}/user/profile`).catch(() => null)
+      ]);
+
+      if (overviewRes && overviewRes.ok) {
+        const oData = await overviewRes.json();
+        if (oData.accounts && Array.isArray(oData.accounts)) {
+          setAccounts(oData.accounts);
+        }
+        if (oData.holdings && Array.isArray(oData.holdings)) {
+          setHoldings(oData.holdings);
+        }
+        if (oData.incomeSources && Array.isArray(oData.incomeSources)) {
+          setIncomeSources(oData.incomeSources);
+          localStorage.setItem('qltc_income_sources', JSON.stringify(oData.incomeSources));
+        }
+        if (oData.plannedExpenses && Array.isArray(oData.plannedExpenses)) {
+          setPlannedExpenses(oData.plannedExpenses);
+          localStorage.setItem('qltc_planned_expenses', JSON.stringify(oData.plannedExpenses));
+        }
+      }
+
+      if (jarsRes && jarsRes.ok) {
+        const jData = await jarsRes.json();
+        if (jData.jars && Array.isArray(jData.jars)) {
+          setJars(jData.jars);
+        }
+      }
+
+      if (txnsRes && txnsRes.ok) {
+        const tData = await txnsRes.json();
+        if (tData.transactions && Array.isArray(tData.transactions)) {
+          const allTxns: Transaction[] = tData.transactions.map((t: any) => ({
             id: t.id,
-            bankCode: t.bank_code || 'BANK',
-            accountMask: t.account_number_mask || '****',
-            accountName: t.account_name || `${t.bank_code || 'Ngân hàng'} · *${t.account_number_mask || ''}`,
-            type: t.type,
+            bankCode: t.bankCode || 'VCB',
+            accountMask: t.accountMask || '9737',
+            accountName: t.accountName || 'Vietcombank',
+            toAccountId: t.toAccountId,
+            toAccountName: t.toAccountName,
+            type: t.type || 'expense',
+            originalType: t.originalType,
             amount: t.amount,
             description: t.description,
-            rawQuote: t.raw_body,
-            suggestedCategory: t.type === 'transfer' ? 'Chuyển khoản nội bộ' : (t.notes || t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu')),
-            suggestedJarCode: t.jar_code || 'NEC',
-            occurredAt: formatOccurredTime(t.occurred_at),
-            occurredAtIso: t.occurred_at,
-            status: 'pending',
-            transferPairId: t.transfer_pair_id,
-            pairedTxnId: t.paired_txn_id,
-            pairedAccountName: t.paired_account_name,
-            pairedBankCode: t.paired_bank_code,
-            pairedAccountMask: t.paired_account_mask,
-            pairedType: t.paired_type
+            suggestedCategory: t.suggestedCategory || (t.type === 'income' ? 'Thu nhập' : 'Ăn uống'),
+            suggestedJarCode: t.suggestedJarCode || 'NEC',
+            jarId: t.jarId,
+            occurredAt: formatOccurredTime(t.occurredAt),
+            occurredAtIso: t.occurredAt,
+            status: t.status || 'pending',
+            confidence: t.confidence || 0.9,
+            rawQuote: t.rawQuote,
+            pairedAccountName: t.pairedAccountName,
+            pairedBankCode: t.pairedBankCode
           }));
 
-          const seenPairs = new Set<string>();
-          const dedupedPending: Transaction[] = [];
-          for (const item of mapped) {
-            if (item.transferPairId) {
-              if (seenPairs.has(item.transferPairId)) continue;
-              seenPairs.add(item.transferPairId);
-            }
-            dedupedPending.push(item);
-          }
-          setPendingTransactions(dedupedPending);
+          const pending = allTxns.filter(t => t.status === 'pending');
+          const confirmed = allTxns.filter(t => t.status === 'confirmed');
+          setPendingTransactions(pending);
+          setConfirmedTransactions(confirmed);
         }
       }
 
-      // 2. Giao dịch đã duyệt (Confirmed - lấy tối đa 250 giao dịch để thống kê tháng/quý/năm)
-      const confRes = await fetch(`${API_BASE}/transactions?status=confirmed&limit=250`);
-      if (confRes.ok) {
-        const data = await confRes.json();
-        if (Array.isArray(data.transactions)) {
-          const mapped: Transaction[] = data.transactions.map((t: any) => ({
-            id: t.id,
-            bankCode: t.bank_code || 'BANK',
-            accountMask: t.account_number_mask || '****',
-            accountName: t.account_name || `${t.bank_code || 'Ngân hàng'} · *${t.account_number_mask || ''}`,
-            type: t.type,
-            amount: t.amount,
-            description: t.description,
-            rawQuote: t.raw_body,
-            suggestedCategory: t.type === 'transfer' ? 'Chuyển khoản nội bộ' : (t.notes || t.jar_name || (t.type === 'income' ? 'Thu nhập' : 'Chi tiêu')),
-            suggestedJarCode: t.jar_code || 'NEC',
-            occurredAt: formatOccurredTime(t.occurred_at),
-            occurredAtIso: t.occurred_at,
-            status: 'confirmed',
-            transferPairId: t.transfer_pair_id,
-            pairedTxnId: t.paired_txn_id,
-            pairedAccountName: t.paired_account_name,
-            pairedBankCode: t.paired_bank_code,
-            pairedAccountMask: t.paired_account_mask,
-            pairedType: t.paired_type
-          }));
-          setConfirmedTransactions(mapped);
+      if (fmarketRes && fmarketRes.ok) {
+        const fData = await fmarketRes.json();
+        if (fData.funds && Array.isArray(fData.funds)) {
+          setFmarketFunds(fData.funds);
         }
       }
 
-      // 3. Danh sách tài khoản ngân hàng & tiền mặt
-      const accRes = await fetch(`${API_BASE}/accounts`);
-      if (accRes.ok) {
-        const data = await accRes.json();
-        if (Array.isArray(data.accounts)) {
-          setAccounts(data.accounts.map((a: any) => ({
-            id: a.id,
-            name: a.name,
-            bankCode: a.bank_code,
-            accountNumberMask: a.account_number_mask,
-            balance: a.balance || 0,
-            type: a.type || 'bank'
-          })));
+      if (profileRes && profileRes.ok) {
+        const pData = await profileRes.json();
+        if (pData.profile) {
+          setUserProfile(pData.profile);
+          localStorage.setItem('qltc_user_profile', JSON.stringify(pData.profile));
         }
       }
-
-      // 4. Danh sách các hũ chi tiêu
-      const jarsRes = await fetch(`${API_BASE}/jars`);
-      if (jarsRes.ok) {
-        const data = await jarsRes.json();
-        if (Array.isArray(data.jars)) {
-          setJars(data.jars.map((j: any) => ({
-            id: j.id,
-            code: j.code,
-            name: j.name,
-            targetPercent: j.target_percent,
-            monthlyLimit: j.monthly_limit,
-            spentThisMonth: j.spent_this_month || 0,
-            color: j.color
-          })));
-        }
-      }
-
-      // 5. Danh mục tài sản đầu tư (Quỹ Fmarket, Cổ phiếu, Vàng, Bạc, Đất, Crypto)
-      const holdingsRes = await fetch(`${API_BASE}/holdings`);
-      if (holdingsRes.ok) {
-        const data = await holdingsRes.json();
-        if (Array.isArray(data.holdings)) {
-          setHoldings(data.holdings.map((h: any) => ({
-            id: h.id,
-            symbol: h.symbol,
-            name: h.name,
-            assetClass: h.asset_class,
-            quantity: h.quantity,
-            avgCost: h.avg_cost,
-            currentPrice: h.current_price,
-            unit: h.unit || (
-              h.asset_class === 'gold' ? 'chỉ' :
-              h.asset_class === 'silver' ? 'lượng' :
-              h.asset_class === 'land' ? 'm²' :
-              h.asset_class === 'fund' ? 'CCQ' : 'CP'
-            ),
-            priceUpdatedAt: h.price_updated_at
-          })));
-        }
-      }
-
-      // 6. Nguồn thu dự kiến & Khoản chi dự kiến từ D1
-      const incRes = await fetch(`${API_BASE}/income-sources`);
-      if (incRes.ok) {
-        const data = await incRes.json();
-        if (Array.isArray(data.incomeSources) && data.incomeSources.length > 0) {
-          setIncomeSources(data.incomeSources.map((s: any) => ({
-            id: s.id,
-            name: s.name,
-            kind: s.kind || 'fixed',
-            expectedAmount: s.expected_amount || 0,
-            recurrence: s.recurrence || 'Hàng tháng'
-          })));
-        }
-      }
-
-      const pexpRes = await fetch(`${API_BASE}/planned-expenses`);
-      if (pexpRes.ok) {
-        const data = await pexpRes.json();
-        if (Array.isArray(data.plannedExpenses)) {
-          setPlannedExpenses(data.plannedExpenses.map((e: any) => ({
-            id: e.id,
-            name: e.name,
-            jarCode: e.jar_code || 'NEC',
-            expectedAmount: e.expected_amount || 0,
-            recurrence: e.recurrence || 'Hàng tháng',
-            note: e.note
-          })));
-        }
-      }
-
-      // 7. Thông tin người dùng từ D1
-      const userRes = await fetch(`${API_BASE}/user/profile`);
-      if (userRes.ok) {
-        const data = await userRes.json();
-        if (data.user) {
-          setUserProfile(data.user);
-          localStorage.setItem('qltc_user_profile', JSON.stringify(data.user));
-        }
-      }
-    } catch (err) {
-      console.warn('Backend chưa sẵn sàng, tiếp tục với bộ nhớ máy:', err);
-    }
-  }, []);
-
-  // Tải danh sách Quỹ mở từ Fmarket API
-  const loadFmarketFunds = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/market/fmarket-funds`);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.funds)) {
-          setFmarketFunds(data.funds);
-        }
-      }
-    } catch {
-      // ignore
+    } catch (e) {
+      console.warn('Backend offline, giữ cache local:', e);
     }
   }, []);
 
   useEffect(() => {
     loadDataFromBackend();
-    loadFmarketFunds();
-  }, [loadDataFromBackend, loadFmarketFunds]);
+  }, [loadDataFromBackend]);
 
-  // Đồng bộ giá NAV Fmarket & Vàng/Bạc/Crypto mới nhất
-  const handleSyncMarketPrices = async () => {
-    setIsSyncingPrices(true);
+  // Cập nhật Profile
+  const handleUpdateUserProfile = (updated: Partial<UserProfile>) => {
+    setUserProfile(prev => {
+      const next = { ...prev, ...updated };
+      localStorage.setItem('qltc_user_profile', JSON.stringify(next));
+      return next;
+    });
+    success('Đã cập nhật thông tin cá nhân');
+  };
+
+  // Cập nhật nhanh số dư tài khoản
+  const handleUpdateAccountBalance = async (
+    accountId: string,
+    newBalance: number,
+    name?: string,
+    type?: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings'
+  ) => {
+    setAccounts(prev => prev.map(a => {
+      if (a.id === accountId) {
+        return {
+          ...a,
+          balance: newBalance,
+          name: name || a.name,
+          type: type || a.type
+        };
+      }
+      return a;
+    }));
+
     try {
-      await fetch(`${API_BASE}/market/sync-prices`, { method: 'POST' });
-      await loadDataFromBackend();
-      await loadFmarketFunds();
+      await fetch(`${API_BASE}/accounts/${accountId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ balance: newBalance, name, type })
+      });
+      success('Đã cập nhật số dư tài khoản');
     } catch (e) {
-      console.error('Lỗi đồng bộ giá thị trường:', e);
-    } finally {
-      setIsSyncingPrices(false);
+      console.error('Lỗi lưu số dư:', e);
     }
   };
 
-  // Nút Làm mới & Đồng bộ
-  const handleRefresh = async () => {
-    setIsSyncing(true);
+  // Thêm tài khoản mới
+  const handleAddAccount = async (newAcc: BankAccount) => {
+    setAccounts(prev => [...prev, newAcc]);
     try {
-      await fetch(`${API_BASE}/notifications/reprocess`, { method: 'POST' });
-    } catch {
-      // ignore
+      await fetch(`${API_BASE}/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAcc)
+      });
+      success(`Đã thêm tài khoản "${newAcc.name}"`);
+    } catch (e) {
+      console.error('Lỗi lưu tài khoản mới:', e);
     }
+  };
+
+  // Làm mới toàn diện từ Cloudflare
+  const handleRefreshAll = async () => {
+    setIsSyncing(true);
     await loadDataFromBackend();
     setIsSyncing(false);
+    info('Dữ liệu đã được đồng bộ mới nhất');
   };
 
   // Tính tổng số dư và tài sản ròng
   const liquidCash = accounts
-    .filter(a => ['bank', 'cash', 'ewallet'].includes(a.type))
-    .reduce((sum, a) => sum + a.balance, 0);
+    .filter(a => ['bank', 'cash', 'ewallet', 'savings'].includes(a.type))
+    .reduce((sum, a) => sum + (a.balance || 0), 0);
 
   const totalInvestments = holdings.reduce((sum, h) => sum + (h.quantity * h.currentPrice), 0);
   const netWorth = liquidCash + totalInvestments;
 
   // Xác nhận giao dịch (approve / swipe right)
-  const handleConfirmTransaction = async (id: string, jarCode?: string, categoryName?: string) => {
+  const handleConfirmTransaction = async (id: string, jarCode?: string, categoryName?: string, jarId?: string) => {
     const txn = pendingTransactions.find(t => t.id === id);
-    if (txn) {
-      const finalJarCode = jarCode || txn.suggestedJarCode || 'NEC';
-      const finalCategory = categoryName || txn.suggestedCategory;
+    if (!txn) return;
 
-      if (txn.type === 'expense' && finalJarCode) {
-        setJars(prev => prev.map(j => {
-          if (j.code === finalJarCode) {
-            return { ...j, spentThisMonth: j.spentThisMonth + txn.amount };
-          }
-          return j;
-        }));
-      }
+    const targetJar = jars.find(j => j.id === jarId) || jars.find(j => j.code === jarCode) || jars[0];
+    const finalJarCode = targetJar?.code || jarCode || txn.suggestedJarCode || 'NEC';
+    const finalJarId = targetJar?.id || jarId;
+    const finalCategory = categoryName || targetJar?.name || txn.suggestedCategory;
 
-      const confirmedTxn: Transaction = {
-        ...txn,
-        suggestedJarCode: finalJarCode,
-        suggestedCategory: finalCategory,
-        occurredAtIso: txn.occurredAtIso || new Date().toISOString(),
-        status: 'confirmed'
-      };
-      setConfirmedTransactions(prev => [confirmedTxn, ...prev]);
-      setPendingTransactions(prev => prev.filter(t => t.id !== id));
+    // Cập nhật số dư chi tiêu của hũ
+    if (txn.type === 'expense' && finalJarId) {
+      setJars(prev => prev.map(j => {
+        if (j.id === finalJarId || j.code === finalJarCode) {
+          return { ...j, spentThisMonth: j.spentThisMonth + txn.amount };
+        }
+        return j;
+      }));
+    }
 
+    const confirmedTxn: Transaction = {
+      ...txn,
+      suggestedJarCode: finalJarCode,
+      jarId: finalJarId,
+      suggestedCategory: finalCategory,
+      occurredAtIso: txn.occurredAtIso || new Date().toISOString(),
+      status: 'confirmed'
+    };
+
+    setConfirmedTransactions(prev => [confirmedTxn, ...prev]);
+    setPendingTransactions(prev => prev.filter(t => t.id !== id));
+
+    // Hiển thị Undo Toast trong 5 giây
+    undoToast(`Đã duyệt: ${formatVND(txn.amount)} (${finalCategory})`, async () => {
+      // Revert lại trạng thái chờ duyệt
+      setConfirmedTransactions(prev => prev.filter(t => t.id !== id));
+      setPendingTransactions(prev => [txn, ...prev]);
       try {
         await fetch(`${API_BASE}/transactions/${id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            status: 'confirmed',
-            jarCode: finalJarCode,
-            categoryName: finalCategory
-          })
+          body: JSON.stringify({ status: 'pending' })
         });
-      } catch (err) {
-        console.error('Lỗi cập nhật giao dịch:', err);
-      }
+      } catch {}
+    }, 5000);
+
+    try {
+      await fetch(`${API_BASE}/transactions/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'confirmed',
+          jarId: finalJarId,
+          jarCode: finalJarCode,
+          categoryName: finalCategory
+        })
+      });
+    } catch (err) {
+      console.error('Lỗi cập nhật giao dịch:', err);
     }
   };
 
   // Bỏ qua giao dịch (reject / swipe left)
   const handleRejectTransaction = async (id: string) => {
+    const txn = pendingTransactions.find(t => t.id === id);
+    if (!txn) return;
+
     setPendingTransactions(prev => prev.filter(t => t.id !== id));
+
+    undoToast(`Đã bỏ qua giao dịch ${formatVND(txn.amount)}`, () => {
+      setPendingTransactions(prev => [txn, ...prev]);
+    }, 5000);
 
     try {
       await fetch(`${API_BASE}/transactions/${id}`, {
@@ -396,7 +429,72 @@ export function App() {
     }
   };
 
-  // Thực hiện Reset trực tiếp
+  // Cập nhật giao dịch đã duyệt (chỉnh hũ, ghi chú)
+  const handleUpdateConfirmed = async (
+    id: string,
+    updates: { jarId?: string; jarCode?: string; category?: string; description?: string }
+  ) => {
+    setConfirmedTransactions(prev => prev.map(t => {
+      if (t.id === id) {
+        return {
+          ...t,
+          jarId: updates.jarId ?? t.jarId,
+          suggestedJarCode: updates.jarCode ?? t.suggestedJarCode,
+          suggestedCategory: updates.category ?? t.suggestedCategory,
+          description: updates.description ?? t.description
+        };
+      }
+      return t;
+    }));
+
+    try {
+      await fetch(`${API_BASE}/transactions/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: updates.description,
+          jarId: updates.jarId,
+          jarCode: updates.jarCode,
+          categoryName: updates.category
+        })
+      });
+      success('Đã lưu thay đổi giao dịch');
+    } catch (e) {
+      console.error('Lỗi lưu giao dịch:', e);
+    }
+  };
+
+  // Tách giao dịch chuyển tiền nội bộ ghép nhầm
+  const handleUnpairTransaction = async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/transactions/${id}/unpair`, { method: 'POST' });
+      if (res.ok) {
+        await loadDataFromBackend();
+        success('Đã tách thành công giao dịch ra làm 2 khoản độc lập');
+      }
+    } catch (err) {
+      console.error('Lỗi tách giao dịch:', err);
+    }
+  };
+
+  // Ghép thủ công sang chuyển tiền nội bộ
+  const handlePairTransfer = async (fromTxnId: string, toAccountId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/transactions/${fromTxnId}/pair-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toAccountId })
+      });
+      if (res.ok) {
+        await loadDataFromBackend();
+        success('Đã chuyển thành giao dịch chuyển tiền nội bộ');
+      }
+    } catch (err) {
+      console.error('Lỗi ghép giao dịch:', err);
+    }
+  };
+
+  // Thực hiện Reset trực tiếp (Sửa triệt để bug xóa nhầm transactions khi reset income)
   const handleDirectReset = async (scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all') => {
     if (scope === 'transactions' || scope === 'all') {
       setPendingTransactions([]);
@@ -420,97 +518,176 @@ export function App() {
     }
 
     try {
+      // Gửi đúng scope (không đổi income thành transactions!)
       await fetch(`${API_BASE}/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope: scope === 'income' ? 'transactions' : scope, clearNotifications: true })
+        body: JSON.stringify({ scope, clearNotifications: true })
       });
       await loadDataFromBackend();
+      success('Đã thiết lập lại dữ liệu thành công');
     } catch (err) {
       console.error('Lỗi gọi API reset:', err);
     }
   };
 
-  // Thêm / sửa / xóa nguồn thu dự kiến
+  // Thêm Nguồn thu dự kiến
   const handleAddIncomeSource = async (newSource: IncomeSource) => {
     setIncomeSources(prev => {
-      const idx = prev.findIndex(s => s.id === newSource.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = newSource;
-        return copy;
-      }
-      return [...prev, newSource];
+      const next = [...prev, newSource];
+      localStorage.setItem('qltc_income_sources', JSON.stringify(next));
+      return next;
     });
+
     try {
       await fetch(`${API_BASE}/income-sources`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newSource)
       });
+      success(`Đã thêm nguồn thu "${newSource.name}"`);
     } catch (e) {
-      console.error('Lỗi lưu nguồn thu dự kiến:', e);
+      console.error('Lỗi lưu nguồn thu:', e);
     }
   };
 
+  // Cập nhật Nguồn thu dự kiến
+  const handleUpdateIncomeSource = async (id: string, updates: Partial<IncomeSource>) => {
+    setIncomeSources(prev => {
+      const next = prev.map(s => s.id === id ? { ...s, ...updates } : s);
+      localStorage.setItem('qltc_income_sources', JSON.stringify(next));
+      return next;
+    });
+
+    try {
+      await fetch(`${API_BASE}/income-sources/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      success('Đã cập nhật nguồn thu');
+    } catch (e) {
+      console.error('Lỗi cập nhật nguồn thu:', e);
+    }
+  };
+
+  // Xóa Nguồn thu dự kiến
   const handleDeleteIncomeSource = async (id: string) => {
-    setIncomeSources(prev => prev.filter(s => s.id !== id));
+    setIncomeSources(prev => {
+      const next = prev.filter(s => s.id !== id);
+      localStorage.setItem('qltc_income_sources', JSON.stringify(next));
+      return next;
+    });
+
     try {
       await fetch(`${API_BASE}/income-sources/${id}`, { method: 'DELETE' });
+      info('Đã xóa nguồn thu');
     } catch (e) {
-      console.error('Lỗi xóa nguồn thu dự kiến:', e);
+      console.error('Lỗi xóa nguồn thu:', e);
     }
   };
 
-  // Thêm / xóa khoản chi dự kiến
+  // Thêm Khoản chi dự kiến
   const handleAddPlannedExpense = async (newExp: PlannedExpense) => {
-    setPlannedExpenses(prev => [...prev, newExp]);
+    setPlannedExpenses(prev => {
+      const next = [...prev, newExp];
+      localStorage.setItem('qltc_planned_expenses', JSON.stringify(next));
+      return next;
+    });
+
     try {
       await fetch(`${API_BASE}/planned-expenses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newExp)
       });
+      success(`Đã thêm khoản chi "${newExp.name}"`);
     } catch (e) {
       console.error('Lỗi lưu khoản chi dự kiến:', e);
     }
   };
 
+  // Cập nhật Khoản chi dự kiến
+  const handleUpdatePlannedExpense = async (id: string, updates: Partial<PlannedExpense>) => {
+    setPlannedExpenses(prev => {
+      const next = prev.map(e => e.id === id ? { ...e, ...updates } : e);
+      localStorage.setItem('qltc_planned_expenses', JSON.stringify(next));
+      return next;
+    });
+
+    try {
+      await fetch(`${API_BASE}/planned-expenses/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      success('Đã cập nhật khoản chi dự kiến');
+    } catch (e) {
+      console.error('Lỗi cập nhật khoản chi dự kiến:', e);
+    }
+  };
+
+  // Xóa Khoản chi dự kiến
   const handleDeletePlannedExpense = async (id: string) => {
-    setPlannedExpenses(prev => prev.filter(e => e.id !== id));
+    setPlannedExpenses(prev => {
+      const next = prev.filter(e => e.id !== id);
+      localStorage.setItem('qltc_planned_expenses', JSON.stringify(next));
+      return next;
+    });
+
     try {
       await fetch(`${API_BASE}/planned-expenses/${id}`, { method: 'DELETE' });
+      info('Đã xóa khoản chi dự kiến');
     } catch (e) {
       console.error('Lỗi xóa khoản chi dự kiến:', e);
     }
   };
 
-  // Xóa giao dịch đã duyệt
+  // Xóa giao dịch đã duyệt (hoàn lại số dư tài khoản)
   const handleDeleteConfirmed = async (id: string) => {
+    const txn = confirmedTransactions.find(t => t.id === id);
+    if (txn) {
+      setAccounts(prev => prev.map(acc => {
+        if (acc.name === txn.accountName) {
+          const revertDelta = txn.type === 'income' ? -txn.amount : txn.amount;
+          return { ...acc, balance: acc.balance + revertDelta };
+        }
+        return acc;
+      }));
+    }
+
     setConfirmedTransactions(prev => prev.filter(t => t.id !== id));
     try {
       await fetch(`${API_BASE}/transactions/${id}`, { method: 'DELETE' });
+      info('Đã xóa giao dịch và hoàn lại số dư');
     } catch (e) {
       console.error('Lỗi xóa giao dịch:', e);
     }
   };
 
-  // Thêm giao dịch thủ công
+  // Thêm giao dịch thủ công (hỗ trợ chuyển tiền nội bộ toAccountId)
   const handleAddTransaction = async (newTxn: {
     type: 'income' | 'expense' | 'transfer';
     amount: number;
     description: string;
     jarId?: string;
     accountId: string;
+    toAccountId?: string;
   }) => {
+    // Cập nhật số dư tài khoản nguồn & đích
     setAccounts(prev => prev.map(acc => {
       if (acc.id === newTxn.accountId) {
         const delta = newTxn.type === 'income' ? newTxn.amount : -newTxn.amount;
         return { ...acc, balance: acc.balance + delta };
       }
+      if (newTxn.type === 'transfer' && newTxn.toAccountId && acc.id === newTxn.toAccountId) {
+        return { ...acc, balance: acc.balance + newTxn.amount };
+      }
       return acc;
     }));
 
+    const sourceAcc = accounts.find(a => a.id === newTxn.accountId);
+    const targetAcc = newTxn.toAccountId ? accounts.find(a => a.id === newTxn.toAccountId) : undefined;
     const matchedJar = jars.find(j => j.id === newTxn.jarId);
     const jarCode = matchedJar?.code || 'NEC';
 
@@ -527,20 +704,24 @@ export function App() {
     const isoNow = new Date().toISOString();
     const createdTxn: Transaction = {
       id: txnId,
-      bankCode: 'CASH',
-      accountMask: 'VÍ',
-      accountName: 'Ghi chép thủ công',
+      bankCode: sourceAcc?.bankCode || 'CASH',
+      accountMask: sourceAcc?.accountNumberMask || 'VÍ',
+      accountName: sourceAcc?.name || 'Ghi chép thủ công',
+      toAccountId: newTxn.toAccountId,
+      toAccountName: targetAcc?.name,
       type: newTxn.type,
       amount: newTxn.amount,
       description: newTxn.description,
-      suggestedCategory: newTxn.type === 'income' ? 'Thu nhập' : (matchedJar?.name || 'Chi tiêu'),
+      suggestedCategory: newTxn.type === 'income' ? 'Thu nhập' : newTxn.type === 'transfer' ? 'Chuyển tiền nội bộ' : (matchedJar?.name || 'Chi tiêu'),
       suggestedJarCode: jarCode,
+      jarId: newTxn.jarId,
       occurredAt: 'Vừa xong',
       occurredAtIso: isoNow,
       status: 'confirmed'
     };
 
     setConfirmedTransactions(prev => [createdTxn, ...prev]);
+    success(`Đã ghi chép thành công: ${formatVND(newTxn.amount)}`);
 
     try {
       await fetch(`${API_BASE}/transactions`, {
@@ -549,6 +730,7 @@ export function App() {
         body: JSON.stringify({
           id: txnId,
           accountId: newTxn.accountId,
+          toAccountId: newTxn.toAccountId,
           type: newTxn.type,
           amount: newTxn.amount,
           description: newTxn.description,
@@ -563,7 +745,7 @@ export function App() {
     }
   };
 
-  // Thêm / cập nhật tài sản đầu tư (lưu lên D1)
+  // Thêm / cập nhật tài sản đầu tư
   const handleAddHolding = async (newHolding: Holding) => {
     setHoldings(prev => {
       const idx = prev.findIndex(h => h.symbol.toUpperCase() === newHolding.symbol.toUpperCase());
@@ -581,6 +763,7 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newHolding)
       });
+      success(`Đã lưu tài sản "${newHolding.symbol}"`);
     } catch (e) {
       console.error('Lỗi lưu tài sản:', e);
     }
@@ -590,73 +773,101 @@ export function App() {
   const handleDeleteHolding = async (symbol: string) => {
     setHoldings(prev => prev.filter(h => h.symbol.toUpperCase() !== symbol.toUpperCase()));
     try {
-      await fetch(`${API_BASE}/holdings/${encodeURIComponent(symbol)}`, {
-        method: 'DELETE'
-      });
+      await fetch(`${API_BASE}/holdings/${symbol}`, { method: 'DELETE' });
+      info(`Đã xóa tài sản ${symbol}`);
     } catch (e) {
       console.error('Lỗi xóa tài sản:', e);
     }
   };
 
-  // Cập nhật số dư tài khoản ngân hàng / tiền mặt
-  const handleUpdateAccountBalance = async (accountId: string, newBalance: number) => {
-    setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, balance: newBalance } : a));
+  // Cập nhật giá thị trường tự động
+  const handleSyncMarketPrices = async () => {
+    setIsSyncingPrices(true);
     try {
-      await fetch(`${API_BASE}/accounts/${accountId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ balance: newBalance })
-      });
+      const res = await fetch(`${API_BASE}/investments/sync-prices`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.holdings && Array.isArray(data.holdings)) {
+          setHoldings(data.holdings);
+        }
+        success('Đã cập nhật giá mới nhất từ Fmarket & Thị trường');
+      }
     } catch (e) {
-      console.error('Lỗi cập nhật số dư tài khoản:', e);
+      console.error('Lỗi đồng bộ giá:', e);
+      error('Không thể kết nối máy chủ giá thị trường');
+    } finally {
+      setIsSyncingPrices(false);
     }
   };
 
-  const handleAddAccount = async (newAcc: BankAccount) => {
-    setAccounts(prev => [...prev, newAcc]);
+  // Giả lập thông báo ngân hàng
+  const handleSimulateNotification = async (notif: { title: string; text: string; packageName?: string }) => {
     try {
-      await fetch(`${API_BASE}/accounts`, {
+      const res = await fetch(`${API_BASE}/notifications/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: newAcc.name,
-          balance: newAcc.balance,
-          bank_code: newAcc.bankCode,
-          account_number_mask: newAcc.accountNumberMask,
-          type: newAcc.type
+          packageName: notif.packageName || 'com.VCB',
+          title: notif.title,
+          text: notif.text
         })
       });
-      await loadDataFromBackend();
+      if (res.ok) {
+        await loadDataFromBackend();
+        success('Đã nhận thông báo biến động số dư mới');
+      }
     } catch (e) {
-      console.error('Lỗi tạo tài khoản:', e);
+      console.error('Lỗi test notification:', e);
     }
   };
 
   // Thêm hũ mới
   const handleAddJar = async (newJar: { name: string; code?: string; targetPercent: number; monthlyLimit: number; color?: string }) => {
+    const jarId = `jar_${Date.now()}`;
+    const jarCode = newJar.code || newJar.name.substring(0, 4).toUpperCase();
+    const createdJar: Jar = {
+      id: jarId,
+      code: jarCode,
+      name: newJar.name,
+      targetPercent: newJar.targetPercent,
+      monthlyLimit: newJar.monthlyLimit,
+      spentThisMonth: 0,
+      color: newJar.color || '#8CC7AE'
+    };
+
+    setJars(prev => [...prev, createdJar]);
+    success(`Đã tạo hũ "${newJar.name}"`);
+
     try {
-      const res = await fetch(`${API_BASE}/jars`, {
+      await fetch(`${API_BASE}/jars`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newJar)
+        body: JSON.stringify({
+          id: jarId,
+          code: jarCode,
+          name: newJar.name,
+          monthly_limit: newJar.monthlyLimit,
+          target_percent: newJar.targetPercent,
+          color: newJar.color
+        })
       });
-      if (res.ok) {
-        await loadDataFromBackend();
-      }
     } catch (e) {
-      console.error('Lỗi tạo hũ:', e);
+      console.error('Lỗi thêm hũ:', e);
     }
   };
 
-  // Cập nhật thông tin hũ
-  const handleUpdateJar = async (jarId: string, updates: { name?: string; targetPercent?: number; monthlyLimit?: number; color?: string }) => {
+  // Sửa hũ
+  const handleUpdateJar = async (
+    jarId: string,
+    updates: { name?: string; targetPercent?: number; monthlyLimit?: number; color?: string }
+  ) => {
     setJars(prev => prev.map(j => {
       if (j.id === jarId) {
         return {
           ...j,
           name: updates.name ?? j.name,
-          monthlyLimit: updates.monthlyLimit ?? j.monthlyLimit,
           targetPercent: updates.targetPercent ?? j.targetPercent,
+          monthlyLimit: updates.monthlyLimit ?? j.monthlyLimit,
           color: updates.color ?? j.color
         };
       }
@@ -674,13 +885,16 @@ export function App() {
           color: updates.color
         })
       });
+      success('Đã cập nhật hũ');
     } catch (e) {
       console.error('Lỗi lưu hũ:', e);
     }
   };
 
-  // Cập nhật hàng loạt % các hũ (khi cân bằng về 100%)
-  const handleBatchUpdateJarsPercent = async (updates: Array<{ id: string; targetPercent: number; monthlyLimit: number }>) => {
+  // Cân bằng % các hũ
+  const handleBatchUpdateJarsPercent = async (
+    updates: Array<{ id: string; targetPercent: number; monthlyLimit: number }>
+  ) => {
     setJars(prev => prev.map(j => {
       const u = updates.find(item => item.id === j.id);
       if (u) {
@@ -700,6 +914,7 @@ export function App() {
           })
         })
       ));
+      success('Đã cân bằng tỷ lệ các hũ thành công');
     } catch (e) {
       console.error('Lỗi đồng bộ % các hũ:', e);
     }
@@ -709,128 +924,47 @@ export function App() {
   const handleDeleteJar = async (jarId: string) => {
     setJars(prev => prev.filter(j => j.id !== jarId));
     try {
-      await fetch(`${API_BASE}/jars/${jarId}`, {
-        method: 'DELETE'
-      });
+      await fetch(`${API_BASE}/jars/${jarId}`, { method: 'DELETE' });
+      info('Đã xóa hũ');
     } catch (e) {
       console.error('Lỗi xóa hũ:', e);
     }
   };
 
-  // Tự động phân bổ lại các hũ theo tổng thu nhập và tỷ lệ % từng hũ
+  // Tự động phân bổ hũ theo % từ Tổng Thu Dự Kiến
   const handleAutoAllocateJars = async (totalIncome: number) => {
-    const updatedJars = jars.map(j => {
-      const targetPct = j.targetPercent || 0.1;
-      const limit = Math.round(totalIncome * targetPct);
-      return { ...j, monthlyLimit: limit };
-    });
-
-    setJars(updatedJars);
+    const updated = jars.map(j => ({
+      ...j,
+      monthlyLimit: Math.round(totalIncome * (j.targetPercent || 0))
+    }));
+    setJars(updated);
 
     try {
-      await Promise.all(updatedJars.map(j =>
-        fetch(`${API_BASE}/jars/${j.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ monthly_limit: j.monthlyLimit })
-        })
-      ));
-    } catch (e) {
-      console.error('Lỗi đồng bộ hạn mức hũ:', e);
-    }
-  };
-
-  // Giả lập 1 thông báo ngân hàng gửi tới Android để test
-  const handleSimulateNotification = () => {
-    const mockBanks = [
-      { code: 'VCB', acc: '0071', name: 'Vietcombank · *0071', desc: 'PETROLIMEX DO XANG A95', amt: 70000, cat: 'Di chuyển', jar: 'NEC', raw: 'TK 0071... -70,000 VND luc 18:45 04/11. ND: PETROLIMEX CUA HANG SO 1' },
-      { code: 'MB', acc: '0340', name: 'MB Bank · *0340', desc: 'NHAN TIEN FREELANCE WEB', amt: 5500000, cat: 'Thu nhập ngoài / Freelance', jar: 'FFA', raw: 'GD: +5,500,000VND vao 18:50 04/11. TK 0340... ND: THANH TOAN DU AN WEB' },
-      { code: 'TCB', acc: '2011', name: 'Techcombank · *2011', desc: 'KATINAT SAIGON CAFE', amt: 65000, cat: 'Cafe & Trà', jar: 'PLAY', raw: 'TK 2011... -65,000 VND vao 19:02 04/11. ND: KATINAT SAIGON' }
-    ];
-    const picked = mockBanks[Math.floor(Math.random() * mockBanks.length)];
-    const newPending: Transaction = {
-      id: `txn_sim_${Date.now()}`,
-      bankCode: picked.code,
-      accountMask: picked.acc,
-      accountName: picked.name,
-      type: picked.amt > 1000000 ? 'income' : 'expense',
-      amount: picked.amt,
-      description: picked.desc,
-      rawQuote: picked.raw,
-      suggestedCategory: picked.cat,
-      suggestedJarCode: picked.jar,
-      occurredAt: 'Vừa xong',
-      occurredAtIso: new Date().toISOString(),
-      status: 'pending'
-    };
-    setPendingTransactions(prev => [newPending, ...prev]);
-    setCurrentTab('transactions');
-  };
-
-  // Cập nhật thông tin hồ sơ cá nhân
-  const handleUpdateUserProfile = async (updated: Partial<UserProfile>) => {
-    const newProfile = { ...userProfile, ...updated };
-    setUserProfile(newProfile);
-    localStorage.setItem('qltc_user_profile', JSON.stringify(newProfile));
-
-    try {
-      await fetch(`${API_BASE}/user/profile`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated)
-      });
-    } catch (e) {
-      console.error('Lỗi lưu thông tin cá nhân:', e);
-    }
-  };
-
-  // Tách 2 giao dịch nếu auto-pairing bị nhầm
-  const handleUnpairTransaction = async (txnId: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/transactions/${txnId}/unpair`, {
-        method: 'POST'
-      });
-      if (res.ok) {
-        await loadDataFromBackend();
-      }
-    } catch (err) {
-      console.error('Lỗi tách giao dịch:', err);
-    }
-  };
-
-  // Ghép cặp thủ công thành chuyển khoản nội bộ
-  const handlePairTransfer = async (txnId: string, toAccountId: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/transactions/${txnId}/pair-transfer`, {
+      await fetch(`${API_BASE}/jars/auto-allocate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toAccountId })
+        body: JSON.stringify({ totalIncome })
       });
-      if (res.ok) {
-        await loadDataFromBackend();
-      }
-    } catch (err) {
-      console.error('Lỗi ghép cặp chuyển khoản:', err);
+      success('Đã tự động tính hạn mức các hũ theo % thu nhập');
+    } catch (e) {
+      console.error('Lỗi tự động phân bổ hũ:', e);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#161C1E] via-[#0E1314] to-[#0A0D0E] text-[#F2F5F5] flex flex-col justify-between max-w-md mx-auto relative shadow-2xl overflow-x-hidden">
-      {/* Glow effect at top */}
-      <div className="absolute top-0 right-0 w-64 h-64 bg-radial from-[#657D81]/20 to-transparent pointer-events-none"></div>
-
+    <div className="min-h-screen bg-[#0E1314] text-[#F2F5F5] font-sans antialiased pb-12 selection:bg-[#8CC7AE] selection:text-[#0E1314]">
       {/* Top Navbar */}
       <Navbar
-        pendingCount={pendingTransactions.length}
-        onOpenInbox={() => setCurrentTab('transactions')}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        onRefresh={handleRefresh}
-        isSyncing={isSyncing}
         userProfile={userProfile}
+        privacyMode={privacyMode}
+        onTogglePrivacy={() => setPrivacyMode(!privacyMode)}
+        onRefresh={handleRefreshAll}
+        isRefreshing={isSyncing}
       />
 
       {/* Main View Area */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="max-w-md mx-auto pt-3">
         {currentTab === 'dashboard' && (
           <DashboardView
             netWorth={netWorth}
@@ -861,6 +995,7 @@ export function App() {
             onConfirm={handleConfirmTransaction}
             onReject={handleRejectTransaction}
             onDeleteConfirmed={handleDeleteConfirmed}
+            onUpdateConfirmed={handleUpdateConfirmed}
             onBack={() => setCurrentTab('dashboard')}
             jars={jars}
             incomeSources={incomeSources}
@@ -877,14 +1012,20 @@ export function App() {
             plannedExpenses={plannedExpenses}
             confirmedTransactions={confirmedTransactions}
             onAddIncomeSource={handleAddIncomeSource}
+            onUpdateIncomeSource={handleUpdateIncomeSource}
             onDeleteIncomeSource={handleDeleteIncomeSource}
             onAddPlannedExpense={handleAddPlannedExpense}
+            onUpdatePlannedExpense={handleUpdatePlannedExpense}
             onDeletePlannedExpense={handleDeletePlannedExpense}
             onAddJar={handleAddJar}
             onUpdateJar={handleUpdateJar}
             onBatchUpdateJarsPercent={handleBatchUpdateJarsPercent}
             onDeleteJar={handleDeleteJar}
             onAutoAllocateJars={handleAutoAllocateJars}
+            onOpenQuickAddIncome={() => {
+              setQuickAddInitialType('income');
+              setIsQuickAddOpen(true);
+            }}
           />
         )}
 
@@ -904,7 +1045,10 @@ export function App() {
       <BottomNav
         currentTab={currentTab}
         onChangeTab={setCurrentTab}
-        onOpenQuickAdd={() => setIsQuickAddOpen(true)}
+        onOpenQuickAdd={() => {
+          setQuickAddInitialType('expense');
+          setIsQuickAddOpen(true);
+        }}
         pendingCount={pendingTransactions.length}
       />
 
@@ -914,6 +1058,7 @@ export function App() {
         onClose={() => setIsQuickAddOpen(false)}
         jars={jars}
         accounts={accounts}
+        initialType={quickAddInitialType}
         onAddTransaction={handleAddTransaction}
       />
 

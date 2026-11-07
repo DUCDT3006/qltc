@@ -26,7 +26,7 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
   },
   // 4. ĂN UỐNG THIẾT YẾU (Đi chợ, siêu thị)
   {
-    keywords: ['WINMART', 'BACH HOA XANH', 'COOPMART', 'BIG C', 'GO!', 'AEON', 'MEGAMARKET', 'CHO', 'THIT', 'RAU', 'AN SANG', 'COM TRUA'],
+    keywords: ['WINMART', 'BACH HOA XANH', 'COOPMART', 'BIG C', 'GO!', 'AEON', 'MEGAMARKET', 'DI CHO', 'TIEN CHO', 'THIT', 'RAU', 'AN SANG', 'COM TRUA', 'BUN', 'PHO', 'COM TAM'],
     categoryName: 'Ăn uống hàng ngày',
     jarCode: 'NEC'
   },
@@ -44,7 +44,7 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
   },
   // 7. CHO ĐI (GIVE)
   {
-    keywords: ['MUNG CUOI', 'DAM CUOI', 'SINH NHAT', 'BIU BO', 'BIU ME', 'TU THIEN', 'UNG HO'],
+    keywords: ['MUNG CUOI', 'DAM CUOI', 'SINH NHAT', 'BIEU BO', 'BIEU ME', 'BIU BO', 'BIU ME', 'TU THIEN', 'UNG HO', 'QUYEN GOP', 'GIVE'],
     categoryName: 'Hiếu hỉ & Cho đi',
     jarCode: 'GIVE'
   },
@@ -56,8 +56,26 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
   }
 ];
 
-export function categorizeTransaction(description: string, type: 'income' | 'expense'): CategorizationResult {
+export function categorizeTransaction(
+  description: string,
+  type: 'income' | 'expense',
+  userRules?: { pattern: string; categoryName: string; jarCode: string }[]
+): CategorizationResult {
   const upper = description.toUpperCase();
+
+  // 1. Kiểm tra quy tắc người dùng đã dạy / tự học trước tiên (ưu tiên cao nhất 0.99)
+  if (userRules && userRules.length > 0) {
+    for (const ur of userRules) {
+      if (upper.includes(ur.pattern.toUpperCase())) {
+        return {
+          categoryName: ur.categoryName,
+          jarCode: ur.jarCode,
+          confidence: 0.99,
+          matchedKeyword: ur.pattern
+        };
+      }
+    }
+  }
 
   if (type === 'income') {
     if (upper.includes('LUONG') || upper.includes('SALARY') || upper.includes('THANH TOAN LUONG')) {

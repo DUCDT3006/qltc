@@ -5,14 +5,16 @@ export async function generateDedupeHash(
   amount: number,
   type: string,
   occurredAt: string,
-  description: string
+  description: string,
+  balanceAfter?: number
 ): Promise<string> {
   // Làm tròn thời gian đến mức 5 phút để tránh lệch mili-giây giữa các nguồn
   const dateObj = new Date(occurredAt);
   const roundedMinutes = Math.floor(dateObj.getMinutes() / 5) * 5;
   const timeKey = `${dateObj.getFullYear()}-${dateObj.getMonth() + 1}-${dateObj.getDate()} ${dateObj.getHours()}:${roundedMinutes}`;
 
-  const rawKey = `${bankCode.toUpperCase()}_${accountMask}_${amount}_${type}_${timeKey}_${description.slice(0, 30).trim().toUpperCase()}`;
+  const balKey = balanceAfter ? `_BAL${balanceAfter}` : '';
+  const rawKey = `${bankCode.toUpperCase()}_${accountMask}_${amount}_${type}_${timeKey}${balKey}_${description.slice(0, 30).trim().toUpperCase()}`;
 
   // Sử dụng Web Crypto API (chuẩn tương thích Cloudflare Workers)
   const encoder = new TextEncoder();

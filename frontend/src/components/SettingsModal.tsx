@@ -44,11 +44,11 @@ interface SettingsModalProps {
   onAddAccount: (acc: BankAccount) => void;
   privacyMode: boolean;
   onTogglePrivacy: () => void;
-  onSimulateNotification: () => void;
+  onSimulateNotification?: (notif?: any) => void | Promise<void>;
   onReprocessSuccess?: () => void;
   onOpenResetModal: () => void;
   userProfile: UserProfile;
-  onUpdateUserProfile: (updated: Partial<UserProfile>) => Promise<void>;
+  onUpdateUserProfile: (updated: Partial<UserProfile>) => void | Promise<void>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -176,8 +176,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessMsg, setReprocessMsg] = useState('');
 
+  // Settings Tab Navigation
+  const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
+
   // Version check state
-  const CURRENT_VERSION = 'v1.1.2';
+  const CURRENT_VERSION = 'v1.2.0';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -185,8 +188,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.1.2',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.2/qltc-v1.1.2.apk',
+    tagName: 'v1.2.0',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.0/qltc-v1.2.0.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');

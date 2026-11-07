@@ -582,17 +582,35 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
             </div>
           </div>
 
-          {/* Header Hũ Thực Tế */}
+          {/* Header Hũ Thực Tế (Tự động đồng bộ với tab Dự Kiến) */}
           <div className="flex items-center justify-between pt-1">
-            <span className="text-[11px] font-bold text-[#869699] uppercase tracking-wider">
-              Cơ cấu % Hũ Thực Tế (Tự động tính)
-            </span>
-            <span className="text-[10.5px] font-mono px-2.5 py-0.5 rounded-full bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/30">
-              Tổng % thực tế: {totalActualSpent > 0 ? `${totalActualPercentSum}%` : '0% (Chưa phát sinh chi)'}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold text-[#869699] uppercase tracking-wider">
+                Cơ cấu Hũ Thực Tế ({jars.length})
+              </span>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/30">
+                Tổng %: {totalActualSpent > 0 ? `${totalActualPercentSum}%` : '0%'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleOpenBalanceModal}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#20292B] text-[#D5E1E3] border border-[#8BA5AA]/25 active:scale-95"
+                title="Chỉnh tỷ lệ % hũ (đồng bộ cả Dự kiến & Thực tế)"
+              >
+                <Scale size={12} /> Chỉnh %
+              </button>
+              <button
+                onClick={() => setShowAddJarModal(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-[#20292B] text-[#8CC7AE] border border-[#8CC7AE]/30 active:scale-95"
+                title="Thêm hũ chi tiêu mới (tự đồng bộ sang cả 2 bên)"
+              >
+                <Plus size={12} /> Thêm hũ
+              </button>
+            </div>
           </div>
 
-          {/* Jars Grid (Actual Mode) */}
+          {/* Jars Grid (Actual Mode - Bấm vào bất kỳ hũ nào để sửa hoặc xóa, đồng bộ 100% với bên Dự Kiến) */}
           <div className="grid grid-cols-2 gap-2.5">
             {jars.map((jar, idx) => {
               const actualSpent = jarActualSpent[idx] || 0;
@@ -605,7 +623,9 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               return (
                 <div
                   key={jar.id}
-                  className="bg-[#1C2426]/85 border border-[#8BA5AA]/15 rounded-2xl p-3.5 flex flex-col justify-between"
+                  onClick={() => handleOpenEditJar(jar)}
+                  className="bg-[#1C2426]/85 border border-[#8BA5AA]/15 rounded-2xl p-3.5 flex flex-col justify-between cursor-pointer active:scale-98 transition-transform hover:border-[#8BA5AA]/30"
+                  title="Bấm để sửa tên, hạn mức, màu sắc hoặc xóa hũ này (đồng bộ cả 2 bên)"
                 >
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-[13px] font-semibold text-[#F2F5F5] truncate max-w-[90px]">{jar.name}</span>
@@ -620,9 +640,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
 
                   <div className="text-[10.5px] text-[#869699] num mt-1 flex items-center justify-between">
                     <span>Dự kiến: {plannedPctShare}%</span>
-                    <span className={vsLimitPct > 100 ? 'text-[#E07A5F] font-semibold' : 'text-[#8CC7AE]'}>
-                      {jar.monthlyLimit > 0 ? `Đạt ${vsLimitPct}% hũ` : '—'}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className={vsLimitPct > 100 ? 'text-[#E07A5F] font-semibold' : 'text-[#8CC7AE]'}>
+                        {jar.monthlyLimit > 0 ? `Đạt ${vsLimitPct}%` : '—'}
+                      </span>
+                      <Edit2 size={11} className="text-[#869699] opacity-70 shrink-0" />
+                    </div>
                   </div>
 
                   {/* Thanh so sánh % thực tế vs % dự kiến */}

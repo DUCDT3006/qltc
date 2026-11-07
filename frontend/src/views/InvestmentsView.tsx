@@ -1,26 +1,57 @@
-import React, { useState } from 'react';
-import { DonutChart } from '../components/DonutChart';
-import { Holding } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Holding, AssetClass, FmarketFund } from '../types';
 import { formatVND } from '../mockData';
-import { Plus, X } from 'lucide-react';
+import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Check } from 'lucide-react';
 
 interface InvestmentsViewProps {
   holdings: Holding[];
-  onAddHolding: (holding: Holding) => void;
+  fmarketFunds: FmarketFund[];
+  isSyncingPrices?: boolean;
+  onAddHolding: (holding: Holding) => Promise<void> | void;
+  onDeleteHolding: (symbol: string) => Promise<void> | void;
+  onSyncMarketPrices: () => Promise<void>;
 }
 
-export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ holdings, onAddHolding }) => {
+const ASSET_LABELS: Record<AssetClass, string> = {
+  fund: 'Quỹ Fmarket',
+  stock: 'Cổ phiếu',
+  gold: 'Vàng',
+  silver: 'Bạc',
+  land: 'Đất / BĐS',
+  crypto: 'Crypto'
+};
+
+const ASSET_COLORS: Record<AssetClass, string> = {
+  fund: '#8CC7AE',
+  stock: '#95B0B4',
+  gold: '#DEB48A',
+  silver: '#C4D0D2',
+  land: '#E07A5F',
+  crypto: '#A288E3'
+};
+
+export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
+  holdings,
+  fmarketFunds,
+  isSyncingPrices = false,
+  onAddHolding,
+  onDeleteHolding,
+  onSyncMarketPrices
+}) => {
   const [filter, setFilter] = useState<string>('all');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
-  // Form thêm tài sản
+  // Form thêm / sửa tài sản
+  const [editingSymbol, setEditingSymbol] = useState<string | null>(null);
+  const [assetClass, setAssetClass] = useState<AssetClass>('fund');
   const [symbol, setSymbol] = useState('');
   const [name, setName] = useState('');
-  const [assetClass, setAssetClass] = useState<'stock' | 'fund' | 'crypto' | 'gold'>('stock');
   const [quantityStr, setQuantityStr] = useState('');
   const [avgCostStr, setAvgCostStr] = useState('');
   const [currentPriceStr, setCurrentPriceStr] = useState('');
-  const [unit, setUnit] = useState('CP');
+  const [unit, setUnit] = useState('CCQ');
+  const [fundSearch, setFundSearch] = useState('');
 
   const totalValue = holdings.reduce((sum, h) => sum + h.quantity * h.currentPrice, 0);
   const totalCost = holdings.reduce((sum, h) => sum + h.quantity * h.avgCost, 0);
@@ -31,53 +62,140 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ holdings, onAd
     ? holdings
     : holdings.filter(h => h.assetClass === filter);
 
-  const handleCreateHolding = (e: React.FormEvent) => {
+  // Lọc danh sách quỹ Fmarket theo từ khóa
+  const matchingFunds = fmarketFunds.filter(f =>
+    f.shortName.toLowerCase().includes(fundSearch.toLowerCase()) ||
+    f.name.toLowerCase().includes(fundSearch.toLowerCase())
+  ).slice(0, 12);
+
+  const handleOpenAddModal = (defaultClass: AssetClass = 'fund') => {
+    setEditingSymbol(null);
+    setAssetClass(defaultClass);
+    setSymbol('');
+    setName('');
+    setQuantityStr('');
+    setAvgCostStr('');
+    setCurrentPriceStr('');
+    setFundSearch('');
+    setUnit(
+      defaultClass === 'fund' ? 'CCQ' :
+      defaultClass === 'stock' ? 'CP' :
+      defaultClass === 'gold' ? 'chỉ' :
+      defaultClass === 'silver' ? 'lượng' :
+      defaultClass === 'land' ? 'Lô/m²' : 'Coin'
+    );
+    setShowAddModal(true);
+  };
+
+  const handleOpenEditHolding = (h: Holding) => {
+    setEditingSymbol(h.symbol);
+    setAssetClass(h.assetClass);
+    setSymbol(h.symbol);
+    setName(h.name);
+    setQuantityStr(String(h.quantity));
+    setAvgCostStr(String(Math.round(h.avgCost)));
+    setCurrentPriceStr(String(Math.round(h.currentPrice)));
+    setUnit(h.unit || 'CCQ');
+    setShowAddModal(true);
+  };
+
+  const handleSelectFmarketFund = (fund: FmarketFund) => {
+    setSymbol(fund.shortName);
+    setName(fund.name);
+    setUnit('CCQ');
+    setCurrentPriceStr(String(Math.round(fund.nav)));
+    if (!avgCostStr) {
+      setAvgCostStr(String(Math.round(fund.nav)));
+    }
+  };
+
+  const handleSaveHolding = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!symbol.trim() || !name.trim()) return;
 
-    const quantity = parseFloat(quantityStr) || 0;
+    const quantity = parseFloat(quantityStr.replace(/,/g, '.')) || 0;
     const avgCost = parseFloat(avgCostStr.replace(/[^\d.]/g, '')) || 0;
     const currentPrice = parseFloat(currentPriceStr.replace(/[^\d.]/g, '')) || avgCost;
 
-    onAddHolding({
+    await onAddHolding({
       symbol: symbol.trim().toUpperCase(),
       name: name.trim(),
       assetClass,
       quantity,
       avgCost,
       currentPrice,
-      unit: unit.trim() || (assetClass === 'stock' ? 'CP' : assetClass === 'gold' ? 'chỉ' : assetClass === 'fund' ? 'CCQ' : 'Coin')
+      unit: unit.trim() || (
+        assetClass === 'fund' ? 'CCQ' :
+        assetClass === 'stock' ? 'CP' :
+        assetClass === 'gold' ? 'chỉ' :
+        assetClass === 'silver' ? 'lượng' :
+        assetClass === 'land' ? 'Lô/m²' : 'Coin'
+      )
     });
 
-    setSymbol('');
-    setName('');
-    setQuantityStr('');
-    setAvgCostStr('');
-    setCurrentPriceStr('');
     setShowAddModal(false);
   };
 
+  const handleTriggerSync = async () => {
+    await onSyncMarketPrices();
+    setSyncMessage('Đã cập nhật NAV Fmarket & giá Vàng/Bạc/Crypto mới nhất!');
+    setTimeout(() => setSyncMessage(null), 3500);
+  };
+
+  // Thống kê tỷ trọng từng nhóm tài sản
+  const classSummary = (['fund', 'stock', 'gold', 'silver', 'land', 'crypto'] as AssetClass[]).map(cls => {
+    const val = holdings
+      .filter(h => h.assetClass === cls)
+      .reduce((s, h) => s + h.quantity * h.currentPrice, 0);
+    const pct = totalValue > 0 ? Math.round((val / totalValue) * 100) : 0;
+    return { cls, label: ASSET_LABELS[cls], val, pct, color: ASSET_COLORS[cls] };
+  }).filter(item => item.val > 0);
+
   return (
     <div className="space-y-3 pb-24 px-4">
-      {/* Title */}
+      {/* Title & Action Buttons */}
       <div className="flex items-center justify-between">
-        <span className="text-[20px] font-bold text-[#F2F5F5]">Đầu tư</span>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#657D81]/25 text-[#D5E1E3] border border-[#8BA5AA]/25 active:scale-95"
-        >
-          <Plus size={13} /> Thêm tài sản
-        </button>
+        <div>
+          <span className="text-[20px] font-bold text-[#F2F5F5]">Tài sản & Đầu tư</span>
+          <div className="text-[11px] text-[#869699]">
+            Tự động đồng bộ NAV Fmarket, Vàng, Bạc, Crypto theo ngày
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleTriggerSync}
+            disabled={isSyncingPrices}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold bg-[#20292B] text-[#8CC7AE] border border-[#8CC7AE]/30 active:scale-95"
+            title="Cập nhật giá Fmarket & thị trường ngay"
+          >
+            <RefreshCw size={12} className={isSyncingPrices ? 'animate-spin' : ''} />
+            {isSyncingPrices ? 'Đang lấy giá...' : 'Giá Fmarket'}
+          </button>
+          <button
+            onClick={() => handleOpenAddModal('fund')}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#657D81] text-[#F2F5F5] active:scale-95"
+          >
+            <Plus size={13} /> Thêm
+          </button>
+        </div>
       </div>
+
+      {syncMessage && (
+        <div className="bg-[#8CC7AE]/15 border border-[#8CC7AE]/35 rounded-2xl px-3.5 py-2 text-xs text-[#8CC7AE] flex items-center gap-2">
+          <Check size={14} /> {syncMessage}
+        </div>
+      )}
 
       {/* Filter Tabs */}
       <div className="flex gap-1.5 overflow-x-auto py-1 no-scrollbar">
         {[
           { id: 'all', label: 'Tất cả' },
+          { id: 'fund', label: 'Quỹ Fmarket' },
+          { id: 'gold', label: 'Vàng' },
+          { id: 'silver', label: 'Bạc' },
+          { id: 'land', label: 'Đất / BĐS' },
           { id: 'stock', label: 'Cổ phiếu' },
-          { id: 'fund', label: 'CCQ' },
-          { id: 'crypto', label: 'Crypto' },
-          { id: 'gold', label: 'Vàng' }
+          { id: 'crypto', label: 'Crypto' }
         ].map((t) => (
           <button
             key={t.id}
@@ -97,104 +215,125 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ holdings, onAd
       <div className="bg-gradient-to-br from-[#273336] via-[#182022] to-[#141A1C] border border-[#A7BDC1]/20 rounded-3xl p-5 shadow-[0_16px_36px_rgba(0,0,0,0.35)]">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider">
-            Giá trị danh mục
+            Tổng giá trị tài sản đầu tư & tích lũy
           </span>
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#7EB89E]/15 text-[#8CC7AE] border border-[#7EB89E]/25">
-            XIRR 14,8%/năm
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold bg-[#7EB89E]/15 text-[#8CC7AE] border border-[#7EB89E]/25">
+            <TrendingUp size={11} /> Fmarket Live NAV
           </span>
         </div>
 
-        <div className="num text-[28px] font-bold text-[#F2F5F5] tracking-tight my-1">
+        <div className="num text-[27px] font-bold text-[#F2F5F5] tracking-tight my-1">
           {new Intl.NumberFormat('vi-VN').format(Math.round(totalValue))}{' '}
           <span className="text-lg text-[#95B0B4] font-normal">₫</span>
         </div>
 
         <div className="flex items-center justify-between text-xs mt-2">
-          <span className="num font-semibold text-[#8CC7AE]">
-            ▲ +{formatVND(profit)} (+{profitPct.toFixed(1)}%)
+          <span className={`num font-semibold ${profit >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
+            {profit >= 0 ? '▲ +' : '▼ −'}{formatVND(Math.abs(profit))} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(1)}%)
           </span>
-          <span className="text-[#869699] num">
-            Hôm nay <span className="text-[#8CC7AE]">+1,2tr</span>
+          <span className="text-[#869699] num text-[11px]">
+            Giá vốn: {formatVND(totalCost)}
           </span>
         </div>
-      </div>
 
-      {/* Monochromatic Donut Allocation Card */}
-      <div className="bg-[#1C2426]/80 backdrop-blur-md border border-[#8BA5AA]/12 rounded-3xl p-4.5 flex items-center gap-4">
-        <DonutChart />
-        <div className="flex-1 text-xs space-y-1.5">
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-1.5 text-[#C4D0D2]">
-              <span className="w-2 h-2 rounded-sm bg-[#B8CDD0]"></span>
-              Cổ phiếu VN
-            </span>
-            <b className="num text-[#F2F5F5]">45%</b>
+        {/* Thanh phân bổ tài sản thực tế */}
+        {classSummary.length > 0 && (
+          <div className="mt-3.5 pt-3 border-t border-[#8BA5AA]/15 space-y-2">
+            <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#141A1C]">
+              {classSummary.map(item => (
+                <div
+                  key={item.cls}
+                  style={{ width: `${Math.max(3, item.pct)}%`, backgroundColor: item.color }}
+                  className="h-full"
+                />
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+              {classSummary.map(item => (
+                <div key={item.cls} className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[#C4D0D2]">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: item.color }} />
+                    {item.label}
+                  </span>
+                  <span className="num font-semibold text-[#F2F5F5]">
+                    {formatVND(item.val)} ({item.pct}%)
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-1.5 text-[#C4D0D2]">
-              <span className="w-2 h-2 rounded-sm bg-[#859FA4]"></span>
-              Chứng chỉ quỹ
-            </span>
-            <b className="num text-[#F2F5F5]">30%</b>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-1.5 text-[#C4D0D2]">
-              <span className="w-2 h-2 rounded-sm bg-[#657D81]"></span>
-              Crypto
-            </span>
-            <b className="num text-[#F2F5F5]">15%</b>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-1.5 text-[#C4D0D2]">
-              <span className="w-2 h-2 rounded-sm bg-[#3F5154]"></span>
-              Vàng SJC
-            </span>
-            <b className="num text-[#F2F5F5]">10%</b>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Holdings List */}
       <div className="bg-[#1C2426]/80 backdrop-blur-md border border-[#8BA5AA]/12 rounded-3xl p-3.5 divide-y divide-[#8BA5AA]/10">
-        {filteredHoldings.map((h) => {
-          const val = h.quantity * h.currentPrice;
-          const p = h.avgCost > 0 ? (h.currentPrice - h.avgCost) / h.avgCost * 100 : 0;
-          const isUp = p >= 0;
-
-          return (
-            <div key={h.symbol} className="py-2.5 flex items-center justify-between gap-3">
-              <div className="w-9 h-9 rounded-xl bg-[#232E31] border border-[#8BA5AA]/18 flex items-center justify-center font-bold text-xs text-[#BFD0D3] shrink-0">
-                {h.symbol}
-              </div>
-
-              <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-semibold text-[#F2F5F5] truncate">
-                  {h.name}
-                </div>
-                <div className="text-[11px] text-[#869699] num">
-                  {h.quantity} {h.unit} · Vốn {new Intl.NumberFormat('vi-VN').format(Math.round(h.avgCost))}
-                </div>
-              </div>
-
-              <div className="text-right num shrink-0">
-                <div className="text-[13px] font-semibold text-[#F2F5F5]">
-                  {formatVND(val)}
-                </div>
-                <div className={`text-[11px] font-medium ${isUp ? 'text-[#8CC7AE]' : 'text-[#D98A8A]'}`}>
-                  {isUp ? '+' : ''}{p.toFixed(1)}%
-                </div>
-              </div>
+        {filteredHoldings.length === 0 ? (
+          <div className="py-8 text-center space-y-2">
+            <div className="text-xs text-[#869699]">
+              Chưa có tài sản nào trong mục này.
             </div>
-          );
-        })}
+            <button
+              onClick={() => handleOpenAddModal(filter === 'all' ? 'fund' : (filter as AssetClass))}
+              className="px-3.5 py-1.5 rounded-xl bg-[#657D81]/30 text-[#8CC7AE] border border-[#8CC7AE]/30 text-xs font-semibold"
+            >
+              + Thêm {filter === 'all' ? 'Quỹ Fmarket / Vàng / Bạc / Đất' : ASSET_LABELS[filter as AssetClass]}
+            </button>
+          </div>
+        ) : (
+          filteredHoldings.map((h) => {
+            const val = h.quantity * h.currentPrice;
+            const p = h.avgCost > 0 ? ((h.currentPrice - h.avgCost) / h.avgCost) * 100 : 0;
+            const isUp = p >= 0;
+
+            return (
+              <div
+                key={h.symbol}
+                onClick={() => handleOpenEditHolding(h)}
+                className="py-3 flex items-center justify-between gap-3 cursor-pointer hover:bg-white/[0.02] rounded-xl px-1 transition-colors"
+              >
+                <div
+                  className="w-10 h-10 rounded-xl bg-[#232E31] border border-[#8BA5AA]/20 flex flex-col items-center justify-center font-bold text-[10px] text-[#BFD0D3] shrink-0 px-1 text-center"
+                  style={{ borderColor: `${ASSET_COLORS[h.assetClass] || '#8BA5AA'}40` }}
+                >
+                  <span className="truncate max-w-[36px]">{h.symbol}</span>
+                  <span className="text-[8.5px] font-normal text-[#869699]">
+                    {ASSET_LABELS[h.assetClass] || h.assetClass}
+                  </span>
+                </div>
+
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-semibold text-[#F2F5F5] truncate flex items-center gap-1.5">
+                    <span className="truncate">{h.name}</span>
+                    <Edit2 size={10} className="text-[#869699] shrink-0 opacity-60" />
+                  </div>
+                  <div className="text-[11px] text-[#869699] num mt-0.5">
+                    {h.quantity} {h.unit} · Giá hiện tại:{' '}
+                    <b className="text-[#D5E1E3]">{new Intl.NumberFormat('vi-VN').format(Math.round(h.currentPrice))} ₫</b>
+                  </div>
+                </div>
+
+                <div className="text-right num shrink-0">
+                  <div className="text-[13.5px] font-bold text-[#F2F5F5]">
+                    {formatVND(val)}
+                  </div>
+                  <div className={`text-[11px] font-medium ${isUp ? 'text-[#8CC7AE]' : 'text-[#D98A8A]'}`}>
+                    {isUp ? '+' : ''}{p.toFixed(1)}%
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
       </div>
 
-      {/* MODAL: Thêm tài sản đầu tư */}
+      {/* MODAL: Thêm / Cập nhật tài sản đầu tư (Hỗ trợ chọn nhanh Quỹ Fmarket) */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-3">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-3.5">
             <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-[#F2F5F5]">Thêm tài sản đầu tư</span>
+              <span className="text-base font-bold text-[#F2F5F5]">
+                {editingSymbol ? `Cập nhật tài sản: ${editingSymbol}` : 'Thêm / Cập nhật Tài sản'}
+              </span>
               <button
                 onClick={() => setShowAddModal(false)}
                 className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center"
@@ -203,42 +342,131 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ holdings, onAd
               </button>
             </div>
 
-            <form onSubmit={handleCreateHolding} className="space-y-2.5">
+            <form onSubmit={handleSaveHolding} className="space-y-3">
+              {/* Chọn nhóm tài sản */}
+              <div>
+                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1.5">
+                  Nhóm tài sản
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {([
+                    { id: 'fund', label: '📈 Quỹ Fmarket' },
+                    { id: 'gold', label: '🥇 Vàng' },
+                    { id: 'silver', label: '🥈 Bạc' },
+                    { id: 'land', label: '🏡 Đất / BĐS' },
+                    { id: 'stock', label: '📊 Cổ phiếu' },
+                    { id: 'crypto', label: '🪙 Crypto' }
+                  ] as Array<{ id: AssetClass; label: string }>).map(tab => (
+                    <button
+                      type="button"
+                      key={tab.id}
+                      onClick={() => {
+                        setAssetClass(tab.id);
+                        setUnit(
+                          tab.id === 'fund' ? 'CCQ' :
+                          tab.id === 'stock' ? 'CP' :
+                          tab.id === 'gold' ? 'chỉ' :
+                          tab.id === 'silver' ? 'lượng' :
+                          tab.id === 'land' ? 'm²' : 'Coin'
+                        );
+                        if (tab.id === 'gold' && !symbol) {
+                          setSymbol('SJC');
+                          setName('Vàng nhẫn 9999 / SJC');
+                        } else if (tab.id === 'silver' && !symbol) {
+                          setSymbol('SILVER');
+                          setName('Bạc tích trữ 999');
+                        } else if (tab.id === 'land' && !symbol) {
+                          setSymbol('LAND1');
+                          setName('Đất nền / Bất động sản');
+                        }
+                      }}
+                      className={`py-2 px-2 rounded-xl text-[11px] font-semibold border transition-all ${
+                        assetClass === tab.id
+                          ? 'bg-[#657D81] text-[#F2F5F5] border-[#8CC7AE]/40'
+                          : 'bg-[#20292B] text-[#869699] border-[#8BA5AA]/15'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Nếu là Quỹ Fmarket -> Hiển thị bộ chọn trực tiếp từ Fmarket API */}
+              {assetClass === 'fund' && fmarketFunds.length > 0 && (
+                <div className="bg-[#20292B] border border-[#8CC7AE]/25 rounded-2xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-[#8CC7AE]">
+                      Chọn nhanh Quỹ trên Fmarket ({fmarketFunds.length} quỹ)
+                    </span>
+                    <span className="text-[10px] text-[#869699]">Tự lấy giá NAV hôm nay</span>
+                  </div>
+                  <div className="relative">
+                    <Search size={13} className="absolute left-2.5 top-2.5 text-[#869699]" />
+                    <input
+                      type="text"
+                      placeholder="Tìm mã quỹ Fmarket (VD: VESAF, DCDS, VCBF, SSISCA...)"
+                      value={fundSearch}
+                      onChange={(e) => setFundSearch(e.target.value)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl pl-8 pr-3 py-1.5 text-xs text-[#F2F5F5] focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto py-1 no-scrollbar">
+                    {matchingFunds.map(f => (
+                      <button
+                        type="button"
+                        key={f.shortName}
+                        onClick={() => handleSelectFmarketFund(f)}
+                        className={`px-2.5 py-1.5 rounded-xl text-left shrink-0 border transition-all ${
+                          symbol.toUpperCase() === f.shortName
+                            ? 'bg-[#8CC7AE]/20 border-[#8CC7AE] text-[#F2F5F5]'
+                            : 'bg-[#161C1E] border-[#8BA5AA]/15 text-[#C4D0D2]'
+                        }`}
+                      >
+                        <div className="text-[11px] font-bold text-[#8CC7AE]">{f.shortName}</div>
+                        <div className="text-[10px] num text-[#D5E1E3]">
+                          NAV: {new Intl.NumberFormat('vi-VN').format(Math.round(f.nav))} ₫
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Loại tài sản</label>
-                  <select
-                    value={assetClass}
-                    onChange={(e) => {
-                      const cls = e.target.value as any;
-                      setAssetClass(cls);
-                      setUnit(cls === 'stock' ? 'CP' : cls === 'gold' ? 'chỉ' : cls === 'fund' ? 'CCQ' : 'Coin');
-                    }}
-                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2.5 py-2 text-xs text-[#F2F5F5]"
-                  >
-                    <option value="stock">Cổ phiếu VN</option>
-                    <option value="fund">Chứng chỉ quỹ</option>
-                    <option value="crypto">Crypto</option>
-                    <option value="gold">Vàng 9999 / SJC</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Mã (Symbol)</label>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                    Mã tài sản
+                  </label>
                   <input
                     type="text"
-                    placeholder="VD: HPG, BTC..."
+                    placeholder="VD: VESAF, SJC, LAND1..."
                     value={symbol}
                     onChange={(e) => setSymbol(e.target.value)}
                     className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] uppercase"
                   />
                 </div>
+                <div>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                    Đơn vị tính
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="CCQ, chỉ, lượng, m², lô..."
+                    value={unit}
+                    onChange={(e) => setUnit(e.target.value)}
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
+                  />
+                </div>
               </div>
 
               <div>
-                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Tên tài sản</label>
+                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                  Tên tài sản chi tiết
+                </label>
                 <input
                   type="text"
-                  placeholder="VD: Tập đoàn Hòa Phát, Bitcoin..."
+                  placeholder="VD: Quỹ đầu tư cổ phiếu tiếp cận thị trường VinaCapital..."
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
@@ -247,45 +475,66 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ holdings, onAd
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Số lượng ({unit})</label>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                    Số lượng ({unit})
+                  </label>
                   <input
                     type="number"
                     step="any"
-                    placeholder="VD: 1000"
+                    placeholder="VD: 500.25"
                     value={quantityStr}
                     onChange={(e) => setQuantityStr(e.target.value)}
-                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#F2F5F5]"
                   />
                 </div>
                 <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Giá vốn mua (₫)</label>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                    Giá vốn TB / 1 {unit} (₫)
+                  </label>
                   <input
                     type="text"
-                    placeholder="VD: 25000"
+                    placeholder="VD: 28500"
                     value={avgCostStr}
                     onChange={(e) => setAvgCostStr(e.target.value)}
-                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#F2F5F5]"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">Giá thị trường hiện tại (₫)</label>
+                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                  Giá thị trường hiện tại / 1 {unit} (₫)
+                </label>
                 <input
                   type="text"
-                  placeholder="Để trống nếu bằng giá vốn"
+                  placeholder="Tự động cập nhật từ Fmarket hoặc tự nhập"
                   value={currentPriceStr}
                   onChange={(e) => setCurrentPriceStr(e.target.value)}
-                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#8CC7AE]"
                 />
               </div>
 
-              <button
-                type="submit"
-                className="w-full py-2.5 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-bold shadow active:scale-98 mt-2"
-              >
-                + Lưu vào danh mục
-              </button>
+              <div className="pt-1 flex flex-col gap-2">
+                <button
+                  type="submit"
+                  className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-98"
+                >
+                  {editingSymbol ? 'Lưu cập nhật tài sản' : '+ Lưu vào danh mục tài sản'}
+                </button>
+
+                {editingSymbol && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await onDeleteHolding(editingSymbol);
+                      setShowAddModal(false);
+                    }}
+                    className="w-full py-2 rounded-xl bg-transparent border border-[#E06D6D]/35 text-[#E06D6D] text-xs font-semibold flex items-center justify-center gap-1.5"
+                  >
+                    <Trash2 size={13} /> Xóa tài sản này
+                  </button>
+                )}
+              </div>
             </form>
           </div>
         </div>

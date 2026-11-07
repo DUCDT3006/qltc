@@ -440,6 +440,9 @@ app.put('/api/transactions/:id', async (c) => {
   if (body.notes !== undefined) {
     updates.push('notes = ?');
     params.push(body.notes);
+  } else if (body.categoryName) {
+    updates.push('notes = ?');
+    params.push(body.categoryName);
   }
 
   updates.push('updated_at = CURRENT_TIMESTAMP');
@@ -448,6 +451,66 @@ app.put('/api/transactions/:id', async (c) => {
   await db.prepare(`UPDATE transactions SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
 
   return c.json({ success: true, message: 'Đã cập nhật giao dịch' });
+});
+
+// Thêm giao dịch thủ công từ QuickAddModal
+app.post('/api/transactions', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{
+    id?: string;
+    accountId: string;
+    type: 'income' | 'expense' | 'transfer';
+    amount: number;
+    description: string;
+    jarId?: string;
+    jarCode?: string;
+    categoryName?: string;
+    occurredAt?: string;
+  }>();
+
+  const txnId = body.id || `txn_man_${Date.now()}`;
+  let jarId = body.jarId || null;
+  if (!jarId && body.jarCode && body.type === 'expense') {
+    const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
+      .bind(userId, body.jarCode).first<{ id: string }>();
+    jarId = jar?.id || null;
+  }
+
+  await db.prepare(`
+    INSERT INTO transactions (
+      id, user_id, account_id, type, amount, occurred_at, description, jar_id, status, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)
+  `).bind(
+    txnId,
+    userId,
+    body.accountId,
+    body.type,
+    body.amount,
+    body.occurredAt || new Date().toISOString(),
+    body.description,
+    jarId,
+    body.categoryName || null
+  ).run();
+
+  if (body.accountId) {
+    const delta = body.type === 'income' ? body.amount : body.type === 'expense' ? -body.amount : 0;
+    if (delta !== 0) {
+      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(delta, body.accountId, userId).run();
+    }
+  }
+
+  return c.json({ success: true, id: txnId });
+});
+
+// Xóa giao dịch
+app.delete('/api/transactions/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true });
 });
 
 // Tách 2 giao dịch nếu auto-pairing bị nhầm (Unpair)
@@ -869,12 +932,268 @@ app.delete('/api/jars/:id', async (c) => {
   return c.json({ success: true, message: 'Đã xóa hũ thành công' });
 });
 
+// Khởi tạo bảng mở rộng cho Kế hoạch Thu/Chi dự kiến
+async function ensurePlanningTables(db: D1Database) {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS income_sources (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'fixed',
+      recurrence TEXT DEFAULT 'Hàng tháng',
+      expected_amount INTEGER DEFAULT 0,
+      color TEXT DEFAULT '#657D81',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS planned_expenses (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      jar_code TEXT NOT NULL DEFAULT 'NEC',
+      expected_amount INTEGER NOT NULL DEFAULT 0,
+      recurrence TEXT DEFAULT 'Hàng tháng',
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+// Danh sách Nguồn thu dự kiến
+app.get('/api/income-sources', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const { results } = await db.prepare('SELECT * FROM income_sources WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC')
+    .bind(userId).all();
+  return c.json({ incomeSources: results });
+});
+
+app.post('/api/income-sources', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const body = await c.req.json<{
+    id?: string;
+    name: string;
+    kind?: string;
+    expectedAmount: number;
+    recurrence?: string;
+    color?: string;
+  }>();
+  const id = body.id || `inc_${Date.now()}`;
+  await db.prepare(`
+    INSERT INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      kind = excluded.kind,
+      expected_amount = excluded.expected_amount,
+      recurrence = excluded.recurrence
+  `).bind(id, userId, body.name, body.kind || 'fixed', body.expectedAmount || 0, body.recurrence || 'Hàng tháng', body.color || '#657D81').run();
+  return c.json({ success: true, id });
+});
+
+app.delete('/api/income-sources/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  await db.prepare('DELETE FROM income_sources WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true });
+});
+
+// Danh sách Khoản chi dự kiến
+app.get('/api/planned-expenses', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const { results } = await db.prepare('SELECT * FROM planned_expenses WHERE user_id = ? ORDER BY created_at ASC')
+    .bind(userId).all();
+  return c.json({ plannedExpenses: results });
+});
+
+app.post('/api/planned-expenses', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const body = await c.req.json<{
+    id?: string;
+    name: string;
+    jarCode: string;
+    expectedAmount: number;
+    recurrence?: string;
+    note?: string;
+  }>();
+  const id = body.id || `pexp_${Date.now()}`;
+  await db.prepare(`
+    INSERT INTO planned_expenses (id, user_id, name, jar_code, expected_amount, recurrence, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      jar_code = excluded.jar_code,
+      expected_amount = excluded.expected_amount,
+      recurrence = excluded.recurrence,
+      note = excluded.note
+  `).bind(id, userId, body.name, body.jarCode || 'NEC', body.expectedAmount || 0, body.recurrence || 'Hàng tháng', body.note || null).run();
+  return c.json({ success: true, id });
+});
+
+app.delete('/api/planned-expenses/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  await db.prepare('DELETE FROM planned_expenses WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true });
+});
+
+// Lấy danh sách Quỹ mở trực tiếp từ Fmarket API
+async function fetchFmarketFundsList(): Promise<Array<{ shortName: string; name: string; nav: number; updatedAt?: number }>> {
+  try {
+    const res = await fetch('https://api.fmarket.vn/res/products/filter', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0'
+      },
+      body: JSON.stringify({
+        types: ['NEW_FUND', 'TRADING_FUND'],
+        issuerIds: [],
+        sortOrder: 'DESC',
+        sortField: 'annualizedReturn36Months',
+        page: 1,
+        pageSize: 100,
+        isIpo: false,
+        fundAssetTypes: [],
+        bondRemainPeriods: [],
+        searchField: '',
+        isBuyByReward: false,
+        thirdAppIds: []
+      })
+    });
+    if (!res.ok) return [];
+    const json: any = await res.json();
+    const rows = json?.data?.rows || [];
+    return rows.map((r: any) => ({
+      shortName: String(r.shortName || '').toUpperCase(),
+      name: r.name || r.shortName,
+      nav: Number(r.nav) || 0,
+      updatedAt: r.productNavChange?.updateAt
+    }));
+  } catch (e) {
+    console.error('Fmarket fetch error:', e);
+    return [];
+  }
+}
+
+// Đồng bộ giá tài sản tự động theo ngày (Fmarket NAV + Vàng + Bạc + Crypto)
+async function syncAllMarketPrices(db: D1Database) {
+  const fmarketFunds = await fetchFmarketFundsList();
+  const fundMap = new Map<string, { name: string; nav: number }>();
+  for (const f of fmarketFunds) {
+    if (f.shortName && f.nav > 0) {
+      fundMap.set(f.shortName.toUpperCase(), { name: f.name, nav: f.nav });
+    }
+  }
+
+  // Lấy giá Vàng, Bạc, Crypto từ CoinGecko
+  let goldPerChi = 0;
+  let silverPerLuong = 0;
+  let btcVnd = 0;
+  let ethVnd = 0;
+  try {
+    const cgRes = await fetch(
+      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,pax-gold,kinesis-silver&vs_currencies=vnd',
+      { headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    if (cgRes.ok) {
+      const cg: any = await cgRes.json();
+      if (cg['pax-gold']?.vnd) {
+        // 1 troy oz = 8.29426 chỉ
+        goldPerChi = Math.round(cg['pax-gold'].vnd / 8.29426);
+      }
+      if (cg['kinesis-silver']?.vnd) {
+        // 1 troy oz = 0.829426 lượng
+        silverPerLuong = Math.round(cg['kinesis-silver'].vnd / 0.829426);
+      }
+      if (cg['bitcoin']?.vnd) btcVnd = Math.round(cg['bitcoin'].vnd);
+      if (cg['ethereum']?.vnd) ethVnd = Math.round(cg['ethereum'].vnd);
+    }
+  } catch (e) {
+    console.error('CoinGecko error:', e);
+  }
+
+  const { results: assets } = await db.prepare('SELECT id, symbol, asset_class, current_price, source FROM assets').all<{
+    id: string;
+    symbol: string;
+    asset_class: string;
+    current_price: number;
+    source: string | null;
+  }>();
+
+  let updatedCount = 0;
+  for (const ast of assets) {
+    const sym = ast.symbol.toUpperCase();
+    let newPrice: number | null = null;
+
+    // 1. Nếu là quỹ trên Fmarket (hoặc trùng mã quỹ Fmarket)
+    if (fundMap.has(sym)) {
+      newPrice = fundMap.get(sym)!.nav;
+    } else if (ast.asset_class === 'crypto') {
+      if (sym === 'BTC' && btcVnd > 0) newPrice = btcVnd;
+      if (sym === 'ETH' && ethVnd > 0) newPrice = ethVnd;
+    } else if (ast.asset_class === 'gold' && goldPerChi > 0) {
+      // Nếu đơn vị là lượng thì nhân 10, mặc định chỉ
+      const unit = (ast.source || 'chỉ').toLowerCase();
+      newPrice = unit.includes('lượng') || unit.includes('cây') ? goldPerChi * 10 : goldPerChi;
+    } else if (ast.asset_class === 'silver' && silverPerLuong > 0) {
+      const unit = (ast.source || 'lượng').toLowerCase();
+      newPrice = unit.includes('chỉ') ? Math.round(silverPerLuong / 10) : unit.includes('kg') ? Math.round(silverPerLuong * 26.666) : silverPerLuong;
+    }
+
+    if (newPrice !== null && newPrice > 0) {
+      await db.prepare('UPDATE assets SET current_price = ?, price_updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(newPrice, ast.id).run();
+      updatedCount++;
+    }
+  }
+
+  return {
+    updatedCount,
+    fmarketCount: fmarketFunds.length,
+    goldPerChi,
+    silverPerLuong,
+    btcVnd
+  };
+}
+
+// API lấy danh sách quỹ Fmarket trực tiếp
+app.get('/api/market/fmarket-funds', async (c) => {
+  const funds = await fetchFmarketFundsList();
+  return c.json({ funds });
+});
+
+// API đồng bộ giá thị trường & Fmarket ngay lập tức
+app.post('/api/market/sync-prices', async (c) => {
+  const db = c.env.DB;
+  const syncResult = await syncAllMarketPrices(db);
+  return c.json({
+    success: true,
+    ...syncResult,
+    message: `Đã cập nhật giá mới nhất cho ${syncResult.updatedCount} tài sản từ Fmarket & Thị trường`
+  });
+});
+
 // Danh sách tài sản đầu tư
 app.get('/api/holdings', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const { results } = await db.prepare(`
-    SELECT h.id, h.quantity, h.avg_cost, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price
+    SELECT h.id, h.quantity, h.avg_cost, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price, a.source as unit, a.price_updated_at
     FROM holdings h
     JOIN assets a ON h.asset_id = a.id
     WHERE h.user_id = ?
@@ -882,56 +1201,85 @@ app.get('/api/holdings', async (c) => {
   return c.json({ holdings: results });
 });
 
-// Lưu / cập nhật tài sản đầu tư
+// Lưu / cập nhật tài sản đầu tư (Quỹ Fmarket, Cổ phiếu, Vàng, Bạc, Đất, Crypto)
 app.post('/api/holdings', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const body = await c.req.json<{
     symbol: string;
     name: string;
-    assetClass: 'stock' | 'fund' | 'crypto' | 'gold';
+    assetClass: 'stock' | 'fund' | 'crypto' | 'gold' | 'silver' | 'land';
     quantity: number;
     avgCost: number;
     currentPrice: number;
+    unit?: string;
   }>();
 
-  const assetId = `ast_${body.symbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
-  await db.prepare(`
-    INSERT INTO assets (id, symbol, name, asset_class, current_price, price_updated_at)
-    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(symbol) DO UPDATE SET current_price = excluded.current_price, name = excluded.name
-  `).bind(assetId, body.symbol.toUpperCase(), body.name, body.assetClass, body.currentPrice).run();
+  const cleanSymbol = body.symbol.trim().toUpperCase();
+  const assetId = `ast_${cleanSymbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  const defaultUnit = body.unit || (
+    body.assetClass === 'fund' ? 'CCQ' :
+    body.assetClass === 'stock' ? 'CP' :
+    body.assetClass === 'gold' ? 'chỉ' :
+    body.assetClass === 'silver' ? 'lượng' :
+    body.assetClass === 'land' ? 'm²' : 'Coin'
+  );
 
-  const holdingId = `hld_${assetId}`;
+  await db.prepare(`
+    INSERT INTO assets (id, symbol, name, asset_class, current_price, source, price_updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(symbol) DO UPDATE SET
+      current_price = excluded.current_price,
+      name = excluded.name,
+      asset_class = excluded.asset_class,
+      source = excluded.source,
+      price_updated_at = CURRENT_TIMESTAMP
+  `).bind(assetId, cleanSymbol, body.name, body.assetClass, body.currentPrice, defaultUnit).run();
+
+  const existingAsset = await db.prepare('SELECT id FROM assets WHERE symbol = ?').bind(cleanSymbol).first<{ id: string }>();
+  const finalAssetId = existingAsset?.id || assetId;
+  const holdingId = `hld_${finalAssetId}`;
+
   await db.prepare(`
     INSERT INTO holdings (id, user_id, asset_id, quantity, avg_cost, updated_at)
     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(id) DO UPDATE SET quantity = excluded.quantity, avg_cost = excluded.avg_cost
-  `).bind(holdingId, userId, assetId, body.quantity, body.avgCost).run();
+    ON CONFLICT(id) DO UPDATE SET
+      quantity = excluded.quantity,
+      avg_cost = excluded.avg_cost,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(holdingId, userId, finalAssetId, body.quantity, body.avgCost).run();
 
-  return c.json({ success: true, message: 'Đã lưu tài sản đầu tư' });
+  return c.json({ success: true, holdingId, message: 'Đã lưu tài sản thành công' });
 });
 
-// Xóa 1 tài sản đầu tư
+// Xóa 1 tài sản đầu tư (theo holding id hoặc symbol)
 app.delete('/api/holdings/:id', async (c) => {
   const db = c.env.DB;
-  const id = c.req.param('id');
+  const idOrSymbol = c.req.param('id');
   const userId = 'user_default';
-  await db.prepare('DELETE FROM holdings WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true, message: 'Đã xóa tài sản đầu tư' });
+
+  await db.prepare('DELETE FROM holdings WHERE (id = ? OR asset_id = ?) AND user_id = ?')
+    .bind(idOrSymbol, `ast_${idOrSymbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`, userId).run();
+
+  const asset = await db.prepare('SELECT id FROM assets WHERE symbol = ?').bind(idOrSymbol.toUpperCase()).first<{ id: string }>();
+  if (asset) {
+    await db.prepare('DELETE FROM holdings WHERE asset_id = ? AND user_id = ?').bind(asset.id, userId).run();
+  }
+
+  return c.json({ success: true, message: 'Đã xóa tài sản' });
 });
 
 // RESET & KHỞI TẠO TÀI CHÍNH THỰC TẾ
 app.post('/api/reset', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
+  await ensurePlanningTables(db);
   const body = await c.req.json<{
     scope: 'transactions' | 'balances' | 'holdings' | 'all';
     clearNotifications?: boolean;
   }>();
 
   if (body.scope === 'transactions' || body.scope === 'all') {
-    // 1. Xóa sạch lịch sử giao dịch
     await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
     if (body.clearNotifications || body.scope === 'all') {
       await db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId).run();
@@ -939,19 +1287,18 @@ app.post('/api/reset', async (c) => {
   }
 
   if (body.scope === 'balances' || body.scope === 'all') {
-    // 2. Đặt toàn bộ số dư tài khoản về 0
     await db.prepare('UPDATE accounts SET balance = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').bind(userId).run();
   }
 
   if (body.scope === 'holdings' || body.scope === 'all') {
-    // 3. Xóa sạch tài sản đầu tư mẫu
     await db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId).run();
     await db.prepare('DELETE FROM assets').run();
   }
 
   if (body.scope === 'all') {
-    // 4. Đặt toàn bộ hạn mức các hũ về 0
     await db.prepare('UPDATE jars SET monthly_limit = 0 WHERE user_id = ?').bind(userId).run();
+    await db.prepare('DELETE FROM income_sources WHERE user_id = ?').bind(userId).run();
+    await db.prepare('DELETE FROM planned_expenses WHERE user_id = ?').bind(userId).run();
   }
 
   return c.json({
@@ -963,11 +1310,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.6/qltc-v1.0.6.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.0/qltc-v1.1.0.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.0'
+      'User-Agent': 'QLTC-Updater/1.1'
     }
   });
 
@@ -981,7 +1328,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.0.6.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.1.0.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -993,8 +1340,8 @@ app.get('/api/download-apk', async (c) => {
 // Thông tin phiên bản & link cập nhật
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.0.6',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.0.6/qltc-v1.0.6.apk',
+    version: '1.1.0',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.0/qltc-v1.1.0.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,
@@ -1004,9 +1351,9 @@ app.get('/api/version', (c) => {
 
 export default {
   fetch: app.fetch,
-  // Cron Trigger để cập nhật giá cổ phiếu, coin, vàng
-  async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext) {
-    console.log('Chạy Cron cập nhật giá thị trường tự động...');
-    // Cập nhật giá qua CoinGecko / API tài chính
+  // Cron Trigger chạy tự động hàng ngày để cập nhật giá Quỹ Fmarket, Vàng, Bạc, Crypto
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
+    console.log('Chạy Cron cập nhật giá Fmarket & thị trường tự động...');
+    await syncAllMarketPrices(env.DB);
   }
 };

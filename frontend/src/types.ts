@@ -1,5 +1,7 @@
 export type TabType = 'dashboard' | 'transactions' | 'budget' | 'investments';
 
+export type AssetClass = 'fund' | 'stock' | 'crypto' | 'gold' | 'silver' | 'land';
+
 export interface Jar {
   id: string;
   code: string;
@@ -28,6 +30,15 @@ export interface IncomeSource {
   color?: string;
 }
 
+export interface PlannedExpense {
+  id: string;
+  name: string;
+  jarCode: string;
+  expectedAmount: number;
+  recurrence: string;
+  note?: string;
+}
+
 export interface Transaction {
   id: string;
   bankCode: string;
@@ -40,6 +51,7 @@ export interface Transaction {
   suggestedCategory: string;
   suggestedJarCode: string;
   occurredAt: string;
+  occurredAtIso?: string;
   status: 'pending' | 'confirmed' | 'rejected';
   transferPairId?: string | null;
   pairedTxnId?: string | null;
@@ -50,13 +62,24 @@ export interface Transaction {
 }
 
 export interface Holding {
+  id?: string;
   symbol: string;
   name: string;
-  assetClass: 'stock' | 'fund' | 'crypto' | 'gold';
+  assetClass: AssetClass;
   quantity: number;
   avgCost: number;
   currentPrice: number;
   unit: string;
+  priceUpdatedAt?: string;
+  source?: string;
+}
+
+export interface FmarketFund {
+  shortName: string;
+  name: string;
+  nav: number;
+  issuer?: string;
+  updatedAt?: number;
 }
 
 export interface UserProfile {

@@ -4,6 +4,7 @@ import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } 
 import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from '../utils/financeMath';
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
+import { JarDetailModal } from '../components/JarDetailModal';
 import {
   RefreshCw,
   ChevronLeft,
@@ -78,6 +79,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [newCashType, setNewCashType] = useState<'bank' | 'cash' | 'savings'>('cash');
   const [newCashBalance, setNewCashBalance] = useState<number>(0);
   const [syncDone, setSyncDone] = useState(false);
+  const [selectedJarForDetail, setSelectedJarForDetail] = useState<Jar | null>(null);
 
   // Điều hướng kỳ thống kê
   const handlePrevPeriod = () => {
@@ -752,9 +754,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             return (
               <div
                 key={jar.id}
-                className={`bg-[#141A1C]/85 border rounded-2xl p-3 space-y-2 ${
+                onClick={() => setSelectedJarForDetail(jar)}
+                className={`bg-[#141A1C]/85 border rounded-2xl p-3 space-y-2 cursor-pointer active:scale-98 transition-transform hover:border-[#8BA5AA]/30 ${
                   isOver ? 'border-[#E07A5F]/40' : 'border-[#8BA5AA]/12'
                 }`}
+                title="Bấm để xem các khoản thu chi đã ghi nhận"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -918,6 +922,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       )}
+      {/* Modal chi tiết các khoản thu chi của hũ */}
+      <JarDetailModal
+        isOpen={Boolean(selectedJarForDetail)}
+        onClose={() => setSelectedJarForDetail(null)}
+        jar={selectedJarForDetail}
+        transactions={confirmedTransactions}
+        privacyMode={privacyMode}
+        onEditJar={() => {
+          setSelectedJarForDetail(null);
+          onOpenBudget();
+        }}
+      />
     </div>
   );
 };

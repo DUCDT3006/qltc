@@ -92,7 +92,7 @@ export interface Transaction {
   confidence?: number;
   occurredAt: string;
   occurredAtIso?: string;
-  status: 'pending' | 'confirmed' | 'rejected';
+  status: 'pending' | 'confirmed' | 'rejected' | 'paired_hidden';
   transferPairId?: string | null;
   pairedTxnId?: string | null;
   pairedAccountName?: string | null;

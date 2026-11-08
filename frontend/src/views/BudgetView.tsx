@@ -4,6 +4,7 @@ import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages, RECURR
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { JarDetailModal } from '../components/JarDetailModal';
 import {
   Sparkles,
   Check,
@@ -109,6 +110,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   // Modal Thêm / Sửa Hũ
   const [showAddJarModal, setShowAddJarModal] = useState(false);
   const [showBalanceModal, setShowBalanceModal] = useState(false);
+  const [selectedJarForDetail, setSelectedJarForDetail] = useState<Jar | null>(null);
   const [selectedJarForEdit, setSelectedJarForEdit] = useState<Jar | null>(null);
   const [editName, setEditName] = useState('');
   const [editLimit, setEditLimit] = useState<number>(0);
@@ -711,7 +713,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               return (
                 <div
                   key={jar.id}
-                  onClick={() => handleOpenEditJar(jar)}
+                  onClick={() => setSelectedJarForDetail(jar)}
                   className={`bg-[#1C2426]/75 border rounded-2xl p-3.5 flex flex-col justify-between cursor-pointer active:scale-98 transition-transform hover:border-[#8BA5AA]/30 ${
                     isWarn ? 'border-[#D4A373]/35' : 'border-[#8BA5AA]/12'
                   }`}
@@ -735,7 +737,17 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                         ? `Chi dự kiến: ${formatVND(plannedForJar)}`
                         : `Còn: ${formatVND(remainingAmount > 0 ? remainingAmount : 0)}`}
                     </span>
-                    <Edit2 size={11} className="text-[#869699] ml-1 opacity-70 shrink-0" />
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenEditJar(jar);
+                      }}
+                      className="p-1 rounded-lg hover:bg-[#2A373A] text-[#869699] hover:text-[#D5E1E3] transition-colors ml-1"
+                      title="Chỉnh sửa hũ"
+                    >
+                      <Edit2 size={11} />
+                    </button>
                   </div>
 
                   <div className="h-1.5 rounded-full bg-[#232D30] overflow-hidden mt-2.5">
@@ -842,7 +854,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               return (
                 <div
                   key={jar.id}
-                  onClick={() => handleOpenEditJar(jar)}
+                  onClick={() => setSelectedJarForDetail(jar)}
                   className="bg-[#1C2426]/85 border border-[#8BA5AA]/15 rounded-2xl p-3.5 flex flex-col justify-between cursor-pointer active:scale-98 transition-transform hover:border-[#8BA5AA]/30"
                 >
                   <div className="flex items-center justify-between mb-1.5 gap-1">
@@ -865,7 +877,17 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       <span className={vsLimitPct > 100 ? 'text-[#E07A5F] font-semibold' : 'text-[#8CC7AE]'}>
                         {jar.monthlyLimit > 0 ? `Đạt ${vsLimitPct}%` : '—'}
                       </span>
-                      <Edit2 size={11} className="text-[#869699] opacity-70 shrink-0" />
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenEditJar(jar);
+                        }}
+                        className="p-1 rounded-lg hover:bg-[#2A373A] text-[#869699] hover:text-[#D5E1E3] transition-colors ml-0.5"
+                        title="Chỉnh sửa hũ"
+                      >
+                        <Edit2 size={11} />
+                      </button>
                     </div>
                   </div>
 
@@ -1697,6 +1719,24 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
           </div>
         );
       })()}
+
+      {/* Modal xem chi tiết các khoản thu chi của Hũ */}
+      <JarDetailModal
+        isOpen={Boolean(selectedJarForDetail)}
+        onClose={() => setSelectedJarForDetail(null)}
+        jar={selectedJarForDetail}
+        transactions={confirmedTransactions}
+        onEditJar={(j) => {
+          setSelectedJarForDetail(null);
+          handleOpenEditJar(j);
+        }}
+        onQuickAddExpense={(jarId) => {
+          setSelectedJarForDetail(null);
+          if (onOpenQuickAddIncome) {
+            onOpenQuickAddIncome();
+          }
+        }}
+      />
 
       {/* Confirm Bottom Sheet */}
       <ConfirmSheet

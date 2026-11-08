@@ -34,32 +34,30 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.2.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.3.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.2.apk
+          path: qltc-v1.2.3.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.2
-          name: "QLTC v1.2.2 - Tách bạch Thêm Nguồn Thu & Khoản Thu Tiền Mặt, Sửa Lỗi Lưu Thu/Chi & Chống Trùng Tài Khoản HD"
+          tag_name: v1.2.3
+          name: "QLTC v1.2.3 - Xem Chi Tiết Khoản Thu Chi Khi Chạm Vào Hũ"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.2 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.3 - Android APK
 
-            Phiên bản nâng cấp `v1.2.2` hoàn thiện trải nghiệm ghi chép và phân bổ nguồn thu theo đúng yêu cầu thực tế:
-            - **Tách bạch 2 tính năng rõ ràng:**
-              + **"Thêm nguồn thu"**: Thiết lập Nguồn thu nhập dự kiến (Lương, Thưởng, Cho thuê nhà...) để tự động chia hũ % và làm đích liên kết phân bổ tiền từ các tài khoản ngân hàng / tiền mặt.
-              + **"Thêm khoản thu"**: Dùng chuyên biệt để ghi chép Khoản thu thực tế bằng TIỀN MẶT vào Ví, có sẵn lựa chọn phân bổ vào nguồn thu đã tạo và xem tiến độ đạt được.
-            - **Khắc phục triệt để lỗi không ấn được nút Lưu:** Bổ sung thông báo kiểm tra dữ liệu trực quan màu đỏ khi thiếu tên hoặc số tiền <= 0 cho cả form Khoản thu, Nguồn thu và Khoản chi; gắn sự kiện click trực tiếp đảm bảo bấm ăn 100% trên mọi dòng điện thoại Android.
-            - **Xử lý tài khoản HD Bank và Chống trùng tài khoản:** Gộp tài khoản HD Bank chuẩn mã `HDBank` và số đuôi `9737`, nâng cấp cơ chế nhận diện thông minh theo tên tài khoản người dùng đã đặt, không bao giờ tự ý tạo thêm tài khoản trùng lặp khi nhận thông báo biến động số dư.
+            Phiên bản `v1.2.3` bổ sung tính năng xem chi tiết thu chi theo từng hũ:
+            - **Chi tiết thu chi từng hũ:** Chạm vào bất kỳ hũ nào (ở cả màn hình Ngân sách và Tổng quan) để xem ngay danh sách các khoản thu chi thực tế đã ghi nhận của hũ đó, tổng chi tiêu, hạn mức, số tiền còn lại và tỷ lệ đã dùng.
+            - **Bộ lọc linh hoạt:** Xem nhanh các giao dịch theo tháng này hoặc tất cả thời gian.
+            - **Tích hợp liền mạch:** Hỗ trợ nút ghi nhanh chi tiêu hoặc mở chỉnh sửa cấu hình hũ ngay trong modal chi tiết.
           files: |
-            qltc-v1.2.2.apk
+            qltc-v1.2.3.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

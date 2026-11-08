@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, ArrowDownRight, ArrowUpRight, ArrowLeftRight } from 'lucide-react';
-import { Jar, BankAccount } from '../types';
+import { Jar, BankAccount, IncomeSource } from '../types';
 import { CurrencyInput } from './CurrencyInput';
 
 interface QuickAddModalProps {
   isOpen: boolean;
   onClose: () => void;
   jars: Jar[];
+  incomeSources?: IncomeSource[];
   accounts: BankAccount[];
   initialType?: 'expense' | 'income' | 'transfer';
   onAddTransaction: (txn: {
@@ -14,6 +15,7 @@ interface QuickAddModalProps {
     amount: number;
     description: string;
     jarId?: string;
+    incomeSourceId?: string;
     accountId: string;
     toAccountId?: string;
   }) => void;
@@ -23,6 +25,7 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
   isOpen,
   onClose,
   jars,
+  incomeSources = [],
   accounts,
   initialType = 'expense',
   onAddTransaction
@@ -30,12 +33,36 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
   const [type, setType] = useState<'expense' | 'income' | 'transfer'>(initialType);
   const [amount, setAmount] = useState<number>(0);
   const [description, setDescription] = useState<string>('');
-  const [selectedJarId, setSelectedJarId] = useState<string>(jars[0]?.id || '');
-  const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || '');
-  const [toAccountId, setToAccountId] = useState<string>(
-    accounts.length > 1 ? accounts[1].id : ''
-  );
+  const [selectedJarId, setSelectedJarId] = useState<string>('');
+  const [selectedIncomeSourceId, setSelectedIncomeSourceId] = useState<string>('');
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
+  const [toAccountId, setToAccountId] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
+
+  // Đồng bộ type, hũ mặc định (isDefault) và tài khoản khi mở modal hoặc khi dữ liệu từ D1 tải xong
+  useEffect(() => {
+    if (isOpen) {
+      setType(initialType);
+      setErrorMsg('');
+    }
+  }, [isOpen, initialType]);
+
+  useEffect(() => {
+    if (!selectedJarId || !jars.some(j => j.id === selectedJarId)) {
+      const defJar = jars.find(j => j.isDefault) || jars[0];
+      if (defJar) setSelectedJarId(defJar.id);
+    }
+  }, [jars, selectedJarId, isOpen]);
+
+  useEffect(() => {
+    if (!selectedAccountId || !accounts.some(a => a.id === selectedAccountId)) {
+      if (accounts[0]) setSelectedAccountId(accounts[0].id);
+    }
+    if (!toAccountId || toAccountId === selectedAccountId || !accounts.some(a => a.id === toAccountId)) {
+      const alt = accounts.find(a => a.id !== (selectedAccountId || accounts[0]?.id));
+      if (alt) setToAccountId(alt.id);
+    }
+  }, [accounts, selectedAccountId, toAccountId, isOpen]);
 
   if (!isOpen) return null;
 
@@ -61,7 +88,8 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
       amount,
       description: description.trim(),
       jarId: type === 'expense' ? selectedJarId : undefined,
-      accountId: selectedAccountId,
+      incomeSourceId: type === 'income' && selectedIncomeSourceId ? selectedIncomeSourceId : undefined,
+      accountId: selectedAccountId || accounts[0]?.id || 'acc_cash',
       toAccountId: type === 'transfer' ? toAccountId : undefined
     });
 
@@ -200,6 +228,29 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
                 {jars.map((j) => (
                   <option key={j.id} value={j.id} className="bg-[#161C1E] text-white">
                     {j.name} (còn {new Intl.NumberFormat('vi-VN').format(Math.max(0, j.monthlyLimit - j.spentThisMonth))} ₫)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Income Source Selection (Only if Income) */}
+          {type === 'income' && (
+            <div>
+              <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                Thuộc nguồn thu nhập
+              </label>
+              <select
+                value={selectedIncomeSourceId}
+                onChange={(e) => setSelectedIncomeSourceId(e.target.value)}
+                className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl px-4 py-2.5 text-sm text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]"
+              >
+                <option value="" className="bg-[#161C1E] text-white">
+                  ✨ Thu ngoài dự kiến / Thu nhập khác
+                </option>
+                {incomeSources.map((src) => (
+                  <option key={src.id} value={src.id} className="bg-[#161C1E] text-white">
+                    {src.name} ({new Intl.NumberFormat('vi-VN').format(src.expectedAmount)} ₫ · {src.recurrence})
                   </option>
                 ))}
               </select>

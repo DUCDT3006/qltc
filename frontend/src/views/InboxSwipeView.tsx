@@ -21,10 +21,13 @@ import {
 interface InboxSwipeViewProps {
   pendingTransactions: Transaction[];
   confirmedTransactions: Transaction[];
-  onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string) => void;
+  onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string, incomeSourceId?: string) => void;
   onReject: (id: string) => void;
   onDeleteConfirmed?: (id: string) => void;
-  onUpdateConfirmed?: (id: string, updates: { jarId?: string; jarCode?: string; category?: string; description?: string }) => void;
+  onUpdateConfirmed?: (
+    id: string,
+    updates: { jarId?: string; jarCode?: string; category?: string; description?: string; incomeSourceId?: string | null }
+  ) => void;
   onBack: () => void;
   jars?: Jar[];
   incomeSources?: IncomeSource[];
@@ -56,6 +59,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   const [editingConfirmedTxn, setEditingConfirmedTxn] = useState<Transaction | null>(null);
   const [editConfirmedDesc, setEditConfirmedDesc] = useState('');
   const [editConfirmedJarId, setEditConfirmedJarId] = useState('');
+  const [editConfirmedIncomeSourceId, setEditConfirmedIncomeSourceId] = useState('');
 
   // Confirm sheet state
   const [confirmSheet, setConfirmSheet] = useState<{
@@ -97,8 +101,16 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
         const matchedSource = incomeSources.find(
           s => s.id === activeTxn.incomeSourceId || s.name.toLowerCase() === (activeTxn.suggestedCategory || '').toLowerCase()
         );
-        setSelectedIncomeSourceId(matchedSource?.id || incomeSources[0]?.id || '');
-        setSelectedCategoryName(matchedSource?.name || activeTxn.suggestedCategory || 'Lương chính');
+        if (matchedSource) {
+          setSelectedIncomeSourceId(matchedSource.id);
+          setSelectedCategoryName(matchedSource.name);
+        } else if (incomeSources.length > 0) {
+          setSelectedIncomeSourceId(incomeSources[0].id);
+          setSelectedCategoryName(incomeSources[0].name);
+        } else {
+          setSelectedIncomeSourceId('');
+          setSelectedCategoryName('Thu ngoài dự kiến');
+        }
       } else {
         // Expense fallback: tìm theo jarId, sau đó suggestedJarCode, sau đó defaultJar
         const matchedJar =
@@ -146,7 +158,13 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
     if (!activeTxn) return;
     if (activeTxn.type === 'income') {
       const src = incomeSources.find(s => s.id === selectedIncomeSourceId);
-      onConfirm(activeTxn.id, undefined, src?.name || selectedCategoryName);
+      onConfirm(
+        activeTxn.id,
+        undefined,
+        src?.name || selectedCategoryName || 'Thu ngoài dự kiến',
+        undefined,
+        selectedIncomeSourceId || undefined
+      );
     } else if (activeTxn.type === 'transfer') {
       onConfirm(activeTxn.id);
     } else {
@@ -341,7 +359,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                         <div className="flex items-center gap-2 text-right">
                           <div>
                             <div className="font-semibold text-[#F2F5F5] text-xs">
-                              {activeTxn.pairedAccountName || 'Tài khoản nhận'}
+                              {activeTxn.toAccountName || activeTxn.pairedAccountName || 'Tài khoản nhận'}
                             </div>
                             <div className="text-[10px] text-[#8CC7AE]">Tài khoản cộng tiền</div>
                           </div>
@@ -541,7 +559,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
               </div>
             ) : (
               filteredHistory.map((txn) => {
-                const jarObj = jars.find(j => j.id === txn.jarId || j.code === txn.suggestedJarCode);
+                const jarObj = txn.jarId
+                  ? jars.find(j => j.id === txn.jarId)
+                  : jars.find(j => j.code === txn.suggestedJarCode);
                 return (
                   <div
                     key={txn.id}
@@ -549,6 +569,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       setEditingConfirmedTxn(txn);
                       setEditConfirmedDesc(txn.description);
                       setEditConfirmedJarId(txn.jarId || jarObj?.id || '');
+                      setEditConfirmedIncomeSourceId(txn.incomeSourceId || '');
                     }}
                     className="py-3 px-2 flex items-center justify-between gap-3 hover:bg-[#232E31]/40 rounded-xl cursor-pointer transition-colors"
                   >
@@ -756,6 +777,40 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     </button>
                   );
                 })}
+
+                {/* L-08: Luôn có lựa chọn Thu ngoài dự kiến để không bao giờ bị trống danh sách */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedIncomeSourceId('');
+                    setSelectedCategoryName('Thu ngoài dự kiến');
+                    setIsPickerOpen(false);
+                  }}
+                  className={`w-full p-3 rounded-2xl border flex items-center justify-between text-left transition-all ${
+                    selectedIncomeSourceId === ''
+                      ? 'bg-[#1D2926] border-[#8CC7AE]/50 shadow-md'
+                      : 'bg-[#1C2426] border-[#8BA5AA]/15 hover:bg-[#232E31]/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-[#232E31] border border-[#8CC7AE]/30 flex items-center justify-center font-bold text-xs text-[#8CC7AE]">
+                      ✨
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold text-[#F2F5F5]">
+                        Thu ngoài dự kiến / Thu nhập khác
+                      </div>
+                      <div className="text-[10.5px] text-[#869699] mt-0.5">
+                        Khoản thưởng đột xuất, hoàn tiền, bán đồ...
+                      </div>
+                    </div>
+                  </div>
+                  {selectedIncomeSourceId === '' && (
+                    <div className="text-[#8CC7AE]">
+                      <CheckCircle2 size={18} />
+                    </div>
+                  )}
+                </button>
               </div>
             )}
           </div>
@@ -786,7 +841,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                   editingConfirmedTxn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
                 }`}
               >
-                {editingConfirmedTxn.type === 'income' ? '+' : '−'}
+                {editingConfirmedTxn.type === 'income' ? '+' : editingConfirmedTxn.type === 'transfer' ? '⇄ ' : '−'}
                 {formatVND(editingConfirmedTxn.amount)}
               </div>
               <div className="text-xs text-[#869699] pt-1">
@@ -827,6 +882,29 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
               </div>
             )}
 
+            {/* Đổi nguồn thu (nếu là income) */}
+            {editingConfirmedTxn.type === 'income' && (
+              <div>
+                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                  Nguồn thu nhập
+                </label>
+                <select
+                  value={editConfirmedIncomeSourceId}
+                  onChange={(e) => setEditConfirmedIncomeSourceId(e.target.value)}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]/50"
+                >
+                  <option value="" className="bg-[#161C1E] text-white">
+                    ✨ Thu ngoài dự kiến / Thu nhập khác
+                  </option>
+                  {incomeSources.map((src) => (
+                    <option key={src.id} value={src.id} className="bg-[#161C1E] text-white">
+                      {src.name} ({formatVND(src.expectedAmount)})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {/* Hành động */}
             <div className="flex items-center gap-2 pt-2">
               {onDeleteConfirmed && (
@@ -856,13 +934,26 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 type="button"
                 onClick={() => {
                   if (onUpdateConfirmed && editingConfirmedTxn) {
-                    const targetJar = jars.find(j => j.id === editConfirmedJarId);
-                    onUpdateConfirmed(editingConfirmedTxn.id, {
-                      description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
-                      jarId: targetJar?.id,
-                      jarCode: targetJar?.code,
-                      category: targetJar?.name
-                    });
+                    if (editingConfirmedTxn.type === 'expense') {
+                      const targetJar = jars.find(j => j.id === editConfirmedJarId);
+                      onUpdateConfirmed(editingConfirmedTxn.id, {
+                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                        jarId: targetJar?.id,
+                        jarCode: targetJar?.code,
+                        category: targetJar?.name
+                      });
+                    } else if (editingConfirmedTxn.type === 'income') {
+                      const targetSrc = incomeSources.find(s => s.id === editConfirmedIncomeSourceId);
+                      onUpdateConfirmed(editingConfirmedTxn.id, {
+                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                        incomeSourceId: editConfirmedIncomeSourceId || null,
+                        category: targetSrc ? targetSrc.name : 'Thu ngoài dự kiến'
+                      });
+                    } else {
+                      onUpdateConfirmed(editingConfirmedTxn.id, {
+                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description
+                      });
+                    }
                   }
                   setEditingConfirmedTxn(null);
                 }}

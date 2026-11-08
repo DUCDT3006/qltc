@@ -16,7 +16,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   pendingCount
 }) => {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto h-[74px] bg-[#101517]/95 backdrop-blur-xl border-t border-[#8BA5AA]/10 flex justify-around items-center px-2 pb-2 z-40">
+    <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto min-h-[74px] bg-[#101517]/95 backdrop-blur-xl border-t border-[#8BA5AA]/10 flex justify-around items-center px-2 pb-2 pb-safe z-40">
       <button
         onClick={() => onChangeTab('dashboard')}
         className={`flex flex-col items-center gap-1 w-14 transition-colors ${

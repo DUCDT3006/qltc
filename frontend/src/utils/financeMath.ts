@@ -16,16 +16,17 @@ export const RECURRENCE_PRESETS = [
 export function normalizeToMonthlyAmount(amount: number, recurrence?: string): number {
   if (!amount || amount <= 0) return 0;
   const rec = (recurrence || '').toLowerCase().trim();
-  if (rec.includes('năm') || rec.includes('year')) {
-    return Math.round(amount / 12);
-  }
-  if (rec.includes('quý') || rec.includes('quarter')) {
-    return Math.round(amount / 3);
-  }
-  if (rec.includes('6 tháng') || rec.includes('nửa năm') || rec.includes('semiannual')) {
+  // Kiểm tra "nửa năm / 6 tháng" TRƯỚC "năm" để tránh 'nửa năm' bị khớp nhầm vào 'năm' (chia 12 thay vì chia 6)
+  if (rec.includes('6 tháng') || rec.includes('nửa năm') || rec.includes('nua nam') || rec.includes('semiannual')) {
     return Math.round(amount / 6);
   }
-  if (rec.includes('tuần') || rec.includes('week')) {
+  if (rec.includes('năm') || rec.includes('hang nam') || rec.includes('year')) {
+    return Math.round(amount / 12);
+  }
+  if (rec.includes('quý') || rec.includes('hang quy') || rec.includes('quarter')) {
+    return Math.round(amount / 3);
+  }
+  if (rec.includes('tuần') || rec.includes('hang tuan') || rec.includes('week')) {
     return Math.round((amount * 52) / 12);
   }
   return Math.round(amount);

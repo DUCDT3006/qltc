@@ -86,13 +86,23 @@ async function ensureDatabaseSchema(db: D1Database) {
     `).run();
 
     const cols = [
+      { t: 'users', c: 'phone', type: 'TEXT' },
+      { t: 'users', c: 'avatar', type: 'TEXT' },
       { t: 'transactions', c: 'to_account_id', type: 'TEXT' },
       { t: 'transactions', c: 'balance_after', type: 'INTEGER' },
       { t: 'transactions', c: 'original_type', type: 'TEXT' },
       { t: 'transactions', c: 'income_source_id', type: 'TEXT' },
       { t: 'jars', c: 'is_default', type: 'INTEGER DEFAULT 0' },
       { t: 'holdings', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
-      { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' }
+      { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
+      { t: 'income_sources', c: 'color', type: "TEXT DEFAULT '#657D81'" },
+      { t: 'income_sources', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
+      { t: 'planned_expenses', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
+      { t: 'planned_expenses', c: 'note', type: 'TEXT' },
+      { t: 'rules', c: 'category_name', type: "TEXT DEFAULT 'Chi tiêu'" },
+      { t: 'rules', c: 'jar_code', type: "TEXT DEFAULT 'NEC'" },
+      { t: 'rules', c: 'jar_id', type: 'TEXT' },
+      { t: 'rules', c: 'created_at', type: 'DATETIME' }
     ];
 
     for (const col of cols) {
@@ -136,7 +146,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.0', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.1', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -260,45 +270,55 @@ app.post('/api/notifications/ingest', async (c) => {
     // L-01: KHÔNG sửa accounts.balance khi giao dịch đang ở trạng thái pending!
     // Số dư chỉ được cập nhật khi người dùng bấm Duyệt (confirmed).
   } else {
-    // Tự động thêm tài khoản ngân hàng mới vào danh sách tài khoản
+    // Tự động thêm tài khoản ngân hàng mới vào danh sách tài khoản (khởi tạo số dư trước biến động để khi duyệt không bị cộng/trừ trùng)
     accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
     const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
+    const initialBal = parsed.balanceAfter && parsed.balanceAfter > 0
+      ? (parsed.type === 'expense' ? parsed.balanceAfter + parsed.amount : Math.max(0, parsed.balanceAfter - parsed.amount))
+      : 0;
     await db.prepare(`
       INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
       VALUES (?, ?, ?, 'bank', ?, ?, ?)
-    `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, parsed.balanceAfter || 0).run();
+    `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, initialBal).run();
   }
 
-  // 5. Tự động phân loại danh mục & hũ (L-13 & L-09: load user-learned rules)
-  const { results: userRules } = await db.prepare(
-    'SELECT pattern, category_name as categoryName, jar_code as jarCode FROM rules WHERE user_id = ?'
-  ).bind(userId).all<{ pattern: string; categoryName: string; jarCode: string }>();
+  // 5. Tự động phân loại danh mục & hũ (L-13 & L-09: load user-learned rules an toàn)
+  let userRules: { pattern: string; categoryName: string; jarCode: string }[] = [];
+  try {
+    const rulesRes = await db.prepare(
+      'SELECT pattern, category_name as categoryName, jar_code as jarCode FROM rules WHERE user_id = ? AND pattern IS NOT NULL'
+    ).bind(userId).all<{ pattern: string; categoryName: string; jarCode: string }>();
+    userRules = (rulesRes.results || []).filter(r => r.pattern && r.jarCode);
+  } catch {
+    userRules = [];
+  }
 
-  const cat = categorizeTransaction(parsed.description, parsed.type, userRules || []);
+  const cat = categorizeTransaction(parsed.description, parsed.type, userRules);
 
   // L-13: Lấy jar_id từ jarCode, hoặc ưu tiên hũ mặc định (is_default = 1), hoặc hũ đầu tiên của user
-  let jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
-    .bind(userId, cat.jarCode).first<{ id: string }>();
+  let jar = parsed.type === 'expense'
+    ? await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?').bind(userId, cat.jarCode).first<{ id: string }>()
+    : null;
 
-  if (!jar && cat.confidence < 0.6) {
+  if (parsed.type === 'expense' && !jar && cat.confidence < 0.6) {
     jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND is_default = 1')
       .bind(userId).first<{ id: string }>();
   }
 
-  if (!jar) {
+  if (parsed.type === 'expense' && !jar) {
     jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? ORDER BY sort_order ASC LIMIT 1')
       .bind(userId).first<{ id: string }>();
   }
 
-  const jarId = jar ? jar.id : 'jar_nec';
+  const jarId = parsed.type === 'expense' ? (jar ? jar.id : 'jar_nec') : null;
 
   // 6. Tạo giao dịch ở trạng thái "Chờ duyệt" (pending) kèm balance_after và original_type
-  const txnId = `txn_${Date.now()}`;
+  const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   await db.prepare(`
     INSERT INTO transactions (
       id, user_id, account_id, type, amount, occurred_at, description,
-      jar_id, dedupe_hash, status, raw_notification_id, balance_after, original_type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      jar_id, dedupe_hash, status, raw_notification_id, balance_after, original_type, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
   `).bind(
     txnId,
     userId,
@@ -311,14 +331,15 @@ app.post('/api/notifications/ingest', async (c) => {
     dedupeHash,
     notifId,
     parsed.balanceAfter || null,
-    parsed.type
+    parsed.type,
+    cat.categoryName
   ).run();
 
   // Đánh dấu đã parse thành công và ghi mã ngân hàng
   await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ? WHERE id = ?')
     .bind(parsed.bankCode, notifId).run();
 
-  // 7. TỰ ĐỘNG GHÉP CẶP CHUYỂN TIỀN NỘI BỘ (Phương án 1 & 3 - L-07: Thêm cửa sổ thời gian <= 120 phút)
+  // 7. TỰ ĐỘNG GHÉP CẶP CHUYỂN TIỀN NỘI BỘ (Phương án 1 & 3 - L-07: Cửa sổ thời gian <= 120 phút)
   let isAutoPaired = false;
   let pairId: string | null = null;
   const counterType = parsed.type === 'expense' ? 'income' : 'expense';
@@ -333,7 +354,7 @@ app.post('/api/notifications/ingest', async (c) => {
       AND t.transfer_pair_id IS NULL
       AND t.amount = ?
       AND t.account_id != ?
-      AND (t.type = ? OR t.type = 'transfer')
+      AND t.type = ?
       AND ABS(julianday(t.occurred_at) - julianday(?)) * 1440 <= 120
     ORDER BY t.occurred_at DESC
     LIMIT 1
@@ -348,20 +369,27 @@ app.post('/api/notifications/ingest', async (c) => {
 
   if (candidate) {
     pairId = `pair_${Date.now()}`;
-    const pairNote = `[Tự động ghép cặp] ${parsed.type === 'expense' ? parsed.bankCode : candidate.bank_code} ➔ ${parsed.type === 'income' ? parsed.bankCode : candidate.bank_code}`;
+    const isCurrentExpense = parsed.type === 'expense';
+    const primaryId = isCurrentExpense ? txnId : candidate.id;
+    const secondaryId = isCurrentExpense ? candidate.id : txnId;
+    const receiverAccountId = isCurrentExpense ? candidate.account_id : accountId;
+    const senderBank = isCurrentExpense ? parsed.bankCode : candidate.bank_code;
+    const receiverBank = isCurrentExpense ? candidate.bank_code : parsed.bankCode;
+    const pairNote = `[Tự động ghép cặp] ${senderBank} ➔ ${receiverBank}`;
 
-    // Đánh dấu cả 2 thành loại transfer và liên kết qua transfer_pair_id + to_account_id
+    // Chân trừ tiền (expense) làm bản ghi transfer chính (hiển thị 1 thẻ duy nhất trong Hộp thư, trừ nguồn -> cộng đích)
     await db.prepare(`
       UPDATE transactions 
-      SET type = 'transfer', transfer_pair_id = ?, to_account_id = ?, notes = ?
+      SET type = 'transfer', transfer_pair_id = ?, to_account_id = ?, jar_id = NULL, status = 'pending', notes = ?
       WHERE id = ?
-    `).bind(pairId, candidate.account_id, pairNote, txnId).run();
+    `).bind(pairId, receiverAccountId, pairNote, primaryId).run();
 
+    // Chân cộng tiền (income) được ẩn đi để không hiện trùng 2 thẻ trong Hộp thư / Lịch sử (có thể khôi phục khi bấm Tách)
     await db.prepare(`
       UPDATE transactions 
-      SET type = 'transfer', transfer_pair_id = ?, to_account_id = ?, notes = ?
+      SET type = 'transfer', transfer_pair_id = ?, to_account_id = NULL, jar_id = NULL, status = 'paired_hidden', notes = ?
       WHERE id = ?
-    `).bind(pairId, accountId, pairNote, candidate.id).run();
+    `).bind(pairId, pairNote, secondaryId).run();
 
     isAutoPaired = true;
   }
@@ -492,7 +520,7 @@ app.post('/api/notifications/reprocess', async (c) => {
 app.get('/api/transactions', async (c) => {
   const db = c.env.DB;
   const status = c.req.query('status'); // 'pending' | 'confirmed'
-  const limit = parseInt(c.req.query('limit') || '50', 10);
+  const limit = parseInt(c.req.query('limit') || '500', 10);
   const userId = 'user_default';
 
   let query = `
@@ -515,6 +543,8 @@ app.get('/api/transactions', async (c) => {
     LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
     LEFT JOIN accounts pa ON p.account_id = pa.id
     WHERE t.user_id = ?
+      AND t.status != 'paired_hidden'
+      AND NOT (t.transfer_pair_id IS NOT NULL AND t.original_type = 'income' AND t.to_account_id IS NOT NULL AND p.original_type = 'expense')
   `;
   const params: any[] = [userId];
 
@@ -530,18 +560,18 @@ app.get('/api/transactions', async (c) => {
   return c.json({ transactions: results });
 });
 
-// Duyệt / Sửa / Bỏ qua giao dịch (Swipe approve & Ledger consistency)
+// Duyệt / Sửa / Bỏ qua / Hoàn tác giao dịch (Swipe approve, Undo & Ledger consistency)
 app.put('/api/transactions/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
   const body = await c.req.json<{
-    status?: 'confirmed' | 'rejected';
+    status?: 'pending' | 'confirmed' | 'rejected';
     jarId?: string;
     jarCode?: string;
     categoryId?: string;
     categoryName?: string;
-    incomeSourceId?: string;
+    incomeSourceId?: string | null;
     notes?: string;
     amount?: number;
     description?: string;
@@ -557,29 +587,17 @@ app.put('/api/transactions/:id', async (c) => {
 
   const updates: string[] = [];
   const params: any[] = [];
+  const finalAmount = body.amount !== undefined ? Math.round(body.amount) : currentTxn.amount;
 
-  // L-01: Cập nhật Sổ cái Số dư (Account Ledger) khi chuyển từ pending -> confirmed
+  // L-01: Cập nhật Sổ cái Số dư (Account Ledger) chuẩn Delta hai chiều (hỗ trợ cả Duyệt và Hoàn tác Undo)
   if (body.status === 'confirmed' && currentTxn.status !== 'confirmed') {
-    const finalAmount = body.amount !== undefined ? body.amount : currentTxn.amount;
-
     if (currentTxn.type === 'income') {
-      if (currentTxn.balance_after && currentTxn.balance_after > 0) {
-        await db.prepare('UPDATE accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(currentTxn.balance_after, currentTxn.account_id, userId).run();
-      } else {
-        await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(finalAmount, currentTxn.account_id, userId).run();
-      }
+      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(finalAmount, currentTxn.account_id, userId).run();
     } else if (currentTxn.type === 'expense') {
-      if (currentTxn.balance_after && currentTxn.balance_after > 0) {
-        await db.prepare('UPDATE accounts SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(currentTxn.balance_after, currentTxn.account_id, userId).run();
-      } else {
-        await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(finalAmount, currentTxn.account_id, userId).run();
-      }
+      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(finalAmount, currentTxn.account_id, userId).run();
     } else if (currentTxn.type === 'transfer') {
-      // Chuyển tiền nội bộ: trừ tài khoản nguồn, cộng tài khoản đích nếu có
       await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
         .bind(finalAmount, currentTxn.account_id, userId).run();
       if (currentTxn.to_account_id) {
@@ -587,41 +605,67 @@ app.put('/api/transactions/:id', async (c) => {
           .bind(finalAmount, currentTxn.to_account_id, userId).run();
       }
     }
+  } else if (currentTxn.status === 'confirmed' && (body.status === 'pending' || body.status === 'rejected')) {
+    // Hoàn tác (Undo) từ confirmed về pending / rejected -> đảo ngược sổ cái
+    if (currentTxn.type === 'income') {
+      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
+    } else if (currentTxn.type === 'expense') {
+      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
+    } else if (currentTxn.type === 'transfer') {
+      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
+      if (currentTxn.to_account_id) {
+        await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+          .bind(currentTxn.amount, currentTxn.to_account_id, userId).run();
+      }
+    }
   }
 
-  // Đồng bộ trạng thái cho giao dịch ghép cặp đối ứng nếu có
+  // Cập nhật trạng thái (giữ chân phụ ở trạng thái paired_hidden để không nhân đôi dòng giao dịch)
   if (body.status) {
     updates.push('status = ?');
     params.push(body.status);
 
     if (currentTxn.transfer_pair_id) {
-      await db.prepare('UPDATE transactions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND user_id = ?')
-        .bind(body.status, currentTxn.transfer_pair_id, userId).run();
+      const secondaryStatus = body.status === 'rejected' ? 'rejected' : 'paired_hidden';
+      await db.prepare('UPDATE transactions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND id != ? AND user_id = ?')
+        .bind(secondaryStatus, currentTxn.transfer_pair_id, id, userId).run();
     }
   }
 
   // L-13: Ưu tiên jarId chính xác tuyệt đối
+  let resolvedJarId: string | null = null;
+  let resolvedJarCode: string | null = body.jarCode || null;
   if (body.jarId) {
     updates.push('jar_id = ?');
     params.push(body.jarId);
+    resolvedJarId = body.jarId;
+    if (!resolvedJarCode) {
+      const j = await db.prepare('SELECT code FROM jars WHERE id = ? AND user_id = ?')
+        .bind(body.jarId, userId).first<{ code: string }>();
+      resolvedJarCode = j?.code || null;
+    }
   } else if (body.jarCode) {
     const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
       .bind(userId, body.jarCode).first<{ id: string }>();
     if (jar) {
       updates.push('jar_id = ?');
       params.push(jar.id);
+      resolvedJarId = jar.id;
     }
   }
 
-  // L-08: Gắn incomeSourceId
-  if (body.incomeSourceId) {
+  // L-08: Gắn incomeSourceId (cho phép gán NULL nếu chọn "Thu nhập khác")
+  if (body.incomeSourceId !== undefined) {
     updates.push('income_source_id = ?');
-    params.push(body.incomeSourceId);
+    params.push(body.incomeSourceId || null);
   }
 
   if (body.amount !== undefined) {
     updates.push('amount = ?');
-    params.push(body.amount);
+    params.push(Math.round(body.amount));
   }
   if (body.description !== undefined) {
     updates.push('description = ?');
@@ -639,21 +683,32 @@ app.put('/api/transactions/:id', async (c) => {
     params.push(body.categoryName);
   }
 
-  // L-09: Tự học quy tắc phân loại hũ của người dùng
-  if (body.jarCode || body.jarId) {
-    const descWords = currentTxn.description.replace(/[^A-Za-z0-9\s]/g, ' ').trim().split(/\s+/).slice(0, 3).join(' ');
-    if (descWords.length >= 3) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO rules (id, user_id, pattern, category_name, jar_code, jar_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(
-        `rule_${Date.now()}`,
-        userId,
-        descWords,
-        body.categoryName || 'Chi tiêu',
-        body.jarCode || 'NEC',
-        body.jarId || null
-      ).run();
+  // L-09: Tự học quy tắc phân loại hũ của người dùng (bọc try/catch an toàn & khử trùng pattern cũ)
+  if ((resolvedJarCode || resolvedJarId) && currentTxn.type === 'expense') {
+    try {
+      const descWords = (body.description || currentTxn.description || '')
+        .replace(/[^A-Za-z0-9À-ỹ\s]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .slice(0, 3)
+        .join(' ');
+      if (descWords.length >= 3) {
+        await db.prepare('DELETE FROM rules WHERE user_id = ? AND UPPER(pattern) = UPPER(?)')
+          .bind(userId, descWords).run();
+        await db.prepare(`
+          INSERT INTO rules (id, user_id, pattern, category_name, jar_code, jar_id)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          `rule_${Date.now()}`,
+          userId,
+          descWords,
+          body.categoryName || 'Chi tiêu',
+          resolvedJarCode || 'NEC',
+          resolvedJarId
+        ).run();
+      }
+    } catch (ruleErr) {
+      console.warn('Skip rule learning:', ruleErr);
     }
   }
 
@@ -685,6 +740,7 @@ app.post('/api/transactions', async (c) => {
   }>();
 
   const txnId = body.id || `txn_man_${Date.now()}`;
+  const cleanAmount = Math.round(body.amount || 0);
   let jarId = body.jarId || null;
   if (!jarId && body.jarCode && body.type === 'expense') {
     const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
@@ -695,30 +751,31 @@ app.post('/api/transactions', async (c) => {
   await db.prepare(`
     INSERT INTO transactions (
       id, user_id, account_id, to_account_id, type, amount, occurred_at, description,
-      jar_id, income_source_id, status, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)
+      jar_id, income_source_id, status, notes, original_type
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)
   `).bind(
     txnId,
     userId,
     body.accountId,
     body.toAccountId || null,
     body.type,
-    body.amount,
+    cleanAmount,
     body.occurredAt || new Date().toISOString(),
     body.description,
     body.type === 'transfer' ? null : jarId,
     body.type === 'income' ? (body.incomeSourceId || null) : null,
-    body.categoryName || null
+    body.categoryName || null,
+    body.type === 'transfer' ? 'expense' : body.type
   ).run();
 
   // Cập nhật số dư sổ cái chính xác
   if (body.type === 'transfer' && body.accountId && body.toAccountId) {
     await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(body.amount, body.accountId, userId).run();
+      .bind(cleanAmount, body.accountId, userId).run();
     await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(body.amount, body.toAccountId, userId).run();
+      .bind(cleanAmount, body.toAccountId, userId).run();
   } else if (body.accountId) {
-    const delta = body.type === 'income' ? body.amount : body.type === 'expense' ? -body.amount : 0;
+    const delta = body.type === 'income' ? cleanAmount : body.type === 'expense' ? -cleanAmount : 0;
     if (delta !== 0) {
       await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
         .bind(delta, body.accountId, userId).run();
@@ -752,21 +809,36 @@ app.delete('/api/transactions/:id', async (c) => {
     }
   }
 
-  await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  if (txn?.transfer_pair_id) {
+    await db.prepare('DELETE FROM transactions WHERE transfer_pair_id = ? AND user_id = ?')
+      .bind(txn.transfer_pair_id, userId).run();
+  } else {
+    await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  }
   return c.json({ success: true });
 });
 
-// Tách 2 giao dịch nếu auto-pairing bị nhầm (Unpair - L-07: Dùng original_type & jar động)
+// Tách 2 giao dịch nếu auto-pairing bị nhầm (Unpair - L-07: Khôi phục cả 2 chân về pending độc lập & hoàn tác sổ cái nếu đã duyệt)
 app.post('/api/transactions/:id/unpair', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
 
-  const txn = await db.prepare('SELECT id, transfer_pair_id, description FROM transactions WHERE id = ? AND user_id = ?')
-    .bind(id, userId).first<{ id: string; transfer_pair_id: string | null; description: string }>();
+  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
+    .bind(id, userId).first<any>();
 
   if (!txn || !txn.transfer_pair_id) {
     return c.json({ success: false, message: 'Giao dịch này không nằm trong cặp chuyển khoản nào' }, 400);
+  }
+
+  // Nếu giao dịch chuyển nội bộ đã từng được duyệt, hoàn tác sổ cái trước khi tách về pending
+  if (txn.status === 'confirmed' && txn.type === 'transfer') {
+    await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+      .bind(txn.amount, txn.account_id, userId).run();
+    if (txn.to_account_id) {
+      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(txn.amount, txn.to_account_id, userId).run();
+    }
   }
 
   const pairId = txn.transfer_pair_id;
@@ -796,6 +868,7 @@ app.post('/api/transactions/:id/unpair', async (c) => {
           to_account_id = NULL,
           type = ?,
           jar_id = ?,
+          status = 'pending',
           notes = 'Đã tách thủ công từ cặp chuyển tiền'
       WHERE id = ? AND user_id = ?
     `).bind(origType, jarId, t.id, userId).run();
@@ -829,32 +902,52 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
   }
 
   const pairId = `pair_${Date.now()}`;
-  const counterTxnId = `txn_pair_${Date.now()}`;
 
-  // 1. Cập nhật giao dịch nguồn thành transfer
+  // Tìm xem có giao dịch nhận tiền pending trùng số tiền ở tài khoản đích chưa
+  const existingCounter = await db.prepare(`
+    SELECT id FROM transactions
+    WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL
+    ORDER BY occurred_at DESC LIMIT 1
+  `).bind(userId, toAccountId, txn.amount).first<{ id: string }>();
+
+  // 1. Cập nhật giao dịch nguồn thành transfer kèm to_account_id
   await db.prepare(`
     UPDATE transactions 
-    SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, notes = ?
-    WHERE id = ?
-  `).bind(pairId, `Chuyển sang ${targetAcc.name}`, id).run();
+    SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?
+    WHERE id = ? AND user_id = ?
+  `).bind(toAccountId, pairId, `Chuyển sang ${targetAcc.name}`, id, userId).run();
 
-  // 2. Tạo giao dịch đối ứng ở tài khoản nhận
-  await db.prepare(`
-    INSERT INTO transactions (
-      id, user_id, account_id, type, amount, occurred_at, description,
-      status, transfer_pair_id, notes
-    ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, ?, ?, ?)
-  `).bind(
-    counterTxnId,
-    userId,
-    toAccountId,
-    txn.amount,
-    txn.occurred_at,
-    `Nhận chuyển khoản đối ứng từ ${txn.account_id}`,
-    txn.status,
-    pairId,
-    `Nhận từ đối ứng ${id}`
-  ).run();
+  // Nếu giao dịch nguồn vốn đã ở trạng thái confirmed (khoản chi đã trừ tiền), cộng bổ sung vào tài khoản đích
+  if (txn.status === 'confirmed') {
+    await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+      .bind(txn.amount, toAccountId, userId).run();
+  }
+
+  // 2. Liên kết hoặc tạo chân đối ứng ẩn (paired_hidden) để hiển thị thông tin tài khoản đích & hỗ trợ Tách lại nếu cần
+  if (existingCounter) {
+    await db.prepare(`
+      UPDATE transactions
+      SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
+      WHERE id = ? AND user_id = ?
+    `).bind(pairId, `Nhận từ đối ứng ${id}`, existingCounter.id, userId).run();
+  } else {
+    const counterTxnId = `txn_pair_${Date.now()}`;
+    await db.prepare(`
+      INSERT INTO transactions (
+        id, user_id, account_id, type, amount, occurred_at, description,
+        status, transfer_pair_id, original_type, notes
+      ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
+    `).bind(
+      counterTxnId,
+      userId,
+      toAccountId,
+      txn.amount,
+      txn.occurred_at,
+      `Nhận chuyển khoản nội bộ vào ${targetAcc.name}`,
+      pairId,
+      `Nhận từ đối ứng ${id}`
+    ).run();
+  }
 
   return c.json({ success: true, message: 'Đã tạo chuyển khoản nội bộ thành công' });
 });
@@ -949,24 +1042,32 @@ app.get('/api/analytics/summary', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const period = c.req.query('period') || 'month'; // 'month' | 'quarter' | 'year'
-  const target = c.req.query('target'); // ví dụ '2026-11' hoặc '2026'
+  const rawTarget = (c.req.query('target') || '').trim();
+  const qYear = c.req.query('year');
+  const qMonth = c.req.query('month');
+  const qQuarter = c.req.query('quarter');
 
-  let dateFilter = "";
+  // Tính năm/tháng/quý mặc định theo giờ Việt Nam (UTC+7)
+  const vnNow = new Date(Date.now() + 7 * 3600 * 1000);
+  const yearNum = qYear ? parseInt(qYear, 10) : (rawTarget.match(/^\d{4}/) ? parseInt(rawTarget.slice(0, 4), 10) : vnNow.getUTCFullYear());
+  const monthNum = qMonth ? parseInt(qMonth, 10) : (rawTarget.match(/^\d{4}-(\d{2})$/) ? parseInt(rawTarget.slice(5, 7), 10) : (vnNow.getUTCMonth() + 1));
+  const quarterNum = qQuarter ? parseInt(qQuarter, 10) : (Math.floor((monthNum - 1) / 3) + 1);
+
+  const yearStr = String(yearNum);
+  const yearMonthStr = `${yearStr}-${String(monthNum).padStart(2, '0')}`;
+  const quarterZeroIdx = Math.max(0, Math.min(3, quarterNum - 1));
+
+  let dateClause = '';
+  let dateBindings: any[] = [];
   if (period === 'month') {
-    dateFilter = target
-      ? `strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = '${target}'`
-      : `strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = strftime('%Y-%m', datetime('now', '+7 hours'))`;
-  } else if (period === 'year') {
-    dateFilter = target
-      ? `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = '${target.slice(0, 4)}'`
-      : `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = strftime('%Y', datetime('now', '+7 hours'))`;
+    dateClause = `strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = ?`;
+    dateBindings = [yearMonthStr];
   } else if (period === 'quarter') {
-    const yearMonth = target || 'now';
-    dateFilter = `(
-      (CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3
-      = (CAST(strftime('%m', datetime('${yearMonth === 'now' ? 'now' : target + '-01'}', '+7 hours')) AS INTEGER) - 1) / 3
-      AND strftime('%Y', datetime(t.occurred_at, '+7 hours')) = strftime('%Y', datetime('${yearMonth === 'now' ? 'now' : target + '-01'}', '+7 hours'))
-    )`;
+    dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ? AND ((CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3) = ?`;
+    dateBindings = [yearStr, quarterZeroIdx];
+  } else {
+    dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ?`;
+    dateBindings = [yearStr];
   }
 
   const totalStats = await db.prepare(`
@@ -974,18 +1075,18 @@ app.get('/api/analytics/summary', async (c) => {
       COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as total_income,
       COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as total_expense
     FROM transactions t
-    WHERE t.user_id = ? AND t.status = 'confirmed' AND ${dateFilter}
-  `).bind(userId).first<{ total_income: number; total_expense: number }>();
+    WHERE t.user_id = ? AND t.status = 'confirmed' AND ${dateClause}
+  `).bind(userId, ...dateBindings).first<{ total_income: number; total_expense: number }>();
 
   const { results: jarBreakdown } = await db.prepare(`
     SELECT j.id, j.name, j.code, j.color, j.target_percent, j.monthly_limit,
            COALESCE(SUM(t.amount), 0) as spent
     FROM jars j
-    LEFT JOIN transactions t ON t.jar_id = j.id AND t.type = 'expense' AND t.status = 'confirmed' AND ${dateFilter}
+    LEFT JOIN transactions t ON t.jar_id = j.id AND t.type = 'expense' AND t.status = 'confirmed' AND ${dateClause}
     WHERE j.user_id = ?
     GROUP BY j.id
     ORDER BY j.sort_order ASC
-  `).bind(userId).all();
+  `).bind(...dateBindings, userId).all();
 
   const { results: incomeBreakdown } = await db.prepare(`
     SELECT COALESCE(t.income_source_id, 'other') as source_id,
@@ -993,12 +1094,15 @@ app.get('/api/analytics/summary', async (c) => {
            COALESCE(SUM(t.amount), 0) as total_amount
     FROM transactions t
     LEFT JOIN income_sources s ON t.income_source_id = s.id
-    WHERE t.user_id = ? AND t.type = 'income' AND t.status = 'confirmed' AND ${dateFilter}
+    WHERE t.user_id = ? AND t.type = 'income' AND t.status = 'confirmed' AND ${dateClause}
     GROUP BY source_id
-  `).bind(userId).all();
+  `).bind(userId, ...dateBindings).all();
 
   return c.json({
     period,
+    year: yearNum,
+    month: monthNum,
+    quarter: quarterNum,
     totalIncome: totalStats?.total_income || 0,
     totalExpense: totalStats?.total_expense || 0,
     jarBreakdown: jarBreakdown || [],
@@ -1017,7 +1121,7 @@ app.get('/api/user/profile', async (c) => {
       .bind(userId, 'duc@qltc.local', 'Anh Đức').run();
     user = { id: userId, email: 'duc@qltc.local', name: 'Anh Đức', phone: null, avatar: null };
   }
-  return c.json({ user });
+  return c.json({ user, profile: user });
 });
 
 // Cập nhật thông tin hồ sơ người dùng
@@ -1044,15 +1148,18 @@ app.put('/api/user/profile', async (c) => {
       avatar = excluded.avatar
   `).bind(userId, newName, newEmail, newPhone, newAvatar).run();
 
+  const updatedUser = {
+    id: userId,
+    name: newName,
+    email: newEmail,
+    phone: newPhone,
+    avatar: newAvatar
+  };
+
   return c.json({
     success: true,
-    user: {
-      id: userId,
-      name: newName,
-      email: newEmail,
-      phone: newPhone,
-      avatar: newAvatar
-    }
+    user: updatedUser,
+    profile: updatedUser
   });
 });
 
@@ -1082,36 +1189,50 @@ app.get('/api/accounts', async (c) => {
   return c.json({ accounts: results });
 });
 
-// Thêm tài khoản mới
+// Thêm tài khoản mới (chấp nhận cả camelCase và snake_case)
 app.post('/api/accounts', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const body = await c.req.json<{
+    id?: string;
     name: string;
     balance?: number;
     bank_code?: string;
+    bankCode?: string;
     account_number_mask?: string;
+    accountNumberMask?: string;
     type?: string;
   }>();
 
-  const id = `acc_${Date.now()}`;
+  const id = body.id || `acc_${Date.now()}`;
+  const bankCode = body.bankCode ?? body.bank_code ?? null;
+  const mask = body.accountNumberMask ?? body.account_number_mask ?? null;
+  const bal = Math.round(body.balance || 0);
+
   await db.prepare(`
     INSERT INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
     VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      type = excluded.type,
+      bank_code = excluded.bank_code,
+      account_number_mask = excluded.account_number_mask,
+      balance = excluded.balance,
+      updated_at = CURRENT_TIMESTAMP
   `).bind(
     id,
     userId,
     body.name,
     body.type || 'bank',
-    body.bank_code || null,
-    body.account_number_mask || null,
-    body.balance || 0
+    bankCode,
+    mask,
+    bal
   ).run();
 
   return c.json({ success: true, id, message: 'Đã thêm tài khoản mới' });
 });
 
-// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên...)
+// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên... hỗ trợ camelCase & snake_case)
 app.put('/api/accounts/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
@@ -1120,7 +1241,9 @@ app.put('/api/accounts/:id', async (c) => {
     name?: string;
     balance?: number;
     bank_code?: string;
+    bankCode?: string;
     account_number_mask?: string;
+    accountNumberMask?: string;
     type?: string;
   }>();
 
@@ -1133,15 +1256,17 @@ app.put('/api/accounts/:id', async (c) => {
   }
   if (body.balance !== undefined) {
     updates.push('balance = ?');
-    params.push(body.balance);
+    params.push(Math.round(body.balance));
   }
-  if (body.bank_code !== undefined) {
+  const bankCode = body.bankCode !== undefined ? body.bankCode : body.bank_code;
+  if (bankCode !== undefined) {
     updates.push('bank_code = ?');
-    params.push(body.bank_code);
+    params.push(bankCode);
   }
-  if (body.account_number_mask !== undefined) {
+  const mask = body.accountNumberMask !== undefined ? body.accountNumberMask : body.account_number_mask;
+  if (mask !== undefined) {
     updates.push('account_number_mask = ?');
-    params.push(body.account_number_mask);
+    params.push(mask);
   }
   if (body.type !== undefined) {
     updates.push('type = ?');
@@ -1164,67 +1289,107 @@ app.delete('/api/accounts/:id', async (c) => {
   return c.json({ success: true, message: 'Đã xóa tài khoản' });
 });
 
-// Tạo hũ chi tiêu mới (L-13: Tự động sinh mã code duy nhất không trùng)
+// Tạo hũ chi tiêu mới (L-13: Tự động sinh mã code duy nhất không trùng, hỗ trợ cả camelCase & snake_case)
 app.post('/api/jars', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   const body = await c.req.json<{
+    id?: string;
     code?: string;
     name: string;
-    targetPercent?: number; // e.g. 0.1 for 10%
+    targetPercent?: number;
+    target_percent?: number;
     monthlyLimit?: number;
+    monthly_limit?: number;
     color?: string;
     isDefault?: boolean;
+    is_default?: boolean;
   }>();
 
-  const jarId = `jar_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const jarId = body.id || `jar_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   
   // Lấy các mã hũ hiện có của user để chống trùng lặp tuyệt đối
   const { results: existingJars } = await db.prepare('SELECT code FROM jars WHERE user_id = ?').bind(userId).all<{ code: string }>();
   const existingCodes = (existingJars || []).map(j => j.code);
-  const code = body.code ? body.code.toUpperCase() : generateUniqueCodeFromName(body.name, existingCodes);
+  const existingSet = new Set(existingCodes.map(c => (c || '').toUpperCase()));
+  const code = (body.code && !existingSet.has(body.code.toUpperCase()))
+    ? body.code.toUpperCase()
+    : generateUniqueCodeFromName(body.name, existingCodes);
   const color = body.color || '#657D81';
+  const targetPct = body.targetPercent ?? body.target_percent ?? 0.1;
+  const monthlyLimit = Math.round(body.monthlyLimit ?? body.monthly_limit ?? 0);
+  const isDefault = body.isDefault ?? body.is_default ?? false;
 
   // Lấy số thứ tự lớn nhất
   const maxOrder = await db.prepare('SELECT MAX(sort_order) as m FROM jars WHERE user_id = ?').bind(userId).first<{ m: number }>();
   const sortOrder = (maxOrder?.m || 0) + 1;
 
-  if (body.isDefault) {
+  if (isDefault) {
     await db.prepare('UPDATE jars SET is_default = 0 WHERE user_id = ?').bind(userId).run();
   }
 
   await db.prepare(`
     INSERT INTO jars (id, user_id, code, name, target_percent, monthly_limit, color, sort_order, is_default)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(jarId, userId, code, body.name, body.targetPercent || 0.1, body.monthlyLimit || 0, color, sortOrder, body.isDefault ? 1 : 0).run();
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      target_percent = excluded.target_percent,
+      monthly_limit = excluded.monthly_limit,
+      color = excluded.color,
+      is_default = excluded.is_default
+  `).bind(jarId, userId, code, body.name, targetPct, monthlyLimit, color, sortOrder, isDefault ? 1 : 0).run();
 
   return c.json({ success: true, jarId, code, message: 'Đã tạo hũ chi tiêu mới thành công' });
 });
 
-// Cập nhật thông tin hũ chi tiêu (hạn mức, tỷ lệ %, tên, màu, hũ mặc định)
+// Tự động phân bổ hạn mức các hũ theo % từ Tổng Thu Dự Kiến
+app.post('/api/jars/auto-allocate', async (c) => {
+  const db = c.env.DB;
+  const userId = 'user_default';
+  const body = await c.req.json<{ totalIncome: number }>();
+  const totalIncome = Math.max(0, Math.round(body.totalIncome || 0));
+
+  const { results: jars } = await db.prepare('SELECT id, target_percent FROM jars WHERE user_id = ?')
+    .bind(userId).all<{ id: string; target_percent: number }>();
+
+  for (const j of (jars || [])) {
+    const newLimit = Math.round(totalIncome * (j.target_percent || 0));
+    await db.prepare('UPDATE jars SET monthly_limit = ? WHERE id = ? AND user_id = ?')
+      .bind(newLimit, j.id, userId).run();
+  }
+
+  return c.json({ success: true, message: 'Đã phân bổ hạn mức các hũ theo % thu nhập dự kiến' });
+});
+
+// Cập nhật thông tin hũ chi tiêu (hạn mức, tỷ lệ %, tên, màu, hũ mặc định - hỗ trợ camelCase & snake_case)
 app.put('/api/jars/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
   const body = await c.req.json<{
     monthly_limit?: number;
+    monthlyLimit?: number;
     target_percent?: number;
+    targetPercent?: number;
     name?: string;
     color?: string;
     code?: string;
     isDefault?: boolean;
+    is_default?: boolean;
   }>();
 
   const updates: string[] = [];
   const bindings: any[] = [];
 
-  if (body.monthly_limit !== undefined) {
+  const monthlyLimit = body.monthlyLimit !== undefined ? body.monthlyLimit : body.monthly_limit;
+  if (monthlyLimit !== undefined) {
     updates.push('monthly_limit = ?');
-    bindings.push(body.monthly_limit);
+    bindings.push(Math.round(monthlyLimit));
   }
-  if (body.target_percent !== undefined) {
+  const targetPercent = body.targetPercent !== undefined ? body.targetPercent : body.target_percent;
+  if (targetPercent !== undefined) {
     updates.push('target_percent = ?');
-    bindings.push(body.target_percent);
+    bindings.push(targetPercent);
   }
   if (body.name !== undefined) {
     updates.push('name = ?');
@@ -1238,12 +1403,13 @@ app.put('/api/jars/:id', async (c) => {
     updates.push('code = ?');
     bindings.push(body.code.toUpperCase());
   }
-  if (body.isDefault !== undefined) {
-    if (body.isDefault) {
+  const isDefault = body.isDefault !== undefined ? body.isDefault : body.is_default;
+  if (isDefault !== undefined) {
+    if (isDefault) {
       await db.prepare('UPDATE jars SET is_default = 0 WHERE user_id = ?').bind(userId).run();
     }
     updates.push('is_default = ?');
-    bindings.push(body.isDefault ? 1 : 0);
+    bindings.push(isDefault ? 1 : 0);
   }
 
   if (updates.length > 0) {
@@ -1319,11 +1485,13 @@ app.post('/api/income-sources', async (c) => {
     id?: string;
     name: string;
     kind?: string;
-    expectedAmount: number;
+    expectedAmount?: number;
+    expected_amount?: number;
     recurrence?: string;
     color?: string;
   }>();
   const id = body.id || `inc_${Date.now()}`;
+  const amt = Math.round(body.expectedAmount ?? body.expected_amount ?? 0);
   await db.prepare(`
     INSERT INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, is_active)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
@@ -1331,8 +1499,54 @@ app.post('/api/income-sources', async (c) => {
       name = excluded.name,
       kind = excluded.kind,
       expected_amount = excluded.expected_amount,
-      recurrence = excluded.recurrence
-  `).bind(id, userId, body.name, body.kind || 'fixed', body.expectedAmount || 0, body.recurrence || 'Hàng tháng', body.color || '#657D81').run();
+      recurrence = excluded.recurrence,
+      color = excluded.color
+  `).bind(id, userId, body.name, body.kind || 'fixed', amt, body.recurrence || 'Hàng tháng', body.color || '#657D81').run();
+  return c.json({ success: true, id });
+});
+
+app.put('/api/income-sources/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const body = await c.req.json<{
+    name?: string;
+    kind?: string;
+    expectedAmount?: number;
+    expected_amount?: number;
+    recurrence?: string;
+    color?: string;
+  }>();
+
+  const updates: string[] = [];
+  const params: any[] = [];
+  if (body.name !== undefined) {
+    updates.push('name = ?');
+    params.push(body.name);
+  }
+  if (body.kind !== undefined) {
+    updates.push('kind = ?');
+    params.push(body.kind);
+  }
+  const amt = body.expectedAmount !== undefined ? body.expectedAmount : body.expected_amount;
+  if (amt !== undefined) {
+    updates.push('expected_amount = ?');
+    params.push(Math.round(amt));
+  }
+  if (body.recurrence !== undefined) {
+    updates.push('recurrence = ?');
+    params.push(body.recurrence);
+  }
+  if (body.color !== undefined) {
+    updates.push('color = ?');
+    params.push(body.color);
+  }
+
+  if (updates.length > 0) {
+    params.push(id, userId);
+    await db.prepare(`UPDATE income_sources SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
+  }
   return c.json({ success: true, id });
 });
 
@@ -1341,6 +1555,7 @@ app.delete('/api/income-sources/:id', async (c) => {
   const id = c.req.param('id');
   const userId = 'user_default';
   await ensurePlanningTables(db);
+  await db.prepare('UPDATE transactions SET income_source_id = NULL WHERE income_source_id = ? AND user_id = ?').bind(id, userId).run();
   await db.prepare('DELETE FROM income_sources WHERE id = ? AND user_id = ?').bind(id, userId).run();
   return c.json({ success: true });
 });
@@ -1362,12 +1577,16 @@ app.post('/api/planned-expenses', async (c) => {
   const body = await c.req.json<{
     id?: string;
     name: string;
-    jarCode: string;
-    expectedAmount: number;
+    jarCode?: string;
+    jar_code?: string;
+    expectedAmount?: number;
+    expected_amount?: number;
     recurrence?: string;
     note?: string;
   }>();
   const id = body.id || `pexp_${Date.now()}`;
+  const jarCode = body.jarCode ?? body.jar_code ?? 'NEC';
+  const amt = Math.round(body.expectedAmount ?? body.expected_amount ?? 0);
   await db.prepare(`
     INSERT INTO planned_expenses (id, user_id, name, jar_code, expected_amount, recurrence, note)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1377,7 +1596,54 @@ app.post('/api/planned-expenses', async (c) => {
       expected_amount = excluded.expected_amount,
       recurrence = excluded.recurrence,
       note = excluded.note
-  `).bind(id, userId, body.name, body.jarCode || 'NEC', body.expectedAmount || 0, body.recurrence || 'Hàng tháng', body.note || null).run();
+  `).bind(id, userId, body.name, jarCode, amt, body.recurrence || 'Hàng tháng', body.note || null).run();
+  return c.json({ success: true, id });
+});
+
+app.put('/api/planned-expenses/:id', async (c) => {
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const userId = 'user_default';
+  await ensurePlanningTables(db);
+  const body = await c.req.json<{
+    name?: string;
+    jarCode?: string;
+    jar_code?: string;
+    expectedAmount?: number;
+    expected_amount?: number;
+    recurrence?: string;
+    note?: string;
+  }>();
+
+  const updates: string[] = [];
+  const params: any[] = [];
+  if (body.name !== undefined) {
+    updates.push('name = ?');
+    params.push(body.name);
+  }
+  const jarCode = body.jarCode !== undefined ? body.jarCode : body.jar_code;
+  if (jarCode !== undefined) {
+    updates.push('jar_code = ?');
+    params.push(jarCode);
+  }
+  const amt = body.expectedAmount !== undefined ? body.expectedAmount : body.expected_amount;
+  if (amt !== undefined) {
+    updates.push('expected_amount = ?');
+    params.push(Math.round(amt));
+  }
+  if (body.recurrence !== undefined) {
+    updates.push('recurrence = ?');
+    params.push(body.recurrence);
+  }
+  if (body.note !== undefined) {
+    updates.push('note = ?');
+    params.push(body.note);
+  }
+
+  if (updates.length > 0) {
+    params.push(id, userId);
+    await db.prepare(`UPDATE planned_expenses SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
+  }
   return c.json({ success: true, id });
 });
 
@@ -1520,13 +1786,22 @@ app.get('/api/market/fmarket-funds', async (c) => {
   return c.json({ funds });
 });
 
-// API đồng bộ giá thị trường & Fmarket ngay lập tức
+// API đồng bộ giá thị trường & Fmarket ngay lập tức (kèm danh sách holdings mới nhất)
 app.post('/api/market/sync-prices', async (c) => {
   const db = c.env.DB;
+  const userId = 'user_default';
   const syncResult = await syncAllMarketPrices(db);
+  const { results: holdings } = await db.prepare(`
+    SELECT h.id, h.quantity, h.avg_cost, h.auto_sync, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price, a.source as unit, a.price_updated_at
+    FROM holdings h
+    JOIN assets a ON h.asset_id = a.id
+    WHERE h.user_id = ?
+  `).bind(userId).all();
+
   return c.json({
     success: true,
     ...syncResult,
+    holdings: holdings || [],
     message: `Đã cập nhật giá mới nhất cho ${syncResult.updatedCount} tài sản từ Fmarket & Thị trường`
   });
 });
@@ -1660,11 +1935,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.0/qltc-v1.2.0.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2'
+      'User-Agent': 'QLTC-Updater/1.2.1'
     }
   });
 
@@ -1678,7 +1953,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.0.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.1.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -1687,11 +1962,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.0)
+// Thông tin phiên bản & link cập nhật (v1.2.1)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.0',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.0/qltc-v1.2.0.apk',
+    version: '1.2.1',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

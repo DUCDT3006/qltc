@@ -34,33 +34,31 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.0.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.1.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.0.apk
+          path: qltc-v1.2.1.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.0
-          name: "QLTC v1.2.0 - Tối ưu toàn diện UI/UX, Sửa lỗi hũ công trình & Thêm/Sửa thu nhập 1 chạm"
+          tag_name: v1.2.1
+          name: "QLTC v1.2.1 - Bản vá QA chuẩn hóa D1, đồng bộ số dư 2 chiều, bộ lọc kỳ UTC+7 & Cài đặt 4 Tab"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.0 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.1 - Android APK
 
-            Bản nâng cấp lớn `v1.2.0` giải quyết triệt để phản hồi của người dùng và hoàn thiện toàn bộ chuẩn thiết kế V1:
-            - **Sửa triệt để lỗi mặc định Hũ Chi tiêu công trình & hiển thị 2 hũ (L-13):** Khắc phục lỗi trùng lặp mã tiền tố jar code; giao diện duyệt chỉ hiển thị 1 hũ sạch sẽ, chính xác.
-            - **Thêm và Sửa Khoản thu 1 chạm (U-07):** Nút `+ Thêm khoản thu` nổi bật trực quan ngay trên thẻ Tổng Thu Dự Kiến. Mọi khoản thu đều có thể bấm vào để sửa số tiền, chu kỳ, hoặc xóa ngay lập tức.
-            - **Tự động chia đều cho hàng tháng:** Khi chọn chu kỳ hàng quý hoặc hàng năm, hệ thống tự động quy đổi dòng tiền chuẩn hàng tháng để chia hũ chính xác.
-            - **Hộp thư giao dịch vuốt chạm mượt mà:** Thao tác vuốt thẻ sang phải để Duyệt, vuốt sang trái để Bỏ qua. Hỗ trợ Hoàn tác 5 giây.
-            - **Lịch sử giao dịch thông minh:** Cho phép tìm kiếm, lọc theo loại và bấm vào từng giao dịch đã duyệt để chỉnh sửa hũ hoặc ghi chú.
-            - **Ký số chuẩn xác (Fixed Keystore):** Cố định chữ ký số giúp cập nhật trực tiếp mà không bị xung đột gói ứng dụng.
+            Bản vá QA toàn diện `v1.2.1` khắc phục triệt để các lỗi đồng bộ dữ liệu thực tế và nâng cấp độ ổn định sản phẩm:
+            - **Đồng bộ D1 & Chuẩn hóa trường dữ liệu:** Sửa lỗi tự động migrate cột DB (`rules`, `income_sources`, `planned_expenses`, `users`), đồng bộ đầy đủ Khoản thu/Chi dự kiến, Hồ sơ cá nhân & giá thị trường lên Cloudflare D1.
+            - **Chính xác tuyệt đối Bộ lọc Tháng / Quý / Năm (UTC+7):** Đọc chuẩn thời gian ISO (`occurredAtIso`) thay vì chuỗi hiển thị, đảm bảo mọi giao dịch thực tế đã duyệt đều được cộng chính xác vào Tổng quan & Ngân sách.
+            - **Sổ cái Số dư Tài khoản 2 chiều & Ghép cặp Chuyển nội bộ:** Hỗ trợ hoàn tác (Undo 5s) và xóa giao dịch tự động hoàn trả đúng số dư; chuyển khoản nội bộ chỉ hiện 1 thẻ duy nhất chuẩn chiều người gửi → người nhận.
+            - **Bảo vệ giá Vàng SJC / BĐS (`autoSync`) & Cài đặt 4 Tab:** Công tắc giữ giá tay không bị giá thế giới ghi đè; hộp thoại Cài đặt phân tách 4 tab gọn gàng (`Cá nhân`, `Ví`, `Tự động`, `Hệ thống`).
           files: |
-            qltc-v1.2.0.apk
+            qltc-v1.2.1.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

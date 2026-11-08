@@ -18,7 +18,8 @@ import {
   CheckCircle2,
   ArrowUpRight,
   ArrowDownRight,
-  Calendar
+  Calendar,
+  Star
 } from 'lucide-react';
 
 interface BudgetViewProps {
@@ -32,8 +33,8 @@ interface BudgetViewProps {
   onAddPlannedExpense: (exp: PlannedExpense) => void;
   onUpdatePlannedExpense?: (id: string, exp: Partial<PlannedExpense>) => void;
   onDeletePlannedExpense: (id: string) => void;
-  onAddJar: (newJar: { name: string; code?: string; targetPercent: number; monthlyLimit: number; color?: string }) => Promise<void>;
-  onUpdateJar: (jarId: string, updates: { name?: string; targetPercent?: number; monthlyLimit?: number; color?: string }) => Promise<void>;
+  onAddJar: (newJar: { name: string; code?: string; targetPercent: number; monthlyLimit: number; color?: string; isDefault?: boolean }) => Promise<void>;
+  onUpdateJar: (jarId: string, updates: { name?: string; targetPercent?: number; monthlyLimit?: number; color?: string; isDefault?: boolean }) => Promise<void>;
   onBatchUpdateJarsPercent?: (updates: Array<{ id: string; targetPercent: number; monthlyLimit: number }>) => Promise<void>;
   onDeleteJar: (jarId: string) => Promise<void>;
   onAutoAllocateJars: (totalIncome: number) => Promise<void>;
@@ -89,12 +90,14 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [editLimit, setEditLimit] = useState<number>(0);
   const [editPercentStr, setEditPercentStr] = useState('10');
   const [editColor, setEditColor] = useState('#657D81');
+  const [editIsDefault, setEditIsDefault] = useState(false);
 
   // State thêm hũ mới
   const [newJarName, setNewJarName] = useState('');
   const [newJarPercentStr, setNewJarPercentStr] = useState('10');
   const [newJarLimit, setNewJarLimit] = useState<number>(0);
   const [newJarColor, setNewJarColor] = useState('#8CC7AE');
+  const [newJarIsDefault, setNewJarIsDefault] = useState(false);
 
   // Draft % khi cân bằng các hũ
   const [draftPercents, setDraftPercents] = useState<Record<string, number>>({});
@@ -129,19 +132,23 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
 
   // --- SỐ LIỆU THỰC TẾ (Lọc chuẩn tháng hiện tại theo múi giờ VN UTC+7) ---
   const nowVN = getVietnamDate();
-  const currentMonthTxns = confirmedTransactions.filter(t => isTxnInPeriod(t.occurredAt, 'month', nowVN));
+  const currentMonthTxns = confirmedTransactions.filter(t =>
+    isTxnInPeriod(t.occurredAtIso || t.occurredAt, 'month', {
+      year: nowVN.getFullYear(),
+      month: nowVN.getMonth() + 1
+    })
+  );
 
   const actualIncomeTxns = currentMonthTxns.filter(t => t.type === 'income');
   const actualExpenseTxns = currentMonthTxns.filter(t => t.type === 'expense');
 
   const totalActualIncome = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
 
-  // Tính số tiền thực chi của từng hũ
+  // Tính số tiền thực chi của từng hũ (ưu tiên jarId duy nhất, không dùng Math.max làm kẹt số cũ)
   const jarActualSpent = jars.map(jar => {
-    const fromTxns = actualExpenseTxns
-      .filter(t => t.jarId === jar.id || t.suggestedJarCode === jar.code)
+    return actualExpenseTxns
+      .filter(t => (t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code))
       .reduce((sum, t) => sum + t.amount, 0);
-    return Math.max(jar.spentThisMonth || 0, fromTxns);
   });
 
   const totalActualSpent = jarActualSpent.reduce((sum, val) => sum + val, 0);
@@ -307,6 +314,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setEditLimit(jar.monthlyLimit);
     setEditPercentStr(String(Math.round((jar.targetPercent || 0) * 100)));
     setEditColor(jar.color || '#657D81');
+    setEditIsDefault(Boolean(jar.isDefault));
   };
 
   const handleSaveEditJar = async (e: React.FormEvent) => {
@@ -318,7 +326,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       name: editName.trim() || selectedJarForEdit.name,
       monthlyLimit: editLimit,
       targetPercent: pct,
-      color: editColor
+      color: editColor,
+      isDefault: editIsDefault
     });
 
     setSelectedJarForEdit(null);
@@ -333,12 +342,14 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       name: newJarName.trim(),
       monthlyLimit: newJarLimit,
       targetPercent: pct,
-      color: newJarColor
+      color: newJarColor,
+      isDefault: newJarIsDefault
     });
 
     setNewJarName('');
     setNewJarLimit(0);
     setNewJarPercentStr('10');
+    setNewJarIsDefault(false);
     setShowAddJarModal(false);
   };
 
@@ -477,6 +488,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               <div className="flex flex-wrap gap-1.5 pt-0.5">
                 {plannedExpenses.map(exp => {
                   const jar = jars.find(j => j.code === exp.jarCode);
+                  const monthlyExp = normalizeToMonthlyAmount(exp.expectedAmount, exp.recurrence);
+                  const isExpMonthly = (exp.recurrence || 'Hàng tháng') === 'Hàng tháng';
                   return (
                     <button
                       key={exp.id}
@@ -485,7 +498,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       className="text-[10.5px] px-2.5 py-1 rounded-lg bg-[#161C1E]/80 border border-[#8BA5AA]/15 text-[#C4D0D2] hover:bg-[#232D30] active:scale-95 transition-all flex items-center gap-1"
                     >
                       <span>{exp.name}:</span>
-                      <b className="num text-[#F2F5F5]">{formatVND(exp.expectedAmount)}</b>
+                      <b className="num text-[#F2F5F5]">{formatVND(monthlyExp)}/th</b>
+                      {!isExpMonthly && (
+                        <span className="text-[9.5px] text-[#869699]">({exp.recurrence})</span>
+                      )}
                       <span className="text-[#8CC7AE]">({jar?.name || exp.jarCode})</span>
                       <Edit2 size={10} className="text-[#869699]" />
                     </button>
@@ -568,7 +584,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               const targetPct = Math.round((jar.targetPercent || 0) * 100);
               const plannedForJar = plannedExpenses
                 .filter(e => e.jarCode === jar.code)
-                .reduce((s, e) => s + e.expectedAmount, 0);
+                .reduce((s, e) => s + normalizeToMonthlyAmount(e.expectedAmount, e.recurrence), 0);
 
               return (
                 <div
@@ -578,9 +594,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                     isWarn ? 'border-[#D4A373]/35' : 'border-[#8BA5AA]/12'
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[13px] font-semibold text-[#F2F5F5] truncate max-w-[95px]">{jar.name}</span>
-                    <span className="num text-[10.5px] font-semibold px-2 py-0.5 rounded-full bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/25">
+                  <div className="flex items-center justify-between mb-1.5 gap-1">
+                    <span className="text-[13px] font-semibold text-[#F2F5F5] truncate flex items-center gap-1 min-w-0">
+                      {jar.isDefault && <Star size={11} className="text-[#DEB48A] fill-[#DEB48A] shrink-0" />}
+                      <span className="truncate">{jar.name}</span>
+                    </span>
+                    <span className="num text-[10.5px] font-semibold px-2 py-0.5 rounded-full bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/25 shrink-0">
                       Dự kiến {targetPct}%
                     </span>
                   </div>
@@ -705,9 +724,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   onClick={() => handleOpenEditJar(jar)}
                   className="bg-[#1C2426]/85 border border-[#8BA5AA]/15 rounded-2xl p-3.5 flex flex-col justify-between cursor-pointer active:scale-98 transition-transform hover:border-[#8BA5AA]/30"
                 >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[13px] font-semibold text-[#F2F5F5] truncate max-w-[90px]">{jar.name}</span>
-                    <span className="num text-[11px] font-bold px-2 py-0.5 rounded-full bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/30">
+                  <div className="flex items-center justify-between mb-1.5 gap-1">
+                    <span className="text-[13px] font-semibold text-[#F2F5F5] truncate flex items-center gap-1 min-w-0">
+                      {jar.isDefault && <Star size={11} className="text-[#DEB48A] fill-[#DEB48A] shrink-0" />}
+                      <span className="truncate">{jar.name}</span>
+                    </span>
+                    <span className="num text-[11px] font-bold px-2 py-0.5 rounded-full bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/30 shrink-0">
                       {actualPctShare}%
                     </span>
                   </div>
@@ -914,110 +936,151 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {/* ===================================================================== */}
       {/* MODAL 2: THÊM / SỬA KHOẢN CHI DỰ KIẾN                                 */}
       {/* ===================================================================== */}
-      {showPlannedExpModal && (() => (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
-          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-base font-bold text-[#F2F5F5] block">
-                  {editingExpId ? 'Chỉnh sửa khoản chi dự kiến' : 'Thêm khoản chi dự kiến'}
-                </span>
-                <span className="text-[11px] text-[#869699]">
-                  Lên kế hoạch các chi phí định kỳ hoặc khoản chi lớn
-                </span>
-              </div>
-              <button
-                onClick={() => setShowPlannedExpModal(false)}
-                className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center active:scale-90"
-              >
-                <X size={18} />
-              </button>
-            </div>
+      {showPlannedExpModal && (() => {
+        const convertedExpMonthly = normalizeToMonthlyAmount(expAmount, expRecurrence);
+        const isExpMonthly = expRecurrence === 'Hàng tháng';
 
-            <form onSubmit={handleSavePlannedExp} className="space-y-3.5">
-              <div>
-                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                  Tên khoản chi *
-                </label>
-                <input
-                  type="text"
-                  value={expName}
-                  onChange={(e) => setExpName(e.target.value)}
-                  placeholder="VD: Tiền thuê nhà, Tiền học phí, Mua xe..."
-                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#DEB48A]/50"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                  Số tiền dự kiến *
-                </label>
-                <CurrencyInput
-                  value={expAmount}
-                  onChange={setExpAmount}
-                  autoFocus={!editingExpId}
-                  className="text-lg font-bold"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                  Gắn vào Hũ chi tiêu *
-                </label>
-                <select
-                  value={expJarCode}
-                  onChange={(e) => setExpJarCode(e.target.value)}
-                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#DEB48A]/50"
-                >
-                  {jars.map(j => (
-                    <option key={j.id} value={j.code} className="bg-[#161C1E] text-white">
-                      Hũ {j.name} ({Math.round(j.targetPercent * 100)}%)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center gap-2 pt-2">
-                {editingExpId && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const eid = editingExpId;
-                      setConfirmSheet({
-                        isOpen: true,
-                        title: 'Xóa khoản chi dự kiến',
-                        description: `Anh có chắc muốn xóa khoản chi "${expName}" không?`,
-                        isDanger: true,
-                        onConfirm: () => {
-                          onDeletePlannedExpense(eid);
-                          setShowPlannedExpModal(false);
-                        }
-                      });
-                    }}
-                    className="px-3.5 py-3 rounded-2xl bg-[#282121] hover:bg-[#3B2525] text-[#E06D6D] text-xs font-semibold flex items-center gap-1.5 active:scale-95"
-                  >
-                    <Trash2 size={14} /> Xóa
-                  </button>
-                )}
-
+        return (
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+            <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-base font-bold text-[#F2F5F5] block">
+                    {editingExpId ? 'Chỉnh sửa khoản chi dự kiến' : 'Thêm khoản chi dự kiến'}
+                  </span>
+                  <span className="text-[11px] text-[#869699]">
+                    Lên kế hoạch các chi phí định kỳ hoặc khoản chi lớn
+                  </span>
+                </div>
                 <button
-                  type="submit"
-                  className="flex-1 py-3 rounded-2xl bg-[#DEB48A] hover:bg-[#E5BE97] text-[#0E1314] font-bold text-xs shadow active:scale-98"
+                  onClick={() => setShowPlannedExpModal(false)}
+                  className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center active:scale-90"
                 >
-                  {editingExpId ? 'Cập nhật khoản chi' : 'Lưu khoản chi'}
+                  <X size={18} />
                 </button>
               </div>
-            </form>
+
+              <form onSubmit={handleSavePlannedExp} className="space-y-3.5">
+                <div>
+                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Tên khoản chi *
+                  </label>
+                  <input
+                    type="text"
+                    value={expName}
+                    onChange={(e) => setExpName(e.target.value)}
+                    placeholder="VD: Tiền thuê nhà, Tiền học phí, Bảo hiểm..."
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#DEB48A]/50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Số tiền dự kiến *
+                  </label>
+                  <CurrencyInput
+                    value={expAmount}
+                    onChange={setExpAmount}
+                    autoFocus={!editingExpId}
+                    className="text-lg font-bold"
+                  />
+                </div>
+
+                {/* Chu kỳ khoản chi dự kiến (L-06) */}
+                <div>
+                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1 flex items-center gap-1">
+                    <Calendar size={11} /> Chu kỳ chi tiêu *
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {RECURRENCE_PRESETS.map((preset) => {
+                      const isSelected = expRecurrence === preset.label;
+                      return (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => setExpRecurrence(preset.label)}
+                          className={`p-2 rounded-xl border text-left transition-all ${
+                            isSelected
+                              ? 'bg-[#2D221B] border-[#DEB48A] text-[#DEB48A]'
+                              : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#C4D0D2] hover:bg-[#253235]'
+                          }`}
+                        >
+                          <div className="text-xs font-semibold">{preset.label}</div>
+                          <div className="text-[9.5px] opacity-75">{preset.hint}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {expAmount > 0 && !isExpMonthly && (
+                    <div className="mt-2 p-2.5 bg-[#12191B] rounded-xl border border-[#DEB48A]/25 flex items-center justify-between text-xs">
+                      <span className="text-[#869699]">Tự động quy đổi hàng tháng:</span>
+                      <span className="font-bold text-[#DEB48A] num">
+                        ~{formatVND(convertedExpMonthly)} / tháng
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Gắn vào Hũ chi tiêu *
+                  </label>
+                  <select
+                    value={expJarCode}
+                    onChange={(e) => setExpJarCode(e.target.value)}
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#DEB48A]/50"
+                  >
+                    {jars.map(j => (
+                      <option key={j.id} value={j.code} className="bg-[#161C1E] text-white">
+                        Hũ {j.name} ({Math.round(j.targetPercent * 100)}%)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-2 pt-2">
+                  {editingExpId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const eid = editingExpId;
+                        setConfirmSheet({
+                          isOpen: true,
+                          title: 'Xóa khoản chi dự kiến',
+                          description: `Anh có chắc muốn xóa khoản chi "${expName}" không?`,
+                          isDanger: true,
+                          onConfirm: () => {
+                            onDeletePlannedExpense(eid);
+                            setShowPlannedExpModal(false);
+                          }
+                        });
+                      }}
+                      className="px-3.5 py-3 rounded-2xl bg-[#282121] hover:bg-[#3B2525] text-[#E06D6D] text-xs font-semibold flex items-center gap-1.5 active:scale-95"
+                    >
+                      <Trash2 size={14} /> Xóa
+                    </button>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="flex-1 py-3 rounded-2xl bg-[#DEB48A] hover:bg-[#E5BE97] text-[#0E1314] font-bold text-xs shadow active:scale-98"
+                  >
+                    {editingExpId ? 'Cập nhật khoản chi' : 'Lưu khoản chi'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      ))()}
+        );
+      })()}
 
       {/* ===================================================================== */}
       {/* MODAL 3: CHỈNH SỬA / XÓA 1 HŨ                                         */}
       {/* ===================================================================== */}
       {selectedJarForEdit && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
-          <div className="w-full max-w-md bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4">
+          <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-base font-bold text-[#F2F5F5] block">
@@ -1092,6 +1155,25 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                 </div>
               </div>
 
+              {/* Hũ chi tiêu mặc định khi duyệt nhanh (L-13) */}
+              <button
+                type="button"
+                onClick={() => setEditIsDefault(!editIsDefault)}
+                className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all ${
+                  editIsDefault
+                    ? 'bg-[#2D221B] border-[#DEB48A]/50 text-[#DEB48A]'
+                    : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#97A8AB]'
+                }`}
+              >
+                <span className="flex items-center gap-2 text-xs font-semibold">
+                  <Star size={14} className={editIsDefault ? 'text-[#DEB48A] fill-[#DEB48A]' : 'text-[#869699]'} />
+                  Đặt làm hũ mặc định khi duyệt chi nhanh
+                </span>
+                <span className="text-[10.5px] font-bold">
+                  {editIsDefault ? 'Đang bật' : 'Tắt'}
+                </span>
+              </button>
+
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
@@ -1131,7 +1213,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {/* ===================================================================== */}
       {showAddJarModal && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
-          <div className="w-full max-w-md bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4">
+          <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-base font-bold text-[#F2F5F5] block">Thêm Hũ Chi Tiêu Mới</span>
@@ -1204,6 +1286,25 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* Hũ chi tiêu mặc định khi duyệt nhanh (L-13) */}
+              <button
+                type="button"
+                onClick={() => setNewJarIsDefault(!newJarIsDefault)}
+                className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all ${
+                  newJarIsDefault
+                    ? 'bg-[#2D221B] border-[#DEB48A]/50 text-[#DEB48A]'
+                    : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#97A8AB]'
+                }`}
+              >
+                <span className="flex items-center gap-2 text-xs font-semibold">
+                  <Star size={14} className={newJarIsDefault ? 'text-[#DEB48A] fill-[#DEB48A]' : 'text-[#869699]'} />
+                  Đặt làm hũ mặc định khi duyệt chi nhanh
+                </span>
+                <span className="text-[10.5px] font-bold">
+                  {newJarIsDefault ? 'Đang bật' : 'Tắt'}
+                </span>
+              </button>
 
               <button
                 type="submit"

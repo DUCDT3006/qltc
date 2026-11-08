@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Sparkline } from '../components/Sparkline';
 import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
 import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from '../utils/financeMath';
-import { isTxnInPeriod, getPeriodDisplayLabel, getVietnamDate } from '../utils/dateUtils';
+import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import {
   RefreshCw,
@@ -128,20 +128,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       ? `Quý ${selectedQuarter}/${selectedYear}`
       : `Năm ${selectedYear}`;
 
-  const isCurrentMonthPeriod =
-    periodMode === 'month' &&
-    selectedYear === nowVN.getFullYear() &&
-    selectedMonth === nowVN.getMonth() + 1;
+  // L-11: Tải thống kê tổng hợp từ D1 cho kỳ Quý / Năm (hoặc khi vượt quá bộ nhớ đệm client)
+  const [serverSummary, setServerSummary] = useState<{
+    totalIncome: number;
+    totalExpense: number;
+    jarBreakdown: Array<{ id: string; spent: number }>;
+    incomeBreakdown: Array<{ source_id: string; total_amount: number }>;
+  } | null>(null);
 
-  // Lọc các giao dịch đã duyệt nằm trong kỳ được chọn (chuẩn múi giờ UTC+7)
-  const targetDateForPeriod = new Date(
-    selectedYear,
-    periodMode === 'month' ? selectedMonth - 1 : periodMode === 'quarter' ? (selectedQuarter - 1) * 3 : 0,
-    15
-  );
+  useEffect(() => {
+    let cancelled = false;
+    if (periodMode !== 'month' || confirmedTransactions.length >= 450) {
+      fetch(
+        `https://qltc-backend.dtd-store.workers.dev/api/analytics/summary?period=${periodMode}&year=${selectedYear}&month=${selectedMonth}&quarter=${selectedQuarter}`
+      )
+        .then(r => (r.ok ? r.json() : null))
+        .then(data => {
+          if (!cancelled && data) setServerSummary(data);
+        })
+        .catch(() => {});
+    } else {
+      setServerSummary(null);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [periodMode, selectedYear, selectedMonth, selectedQuarter, confirmedTransactions.length]);
 
+  // Lọc các giao dịch đã duyệt nằm trong kỳ được chọn (chuẩn múi giờ UTC+7, đọc từ occurredAtIso)
   const periodTransactions = confirmedTransactions.filter(t =>
-    isTxnInPeriod(t.occurredAt, periodMode, targetDateForPeriod)
+    isTxnInPeriod(t.occurredAtIso || t.occurredAt, periodMode, {
+      year: selectedYear,
+      month: selectedMonth,
+      quarter: selectedQuarter
+    })
   );
 
   // ============================================================================
@@ -202,7 +222,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const expectedIncomeForPeriod = baseMonthlyExpectedIncome * periodMultiplier;
 
   const actualIncomeTxns = periodTransactions.filter(t => t.type === 'income');
-  const actualIncomeForPeriod = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
+  const localIncomeForPeriod = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
+  const actualIncomeForPeriod =
+    serverSummary && confirmedTransactions.length >= 450
+      ? Math.max(localIncomeForPeriod, serverSummary.totalIncome || 0)
+      : localIncomeForPeriod;
 
   const incomeAchievedPct = expectedIncomeForPeriod > 0
     ? Math.round((actualIncomeForPeriod / expectedIncomeForPeriod) * 100)
@@ -212,7 +236,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const incomeSourceComparison = incomeSources.map(src => {
     const monthlyExpected = normalizeToMonthlyAmount(src.expectedAmount, src.recurrence);
     const expected = monthlyExpected * periodMultiplier;
-    const matchedActual = actualIncomeTxns
+    const localMatched = actualIncomeTxns
       .filter(t => {
         if (t.incomeSourceId && t.incomeSourceId === src.id) return true;
         const cat = (t.suggestedCategory || '').toLowerCase();
@@ -221,6 +245,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         return cat === nameLower || cat.includes(nameLower) || desc.includes(nameLower);
       })
       .reduce((s, t) => s + t.amount, 0);
+    const srvSrc =
+      serverSummary && confirmedTransactions.length >= 450
+        ? serverSummary.incomeBreakdown?.find(ib => ib.source_id === src.id)
+        : undefined;
+    const matchedActual = srvSrc ? Math.max(localMatched, Number(srvSrc.total_amount || 0)) : localMatched;
     const pct = expected > 0 ? Math.round((matchedActual / expected) * 100) : 0;
     return {
       ...src,
@@ -241,10 +270,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const jarActualAmounts = jars.map(jar => {
     const fromPeriodTxns = actualExpenseTxns
-      .filter(t => t.jarId === jar.id || t.suggestedJarCode === jar.code)
+      .filter(t => (t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code))
       .reduce((s, t) => s + t.amount, 0);
-    if (isCurrentMonthPeriod) {
-      return Math.max(jar.spentThisMonth || 0, fromPeriodTxns);
+    if (serverSummary && confirmedTransactions.length >= 450) {
+      const srvJar = serverSummary.jarBreakdown?.find(jb => jb.id === jar.id);
+      if (srvJar) return Math.max(fromPeriodTxns, Number(srvJar.spent || 0));
     }
     return fromPeriodTxns;
   });
@@ -372,7 +402,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Tổng Tài Sản Thực Tế Hiện Có
             </span>
             <div className="num text-[28px] font-bold text-[#F2F5F5] tracking-tight mt-0.5">
-              {privacyMode ? '••••••••••' : formatVND(totalCalculatedNetWorth > 0 ? totalCalculatedNetWorth : netWorth)}
+              {privacyMode ? '••••••••••' : formatVND(totalCalculatedNetWorth)}
             </div>
           </div>
 
@@ -397,6 +427,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         {/* Dynamic Sparkline */}
         <Sparkline points={sparklinePoints} />
+
+        {/* U-01: Thanh phân bổ tỷ trọng 6 lớp tài sản trực quan */}
+        {totalCalculatedNetWorth > 0 && !privacyMode && (
+          <div className="space-y-1.5">
+            <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#121819]">
+              {[
+                { label: 'NH', val: bankTotal, color: '#657D81' },
+                { label: 'Tiền mặt', val: cashTotal, color: '#8CC7AE' },
+                { label: 'TS TC', val: financialTotal, color: '#4EA8DE' },
+                { label: 'Vàng', val: goldTotal, color: '#DEB48A' },
+                { label: 'Bạc', val: silverTotal, color: '#C4D0D2' },
+                { label: 'Đất', val: landTotal, color: '#E07A5F' }
+              ]
+                .filter(seg => seg.val > 0)
+                .map(seg => (
+                  <div
+                    key={seg.label}
+                    title={`${seg.label}: ${Math.round((seg.val / totalCalculatedNetWorth) * 100)}%`}
+                    style={{
+                      width: `${Math.max(3, Math.round((seg.val / totalCalculatedNetWorth) * 100))}%`,
+                      backgroundColor: seg.color
+                    }}
+                    className="h-full transition-all duration-300"
+                  />
+                ))}
+            </div>
+          </div>
+        )}
 
         {/* Bảng chi tiết 6 nhóm Tài sản thực tế */}
         <div className="pt-2 border-t border-[#8BA5AA]/15 space-y-2">

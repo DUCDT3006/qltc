@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Holding, AssetClass, FmarketFund } from '../types';
-import { formatVND } from '../mockData';
-import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Check } from 'lucide-react';
+import { formatVND } from '../utils/financeMath';
+import { CurrencyInput } from '../components/CurrencyInput';
+import { ConfirmSheet } from '../components/ConfirmSheet';
+import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Check, Zap } from 'lucide-react';
 
 interface InvestmentsViewProps {
   holdings: Holding[];
@@ -48,10 +50,12 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   const [symbol, setSymbol] = useState('');
   const [name, setName] = useState('');
   const [quantityStr, setQuantityStr] = useState('');
-  const [avgCostStr, setAvgCostStr] = useState('');
-  const [currentPriceStr, setCurrentPriceStr] = useState('');
+  const [avgCost, setAvgCost] = useState<number>(0);
+  const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [unit, setUnit] = useState('CCQ');
+  const [autoSync, setAutoSync] = useState<boolean>(true);
   const [fundSearch, setFundSearch] = useState('');
+  const [confirmDeleteSymbol, setConfirmDeleteSymbol] = useState<string | null>(null);
 
   const totalValue = holdings.reduce((sum, h) => sum + h.quantity * h.currentPrice, 0);
   const totalCost = holdings.reduce((sum, h) => sum + h.quantity * h.avgCost, 0);
@@ -68,15 +72,22 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     f.name.toLowerCase().includes(fundSearch.toLowerCase())
   ).slice(0, 12);
 
+  const getDefaultAutoSync = (cls: AssetClass) => {
+    if (cls === 'fund' || cls === 'crypto') return true;
+    if (cls === 'land') return false;
+    return false; // Vàng SJC / Bạc / Cổ phiếu mặc định giữ giá tay để tránh bị PAXG quốc tế ghi đè trừ khi bật
+  };
+
   const handleOpenAddModal = (defaultClass: AssetClass = 'fund') => {
     setEditingSymbol(null);
     setAssetClass(defaultClass);
     setSymbol('');
     setName('');
     setQuantityStr('');
-    setAvgCostStr('');
-    setCurrentPriceStr('');
+    setAvgCost(0);
+    setCurrentPrice(0);
     setFundSearch('');
+    setAutoSync(getDefaultAutoSync(defaultClass));
     setUnit(
       defaultClass === 'fund' ? 'CCQ' :
       defaultClass === 'stock' ? 'CP' :
@@ -93,9 +104,10 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     setSymbol(h.symbol);
     setName(h.name);
     setQuantityStr(String(h.quantity));
-    setAvgCostStr(String(Math.round(h.avgCost)));
-    setCurrentPriceStr(String(Math.round(h.currentPrice)));
+    setAvgCost(Math.round(h.avgCost));
+    setCurrentPrice(Math.round(h.currentPrice));
     setUnit(h.unit || 'CCQ');
+    setAutoSync(h.autoSync !== undefined ? h.autoSync : getDefaultAutoSync(h.assetClass));
     setShowAddModal(true);
   };
 
@@ -103,9 +115,10 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     setSymbol(fund.shortName);
     setName(fund.name);
     setUnit('CCQ');
-    setCurrentPriceStr(String(Math.round(fund.nav)));
-    if (!avgCostStr) {
-      setAvgCostStr(String(Math.round(fund.nav)));
+    setAutoSync(true);
+    setCurrentPrice(Math.round(fund.nav));
+    if (!avgCost) {
+      setAvgCost(Math.round(fund.nav));
     }
   };
 
@@ -114,8 +127,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     if (!symbol.trim() || !name.trim()) return;
 
     const quantity = parseFloat(quantityStr.replace(/,/g, '.')) || 0;
-    const avgCost = parseFloat(avgCostStr.replace(/[^\d.]/g, '')) || 0;
-    const currentPrice = parseFloat(currentPriceStr.replace(/[^\d.]/g, '')) || avgCost;
+    const finalCurrentPrice = currentPrice > 0 ? currentPrice : avgCost;
 
     await onAddHolding({
       symbol: symbol.trim().toUpperCase(),
@@ -123,7 +135,8 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
       assetClass,
       quantity,
       avgCost,
-      currentPrice,
+      currentPrice: finalCurrentPrice,
+      autoSync,
       unit: unit.trim() || (
         assetClass === 'fund' ? 'CCQ' :
         assetClass === 'stock' ? 'CP' :
@@ -304,6 +317,11 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                 <div className="flex-1 min-w-0">
                   <div className="text-[13px] font-semibold text-[#F2F5F5] truncate flex items-center gap-1.5">
                     <span className="truncate">{h.name}</span>
+                    {h.autoSync !== false && (h.assetClass === 'fund' || h.assetClass === 'crypto' || h.assetClass === 'gold' || h.assetClass === 'silver') && (
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/25 shrink-0 font-mono">
+                        Auto
+                      </span>
+                    )}
                     <Edit2 size={10} className="text-[#869699] shrink-0 opacity-60" />
                   </div>
                   <div className="text-[11px] text-[#869699] num mt-0.5">
@@ -326,10 +344,10 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
         )}
       </div>
 
-      {/* MODAL: Thêm / Cập nhật tài sản đầu tư (Hỗ trợ chọn nhanh Quỹ Fmarket) */}
+      {/* MODAL: Thêm / Cập nhật tài sản đầu tư (Hỗ trợ chọn nhanh Quỹ Fmarket & công tắc AutoSync L-10) */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in">
-          <div className="w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-3.5">
+          <div className="w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-3.5 no-scrollbar">
             <div className="flex items-center justify-between">
               <span className="text-base font-bold text-[#F2F5F5]">
                 {editingSymbol ? `Cập nhật tài sản: ${editingSymbol}` : 'Thêm / Cập nhật Tài sản'}
@@ -362,6 +380,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                       key={tab.id}
                       onClick={() => {
                         setAssetClass(tab.id);
+                        setAutoSync(getDefaultAutoSync(tab.id));
                         setUnit(
                           tab.id === 'fund' ? 'CCQ' :
                           tab.id === 'stock' ? 'CP' :
@@ -436,7 +455,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                    Mã tài sản
+                    Mã tài sản *
                   </label>
                   <input
                     type="text"
@@ -462,7 +481,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
 
               <div>
                 <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                  Tên tài sản chi tiết
+                  Tên tài sản chi tiết *
                 </label>
                 <input
                   type="text"
@@ -473,46 +492,73 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                    Số lượng ({unit})
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    placeholder="VD: 500.25"
-                    value={quantityStr}
-                    onChange={(e) => setQuantityStr(e.target.value)}
-                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#F2F5F5]"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                    Giá vốn TB / 1 {unit} (₫)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="VD: 28500"
-                    value={avgCostStr}
-                    onChange={(e) => setAvgCostStr(e.target.value)}
-                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#F2F5F5]"
-                  />
-                </div>
+              <div>
+                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                  Số lượng ({unit}) *
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="VD: 500.25"
+                  value={quantityStr}
+                  onChange={(e) => setQuantityStr(e.target.value)}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2.5 text-sm font-bold num text-[#F2F5F5]"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                  Giá vốn TB / 1 {unit} (₫)
+                </label>
+                <CurrencyInput
+                  value={avgCost}
+                  onChange={setAvgCost}
+                  showQuickChips={false}
+                  className="text-sm font-bold"
+                />
               </div>
 
               <div>
                 <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
                   Giá thị trường hiện tại / 1 {unit} (₫)
                 </label>
-                <input
-                  type="text"
-                  placeholder="Tự động cập nhật từ Fmarket hoặc tự nhập"
-                  value={currentPriceStr}
-                  onChange={(e) => setCurrentPriceStr(e.target.value)}
-                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#8CC7AE]"
+                <CurrencyInput
+                  value={currentPrice}
+                  onChange={setCurrentPrice}
+                  showQuickChips={assetClass === 'land' || assetClass === 'gold'}
+                  className="text-sm font-bold text-[#8CC7AE]"
                 />
               </div>
+
+              {/* L-10: Công tắc gạt bảo vệ giá tự nhập (SJC / BĐS) khỏi bị giá quốc tế ghi đè */}
+              {assetClass !== 'land' && (
+                <button
+                  type="button"
+                  onClick={() => setAutoSync(!autoSync)}
+                  className={`w-full p-2.5 rounded-xl border flex items-center justify-between text-left transition-all ${
+                    autoSync
+                      ? 'bg-[#1D2926] border-[#8CC7AE]/45 text-[#8CC7AE]'
+                      : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#97A8AB]'
+                  }`}
+                >
+                  <div>
+                    <div className="text-xs font-semibold flex items-center gap-1.5">
+                      <Zap size={13} className={autoSync ? 'text-[#8CC7AE]' : 'text-[#869699]'} />
+                      Tự động cập nhật giá hàng ngày
+                    </div>
+                    <div className="text-[10px] text-[#869699] mt-0.5">
+                      {assetClass === 'fund'
+                        ? 'Đồng bộ trực tiếp NAV khớp lệnh từ Fmarket'
+                        : assetClass === 'gold' || assetClass === 'silver'
+                        ? 'Tắt nếu anh muốn giữ nguyên giá Vàng SJC / tiệm vàng trong nước'
+                        : 'Cập nhật giá thị trường quốc tế tự động'}
+                    </div>
+                  </div>
+                  <span className="text-[10.5px] font-bold shrink-0 ml-2">
+                    {autoSync ? 'Bật' : 'Giữ giá tay'}
+                  </span>
+                </button>
+              )}
 
               <div className="pt-1 flex flex-col gap-2">
                 <button
@@ -525,10 +571,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                 {editingSymbol && (
                   <button
                     type="button"
-                    onClick={async () => {
-                      await onDeleteHolding(editingSymbol);
-                      setShowAddModal(false);
-                    }}
+                    onClick={() => setConfirmDeleteSymbol(editingSymbol)}
                     className="w-full py-2 rounded-xl bg-transparent border border-[#E06D6D]/35 text-[#E06D6D] text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Trash2 size={13} /> Xóa tài sản này
@@ -539,6 +582,23 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* U-04: Confirm Bottom Sheet trước khi xóa tài sản */}
+      <ConfirmSheet
+        isOpen={Boolean(confirmDeleteSymbol)}
+        title="Xóa tài sản đầu tư"
+        description={`Anh có chắc muốn xóa mã "${confirmDeleteSymbol}" khỏi danh mục tài sản không?`}
+        confirmText="Xóa tài sản"
+        isDanger
+        onConfirm={async () => {
+          if (confirmDeleteSymbol) {
+            await onDeleteHolding(confirmDeleteSymbol);
+            setConfirmDeleteSymbol(null);
+            setShowAddModal(false);
+          }
+        }}
+        onCancel={() => setConfirmDeleteSymbol(null)}
+      />
     </div>
   );
 };

@@ -72,6 +72,7 @@ export interface PlannedExpense {
 
 export interface Transaction {
   id: string;
+  accountId?: string;
   bankCode: string;
   accountMask: string;
   accountName: string;
@@ -85,8 +86,10 @@ export interface Transaction {
   toAccountId?: string;
   toAccountName?: string;
   incomeSourceId?: string;
+  incomeSourceName?: string;
   originalType?: 'income' | 'expense';
   balanceAfter?: number;
+  confidence?: number;
   occurredAt: string;
   occurredAtIso?: string;
   status: 'pending' | 'confirmed' | 'rejected';

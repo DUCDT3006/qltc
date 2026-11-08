@@ -24,9 +24,9 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
     categoryName: 'Cafe & Trà',
     jarCode: 'PLAY'
   },
-  // 4. ĂN UỐNG THIẾT YẾU (Đi chợ, siêu thị)
+  // 4. ĂN UỐNG THIẾT YẾU (Đi chợ, siêu thị - tránh 'TIEN CHO' vì trùng 'CHUYEN TIEN CHO ...' không dấu!)
   {
-    keywords: ['WINMART', 'BACH HOA XANH', 'COOPMART', 'BIG C', 'GO!', 'AEON', 'MEGAMARKET', 'DI CHO', 'TIEN CHO', 'THIT', 'RAU', 'AN SANG', 'COM TRUA', 'BUN', 'PHO', 'COM TAM'],
+    keywords: ['WINMART', 'BACH HOA XANH', 'COOPMART', 'BIG C', 'SIEU THI GO', 'AEON', 'MEGAMARKET', 'DI CHO', 'CHO DAN SINH', 'SIEU THI', 'TAP HOA', 'AN SANG', 'COM TRUA', 'AN TOI', 'AN PHO', 'PHO BO', 'PHO GA', 'AN BUN', 'BUN BO', 'COM TAM'],
     categoryName: 'Ăn uống hàng ngày',
     jarCode: 'NEC'
   },
@@ -56,17 +56,36 @@ export const DEFAULT_RULES: { keywords: string[]; categoryName: string; jarCode:
   }
 ];
 
+function normalizeVietnameseUpper(str: string): string {
+  return (str || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/gi, 'D')
+    .toUpperCase();
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasWordKeyword(normalizedText: string, keyword: string): boolean {
+  const normKw = normalizeVietnameseUpper(keyword).trim();
+  if (!normKw) return false;
+  const re = new RegExp(`(?:^|[^A-Z0-9])${escapeRegex(normKw)}(?:$|[^A-Z0-9])`);
+  return re.test(normalizedText);
+}
+
 export function categorizeTransaction(
   description: string,
   type: 'income' | 'expense',
   userRules?: { pattern: string; categoryName: string; jarCode: string }[]
 ): CategorizationResult {
-  const upper = description.toUpperCase();
+  const upper = normalizeVietnameseUpper(description);
 
   // 1. Kiểm tra quy tắc người dùng đã dạy / tự học trước tiên (ưu tiên cao nhất 0.99)
   if (userRules && userRules.length > 0) {
     for (const ur of userRules) {
-      if (upper.includes(ur.pattern.toUpperCase())) {
+      if (hasWordKeyword(upper, ur.pattern) || upper.includes(normalizeVietnameseUpper(ur.pattern))) {
         return {
           categoryName: ur.categoryName,
           jarCode: ur.jarCode,
@@ -78,25 +97,37 @@ export function categorizeTransaction(
   }
 
   if (type === 'income') {
-    if (upper.includes('LUONG') || upper.includes('SALARY') || upper.includes('THANH TOAN LUONG')) {
+    if (hasWordKeyword(upper, 'LUONG') || hasWordKeyword(upper, 'SALARY') || hasWordKeyword(upper, 'THANH TOAN LUONG')) {
       return { categoryName: 'Lương chính', jarCode: 'NEC', confidence: 0.98, matchedKeyword: 'LUONG' };
     }
-    if (upper.includes('FREELANCE') || upper.includes('DU AN') || upper.includes('THU LAO')) {
+    if (hasWordKeyword(upper, 'FREELANCE') || hasWordKeyword(upper, 'DU AN') || hasWordKeyword(upper, 'THU LAO')) {
       return { categoryName: 'Thu nhập ngoài / Freelance', jarCode: 'FFA', confidence: 0.9, matchedKeyword: 'FREELANCE' };
     }
-    if (upper.includes('CHO THUE') || upper.includes('TIEN NHA')) {
+    if (hasWordKeyword(upper, 'CHO THUE') || hasWordKeyword(upper, 'TIEN NHA')) {
       return { categoryName: 'Cho thuê tài sản', jarCode: 'FFA', confidence: 0.92, matchedKeyword: 'CHO THUE' };
     }
-    if (upper.includes('CO TUC') || upper.includes('LAI TIEN GUI') || upper.includes('LAI TK') || upper.includes('LOI NHUAN') || upper.includes('SINH LOI')) {
+    if (
+      hasWordKeyword(upper, 'CO TUC') ||
+      hasWordKeyword(upper, 'LAI TIEN GUI') ||
+      hasWordKeyword(upper, 'LAI TK') ||
+      hasWordKeyword(upper, 'LOI NHUAN') ||
+      hasWordKeyword(upper, 'SINH LOI')
+    ) {
       return { categoryName: 'Thu nhập thụ động & Lãi', jarCode: 'FFA', confidence: 0.95, matchedKeyword: 'SINH LOI' };
     }
     return { categoryName: 'Thu nhập khác', jarCode: 'NEC', confidence: 0.5 };
   }
 
-  // Phân loại chi tiêu
+  // Phân loại chi tiêu có dấu đặc thù ("Tiền chợ" có dấu, phân biệt với "CHUYEN TIEN CHO ..." không dấu)
+  const rawUpper = (description || '').toUpperCase();
+  if (rawUpper.includes('TIỀN CHỢ') || rawUpper.includes('ĐI CHỢ')) {
+    return { categoryName: 'Ăn uống hàng ngày', jarCode: 'NEC', confidence: 0.96, matchedKeyword: 'TIỀN CHỢ' };
+  }
+
+  // Phân loại chi tiêu theo ranh giới từ chuẩn xác (tránh 'PHONG' khớp nhầm 'PHO' hoặc 'CHO' khớp nhầm)
   for (const rule of DEFAULT_RULES) {
     for (const kw of rule.keywords) {
-      if (upper.includes(kw)) {
+      if (hasWordKeyword(upper, kw)) {
         return {
           categoryName: rule.categoryName,
           jarCode: rule.jarCode,

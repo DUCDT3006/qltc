@@ -21,10 +21,14 @@ import {
   Mail,
   Phone,
   Edit3,
-  Trash2
+  Trash2,
+  Landmark,
+  Settings
 } from 'lucide-react';
 import { BankAccount, UserProfile } from '../types';
-import { formatVND } from '../mockData';
+import { formatVND } from '../utils/financeMath';
+import { CurrencyInput } from './CurrencyInput';
+import { ConfirmSheet } from './ConfirmSheet';
 
 interface RawLog {
   id: string;
@@ -42,6 +46,13 @@ interface SettingsModalProps {
   onClose: () => void;
   accounts: BankAccount[];
   onAddAccount: (acc: BankAccount) => void;
+  onUpdateAccountBalance?: (
+    accountId: string,
+    newBalance: number,
+    name?: string,
+    type?: BankAccount['type']
+  ) => Promise<void> | void;
+  onDeleteAccount?: (accountId: string) => Promise<void> | void;
   privacyMode: boolean;
   onTogglePrivacy: () => void;
   onSimulateNotification?: (notif?: any) => void | Promise<void>;
@@ -56,6 +67,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   accounts,
   onAddAccount,
+  onUpdateAccountBalance,
+  onDeleteAccount,
   privacyMode,
   onTogglePrivacy,
   onSimulateNotification,
@@ -68,7 +81,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [name, setName] = useState('');
   const [bankCode, setBankCode] = useState('VCB');
   const [mask, setMask] = useState('');
-  const [balanceStr, setBalanceStr] = useState('');
+  const [newAccBalance, setNewAccBalance] = useState<number>(0);
+  const [editingAccId, setEditingAccId] = useState<string | null>(null);
+  const [editingAccBalance, setEditingAccBalance] = useState<number>(0);
+  const [confirmDeleteAcc, setConfirmDeleteAcc] = useState<BankAccount | null>(null);
 
   // Profile edit state
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -180,7 +196,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.2.0';
+  const CURRENT_VERSION = 'v1.2.1';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -188,8 +204,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.2.0',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.0/qltc-v1.2.0.apk',
+    tagName: 'v1.2.1',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -251,15 +267,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.1.2';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.2/qltc-v1.1.2.apk';
+      let latestTag = 'v1.2.1';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk';
       let releaseBody = '';
 
       try {
         const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
         if (res.ok) {
           const data = await res.json();
-          latestTag = data.tag_name || 'v1.0.3';
+          latestTag = data.tag_name || 'v1.2.1';
           const apkAsset = Array.isArray(data.assets)
             ? data.assets.find((a: any) => a.name.endsWith('.apk'))
             : null;
@@ -303,11 +319,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.1.2',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.2/qltc-v1.1.2.apk',
+        tagName: 'v1.2.1',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.1.2. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.1. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -322,7 +338,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.1.2/qltc-v1.1.2.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk');
       return;
     }
 
@@ -330,7 +346,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v1.0.2'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v1.2.1'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -429,20 +445,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleCreateAccount = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    const balance = parseInt(balanceStr.replace(/[^\d]/g, ''), 10) || 0;
 
     onAddAccount({
       id: `acc_${Date.now()}`,
       name: name.trim(),
       bankCode,
-      accountNumberMask: mask.slice(-4) || '9999',
-      balance,
-      type: 'bank'
+      accountNumberMask: bankCode === 'CASH' ? undefined : (mask.slice(-4) || '9999'),
+      balance: Math.round(newAccBalance || 0),
+      type: bankCode === 'CASH' ? 'cash' : 'bank'
     });
 
     setName('');
     setMask('');
-    setBalanceStr('');
+    setNewAccBalance(0);
     setShowAddForm(false);
   };
 
@@ -450,7 +465,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const data = {
       accounts,
       exportedAt: new Date().toISOString(),
-      app: 'QLTC'
+      app: 'QLTC',
+      version: CURRENT_VERSION
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -462,10 +478,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
+      <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <span className="text-base font-bold text-[#F2F5F5]">Tài khoản & Cài đặt</span>
+          <div>
+            <span className="text-base font-bold text-[#F2F5F5] block">Tài khoản & Cài đặt</span>
+            <span className="text-[11px] text-[#869699]">Phiên bản {CURRENT_VERSION}</span>
+          </div>
           <button
             onClick={onClose}
             className="w-8 h-8 rounded-full bg-[#232D30] text-[#97A8AB] flex items-center justify-center active:scale-90 transition-transform"
@@ -474,8 +493,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
 
-        {/* HỒ SƠ THÔNG TIN CÁ NHÂN */}
-        <div className="bg-gradient-to-br from-[#1E2729] to-[#151D1F] border border-[#8BA5AA]/25 rounded-2xl p-4 shadow-lg space-y-3">
+        {/* U-05: Thanh điều hướng 4 Tab gọn gàng */}
+        <div className="grid grid-cols-4 gap-1 p-1 bg-[#0E1314] border border-[#8BA5AA]/15 rounded-2xl">
+          {([
+            { id: 'profile', label: 'Cá nhân', icon: User },
+            { id: 'accounts', label: `Ví (${accounts.length})`, icon: Landmark },
+            { id: 'automation', label: 'Tự động', icon: Smartphone },
+            { id: 'system', label: 'Hệ thống', icon: Settings }
+          ] as const).map(t => {
+            const IconComp = t.icon;
+            const active = settingsTab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setSettingsTab(t.id)}
+                className={`py-2 px-1 rounded-xl text-[11px] font-semibold flex flex-col items-center justify-center gap-1 transition-all ${
+                  active
+                    ? 'bg-[#657D81] text-[#F2F5F5] shadow'
+                    : 'text-[#869699] hover:text-[#D5E1E3]'
+                }`}
+              >
+                <IconComp size={14} />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* TAB 1: HỒ SƠ THÔNG TIN CÁ NHÂN & QUYỀN RIÊNG TƯ */}
+        {settingsTab === 'profile' && (
+          <div className="space-y-3 animate-fade-in">
+            <div className="bg-gradient-to-br from-[#1E2729] to-[#151D1F] border border-[#8BA5AA]/25 rounded-2xl p-4 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               {/* Avatar circle */}
@@ -653,34 +702,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </form>
           )}
-        </div>
+            </div>
 
-        {/* Nút mở Thiết lập lại tài chính & Reset dữ liệu */}
-        <button
-          onClick={() => {
-            onClose();
-            onOpenResetModal();
-          }}
-          className="w-full p-3.5 rounded-2xl bg-gradient-to-r from-[#232E31] via-[#1E282A] to-[#1C2527] border border-[#8BA5AA]/25 flex items-center justify-between text-left active:scale-98 transition-transform shadow-md"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#657D81]/25 border border-[#8BA5AA]/30 flex items-center justify-center text-[#8CC7AE]">
-              <RotateCcw size={17} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-[#F2F5F5]">Thiết lập lại tài chính thực tế</div>
-              <div className="text-[10.5px] text-[#869699]">
-                Xóa giao dịch mẫu, chỉnh số dư các tài khoản & tài sản thực
-              </div>
-            </div>
+            {/* Tùy chọn Ẩn/Hiện số dư riêng tư */}
+            <button
+              type="button"
+              onClick={onTogglePrivacy}
+              className="w-full p-3.5 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center justify-between text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
+            >
+              <span className="flex items-center gap-2.5">
+                {privacyMode ? <EyeOff size={16} className="text-[#DEB48A]" /> : <Eye size={16} className="text-[#8CC7AE]" />}
+                <span>Chế độ ẩn số dư nhạy cảm</span>
+              </span>
+              <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${privacyMode ? 'bg-[#DEB48A]/20 text-[#DEB48A]' : 'bg-[#232E31] text-[#869699]'}`}>
+                {privacyMode ? 'Đang ẩn' : 'Đang hiện'}
+              </span>
+            </button>
           </div>
-          <span className="text-xs font-semibold text-[#8CC7AE] px-2.5 py-1 rounded-lg bg-[#8CC7AE]/10 border border-[#8CC7AE]/20">
-            Đặt lại ›
-          </span>
-        </button>
+        )}
 
-        {/* Android Notification Listener Service Status Card */}
-        <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-2.5">
+        {/* TAB 3: TỰ ĐỘNG ĐỌC THÔNG BÁO ANDROID */}
+        {settingsTab === 'automation' && (
+          <div className="space-y-3 animate-fade-in">
+            {/* Android Notification Listener Service Status Card */}
+            <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Smartphone size={16} className="text-[#8CC7AE]" />
@@ -777,10 +822,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               )}
             </div>
           )}
-        </div>
+            </div>
+          </div>
+        )}
 
-        {/* In-app Version Checker & Quick Update */}
-        <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-3">
+        {/* TAB 4: HỆ THỐNG, CẬP NHẬT APK & ĐẶT LẠI DỮ LIỆU */}
+        {settingsTab === 'system' && (
+          <div className="space-y-3 animate-fade-in">
+            {/* In-app Version Checker & Quick Update */}
+            <div className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3.5 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Sparkles size={16} className="text-[#D4A373]" />
@@ -926,113 +976,202 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </button>
             </div>
           )}
-        </div>
+            </div>
 
-        {/* Quick Options */}
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            onClick={onTogglePrivacy}
-            className="p-3 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center gap-2 text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
-          >
-            {privacyMode ? <EyeOff size={16} className="text-[#DEB48A]" /> : <Eye size={16} />}
-            {privacyMode ? 'Đang ẩn số dư' : 'Hiện số dư'}
-          </button>
-          <button
-            onClick={handleExportData}
-            className="p-3 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center gap-2 text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
-          >
-            <Download size={16} /> Sao lưu dữ liệu
-          </button>
-        </div>
-
-        {/* Bank Accounts Section */}
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider">
-              Tài khoản & Ví ngân hàng ({accounts.length})
-            </span>
+            {/* Sao lưu & Thiết lập lại tài chính */}
             <button
-              onClick={() => setShowAddForm(!showAddForm)}
-              className="text-xs font-semibold text-[#8CC7AE] flex items-center gap-1"
+              type="button"
+              onClick={handleExportData}
+              className="w-full p-3.5 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center justify-between text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
             >
-              <Plus size={14} /> Thêm tài khoản
+              <span className="flex items-center gap-2.5">
+                <Download size={16} className="text-[#8CC7AE]" />
+                <span>Sao lưu dữ liệu ra file JSON</span>
+              </span>
+              <span className="text-[11px] text-[#8CC7AE] font-semibold">Tải về ›</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenResetModal();
+              }}
+              className="w-full p-3.5 rounded-2xl bg-gradient-to-r from-[#232E31] via-[#1E282A] to-[#1C2527] border border-[#8BA5AA]/25 flex items-center justify-between text-left active:scale-98 transition-transform shadow-md"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-[#657D81]/25 border border-[#8BA5AA]/30 flex items-center justify-center text-[#8CC7AE]">
+                  <RotateCcw size={17} />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-[#F2F5F5]">Thiết lập lại tài chính thực tế</div>
+                  <div className="text-[10.5px] text-[#869699]">
+                    Xóa giao dịch mẫu, chỉnh số dư các tài khoản & tài sản thực
+                  </div>
+                </div>
+              </div>
+              <span className="text-xs font-semibold text-[#8CC7AE] px-2.5 py-1 rounded-lg bg-[#8CC7AE]/10 border border-[#8CC7AE]/20">
+                Đặt lại ›
+              </span>
             </button>
           </div>
+        )}
 
-          {showAddForm && (
-            <form onSubmit={handleCreateAccount} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3 mb-2 space-y-2">
-              <input
-                type="text"
-                placeholder="Tên tài khoản (VD: Techcombank, HDBank...)"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <select
-                  value={bankCode}
-                  onChange={(e) => setBankCode(e.target.value)}
-                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
-                >
-                  <option value="VCB">Vietcombank</option>
-                  <option value="TCB">Techcombank</option>
-                  <option value="HDBank">HDBank</option>
-                  <option value="MB">MB Bank</option>
-                  <option value="ACB">ACB</option>
-                  <option value="TPB">TPBank</option>
-                  <option value="VPB">VPBank</option>
-                  <option value="BIDV">BIDV</option>
-                  <option value="CASH">Tiền mặt</option>
-                </select>
+        {/* TAB 2: TÀI KHOẢN & VÍ NGÂN HÀNG */}
+        {settingsTab === 'accounts' && (
+          <div className="space-y-3 animate-fade-in">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider">
+                Tài khoản & Ví ngân hàng ({accounts.length})
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowAddForm(!showAddForm)}
+                className="px-2.5 py-1 rounded-xl bg-[#20292B] border border-[#8CC7AE]/30 text-xs font-semibold text-[#8CC7AE] flex items-center gap-1 active:scale-95"
+              >
+                <Plus size={14} /> {showAddForm ? 'Đóng' : 'Thêm tài khoản'}
+              </button>
+            </div>
+
+            {showAddForm && (
+              <form onSubmit={handleCreateAccount} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5">
                 <input
                   type="text"
-                  placeholder="4 số cuối (VD: 9737)"
-                  maxLength={4}
-                  value={mask}
-                  onChange={(e) => setMask(e.target.value)}
-                  className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
+                  placeholder="Tên tài khoản (VD: Techcombank, Ví tiền mặt...)"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
                 />
-              </div>
-              <input
-                type="text"
-                placeholder="Số dư ban đầu (₫)"
-                value={balanceStr}
-                onChange={(e) => setBalanceStr(e.target.value)}
-                className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="w-full py-2 rounded-xl bg-[#657D81] text-[#F2F5F5] text-xs font-semibold"
-              >
-                Lưu tài khoản
-              </button>
-            </form>
-          )}
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={bankCode}
+                    onChange={(e) => setBankCode(e.target.value)}
+                    className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
+                  >
+                    <option value="VCB">Vietcombank</option>
+                    <option value="TCB">Techcombank</option>
+                    <option value="HDBank">HDBank</option>
+                    <option value="MB">MB Bank</option>
+                    <option value="ACB">ACB</option>
+                    <option value="TPB">TPBank</option>
+                    <option value="VPB">VPBank</option>
+                    <option value="BIDV">BIDV</option>
+                    <option value="CASH">Tiền mặt</option>
+                  </select>
+                  <input
+                    type="text"
+                    placeholder="4 số cuối (VD: 9737)"
+                    maxLength={4}
+                    disabled={bankCode === 'CASH'}
+                    value={mask}
+                    onChange={(e) => setMask(e.target.value)}
+                    className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none disabled:opacity-40"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10.5px] text-[#869699] block mb-1">Số dư hiện tại (₫)</label>
+                  <CurrencyInput
+                    value={newAccBalance}
+                    onChange={setNewAccBalance}
+                    className="text-sm font-bold"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-98"
+                >
+                  Lưu tài khoản mới
+                </button>
+              </form>
+            )}
 
-          <div className="space-y-2">
-            {accounts.map((acc) => (
-              <div
-                key={acc.id}
-                className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 flex items-center justify-between"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-[#232E31] border border-[#8BA5AA]/18 flex items-center justify-center font-bold text-xs text-[#BFD0D3]">
-                    {acc.bankCode || 'CASH'}
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-[#F2F5F5]">{acc.name}</div>
-                    <div className="text-[10px] text-[#869699]">
-                      {acc.accountNumberMask ? `*${acc.accountNumberMask}` : 'Ví tiền mặt'}
+            <div className="space-y-2">
+              {accounts.length === 0 ? (
+                <div className="text-center py-6 text-xs text-[#869699] bg-[#1C2426]/60 rounded-2xl border border-dashed border-[#8BA5AA]/20">
+                  Chưa có tài khoản nào. Bấm <b>+ Thêm tài khoản</b> hoặc chờ thông báo ngân hàng tự khởi tạo.
+                </div>
+              ) : (
+                accounts.map((acc) => (
+                  <div
+                    key={acc.id}
+                    className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-lg bg-[#232E31] border border-[#8BA5AA]/18 flex items-center justify-center font-bold text-xs text-[#BFD0D3] shrink-0">
+                          {acc.bankCode || 'CASH'}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-[#F2F5F5] truncate">{acc.name}</div>
+                          <div className="text-[10px] text-[#869699]">
+                            {acc.accountNumberMask ? `*${acc.accountNumberMask}` : 'Ví tiền mặt'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="text-right num text-xs font-bold text-[#8CC7AE] mr-1">
+                          {privacyMode ? '•••••• ₫' : formatVND(acc.balance)}
+                        </div>
+                        {onUpdateAccountBalance && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (editingAccId === acc.id) {
+                                setEditingAccId(null);
+                              } else {
+                                setEditingAccId(acc.id);
+                                setEditingAccBalance(acc.balance);
+                              }
+                            }}
+                            className="p-1.5 rounded-lg bg-[#232E31] text-[#D5E1E3] hover:bg-[#2C383C]"
+                            title="Sửa số dư"
+                          >
+                            <Edit3 size={12} />
+                          </button>
+                        )}
+                        {onDeleteAccount && (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteAcc(acc)}
+                            className="p-1.5 rounded-lg bg-[#291B1D] text-[#E06D6D] hover:bg-[#382124]"
+                            title="Xóa tài khoản"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
                     </div>
+
+                    {editingAccId === acc.id && onUpdateAccountBalance && (
+                      <div className="pt-2 border-t border-[#8BA5AA]/15 flex items-center gap-2">
+                        <div className="flex-1">
+                          <CurrencyInput
+                            value={editingAccBalance}
+                            onChange={setEditingAccBalance}
+                            showQuickChips={false}
+                            autoFocus
+                            className="py-1.5 text-xs font-bold"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await onUpdateAccountBalance(acc.id, editingAccBalance);
+                            setEditingAccId(null);
+                          }}
+                          className="px-3 py-2 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
+                        >
+                          Lưu
+                        </button>
+                      </div>
+                    )}
                   </div>
-                </div>
-                <div className="text-right num text-xs font-semibold text-[#D5E1E3]">
-                  {privacyMode ? '•••••• ₫' : formatVND(acc.balance)}
-                </div>
-              </div>
-            ))}
+                ))
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Security badge */}
         <div className="flex items-center justify-center gap-1.5 text-[10.5px] text-[#869699] pt-2">
@@ -1040,6 +1179,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           Dữ liệu mã hóa · 100% riêng tư & An toàn tuyệt đối
         </div>
       </div>
+
+      {/* U-04: Xác nhận xóa tài khoản */}
+      <ConfirmSheet
+        isOpen={Boolean(confirmDeleteAcc)}
+        title="Xóa tài khoản / Ví"
+        description={`Anh có chắc muốn ẩn/xóa tài khoản "${confirmDeleteAcc?.name}" khỏi danh sách tài sản hiện có không?`}
+        confirmText="Xóa tài khoản"
+        isDanger
+        onConfirm={async () => {
+          if (confirmDeleteAcc && onDeleteAccount) {
+            await onDeleteAccount(confirmDeleteAcc.id);
+          }
+          setConfirmDeleteAcc(null);
+        }}
+        onCancel={() => setConfirmDeleteAcc(null)}
+      />
     </div>
   );
 };

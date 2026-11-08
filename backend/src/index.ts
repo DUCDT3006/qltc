@@ -242,6 +242,7 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'transactions', c: 'is_synthetic', type: 'INTEGER DEFAULT 0' },
       { t: 'transactions', c: 'time_source', type: 'TEXT' },
       { t: 'jars', c: 'is_default', type: 'INTEGER DEFAULT 0' },
+      { t: 'jars', c: 'is_active', type: 'INTEGER DEFAULT 1' },
       { t: 'holdings', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
       { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
       { t: 'income_sources', c: 'color', type: "TEXT DEFAULT '#657D81'" },
@@ -249,6 +250,7 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'income_sources', c: 'keywords', type: 'TEXT' },
       { t: 'planned_expenses', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
       { t: 'planned_expenses', c: 'note', type: 'TEXT' },
+      { t: 'plan_versions', c: 'revision', type: 'INTEGER DEFAULT 1' },
       { t: 'rules', c: 'category_name', type: "TEXT DEFAULT 'Chi tiêu'" },
       { t: 'rules', c: 'jar_code', type: "TEXT DEFAULT 'NEC'" },
       { t: 'rules', c: 'jar_id', type: 'TEXT' },
@@ -864,14 +866,36 @@ app.get('/api/transactions', async (c) => {
   `;
   const countStats = await db.prepare(countQuery).bind(...params).first<{ total_count: number; total_amount: number }>();
 
-  // If cursor provided
+  // If cursor provided (V2-14: Base64 an toàn không xung đột ký tự gạch dưới trong ID)
   const queryParams = [...params];
   const queryWhereClauses = [...whereClauses];
   if (cursor) {
-    const lastUnderscore = cursor.lastIndexOf('_');
-    if (lastUnderscore !== -1) {
-      const cursorOccurredAt = cursor.substring(0, lastUnderscore);
-      const cursorId = cursor.substring(lastUnderscore + 1);
+    let cursorOccurredAt: string | null = null;
+    let cursorId: string | null = null;
+
+    if (cursor.includes('#')) {
+      const parts = cursor.split('#');
+      cursorOccurredAt = parts[0];
+      cursorId = parts.slice(1).join('#');
+    } else {
+      try {
+        const decoded = atob(cursor);
+        if (decoded.includes('#')) {
+          const parts = decoded.split('#');
+          cursorOccurredAt = parts[0];
+          cursorId = parts.slice(1).join('#');
+        }
+      } catch {
+        // Hỗ trợ định dạng cũ nếu có
+        const lastUnder = cursor.lastIndexOf('_');
+        if (lastUnder !== -1) {
+          cursorOccurredAt = cursor.substring(0, lastUnder);
+          cursorId = cursor.substring(lastUnder + 1);
+        }
+      }
+    }
+
+    if (cursorOccurredAt && cursorId) {
       queryWhereClauses.push('(t.occurred_at < ? OR (t.occurred_at = ? AND t.id < ?))');
       queryParams.push(cursorOccurredAt, cursorOccurredAt, cursorId);
     }
@@ -907,7 +931,7 @@ app.get('/api/transactions', async (c) => {
   let items = results || [];
   if (items.length > limit) {
     const nextItem = items[limit - 1];
-    nextCursor = `${nextItem.occurred_at}_${nextItem.id}`;
+    nextCursor = btoa(`${nextItem.occurred_at}#${nextItem.id}`);
     items = items.slice(0, limit);
   }
 
@@ -1702,11 +1726,20 @@ app.get('/api/analytics/summary', async (c) => {
     });
   }
 
-  // 4. Lấy revision
-  const dataRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
-    .bind(userId).first<{ max_rev: number }>();
-  const planRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM plan_versions WHERE user_id = ?')
-    .bind(userId).first<{ max_rev: number }>();
+  // 4. Lấy revision an toàn
+  let dataRevision = 1;
+  try {
+    const dataRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
+      .bind(userId).first<{ max_rev: number }>();
+    dataRevision = dataRevRow?.max_rev || 1;
+  } catch {}
+
+  let planRevision = 1;
+  try {
+    const planRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM plan_versions WHERE user_id = ?')
+      .bind(userId).first<{ max_rev: number }>();
+    planRevision = planRevRow?.max_rev || 1;
+  } catch {}
 
   const totalIncomeVnd = totalStats?.total_income || 0;
   const totalExpenseVnd = totalStats?.total_expense || 0;
@@ -1718,8 +1751,8 @@ app.get('/api/analytics/summary', async (c) => {
       month: monthNum,
       quarter: quarterNum
     },
-    dataRevision: dataRevRow?.max_rev || 1,
-    planRevision: planRevRow?.max_rev || 1,
+    dataRevision,
+    planRevision,
     totalIncomeVnd,
     totalExpenseVnd,
     incomeBuckets,

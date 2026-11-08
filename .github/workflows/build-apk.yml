@@ -34,30 +34,32 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.3.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.4.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.3.apk
+          path: qltc-v1.2.4.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.3
-          name: "QLTC v1.2.3 - Xem Chi Tiết Khoản Thu Chi Khi Chạm Vào Hũ"
+          tag_name: v1.2.4
+          name: "QLTC v1.2.4 - Chọn Duyệt Bất Kỳ Khoản Thu Chi Nào"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.3 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.4 - Android APK
 
-            Phiên bản `v1.2.3` bổ sung tính năng xem chi tiết thu chi theo từng hũ:
-            - **Chi tiết thu chi từng hũ:** Chạm vào bất kỳ hũ nào (ở cả màn hình Ngân sách và Tổng quan) để xem ngay danh sách các khoản thu chi thực tế đã ghi nhận của hũ đó, tổng chi tiêu, hạn mức, số tiền còn lại và tỷ lệ đã dùng.
-            - **Bộ lọc linh hoạt:** Xem nhanh các giao dịch theo tháng này hoặc tất cả thời gian.
-            - **Tích hợp liền mạch:** Hỗ trợ nút ghi nhanh chi tiêu hoặc mở chỉnh sửa cấu hình hũ ngay trong modal chi tiết.
+            Phiên bản `v1.2.4` nâng cấp trải nghiệm Hộp thư Giao dịch (Duyệt Thu Chi):
+            - **Chọn duyệt bất kỳ khoản nào:** Người dùng không còn bị bó buộc phải duyệt lần lượt từ trên xuống dưới. Anh có thể chọn bất kỳ giao dịch nào đang chờ duyệt để xử lý trước.
+            - **Thanh chọn nhanh giao dịch (Quick Chips Bar):** Chạm vào bất kỳ chip giao dịch nào để đưa ngay lên thẻ chính xem chi tiết, đổi hũ hoặc vuốt duyệt.
+            - **Chế độ Danh sách (List View) song song với Thẻ vuốt (Card View):** Hiển thị toàn bộ các khoản chờ duyệt dạng danh sách card trực quan, có tìm kiếm, lọc theo loại (Chi/Thu/Chuyển khoản).
+            - **Duyệt nhanh 1 chạm (Quick Confirm):** Nút Duyệt (✓) trực tiếp trên từng khoản trong danh sách và hàng đợi, duyệt ngay theo đề xuất mà không cần chuyển màn hình.
+            - **Duyệt tất cả (Batch Confirm):** Hỗ trợ duyệt nhanh toàn bộ các giao dịch đang chờ chỉ với 1 lần xác nhận an toàn.
           files: |
-            qltc-v1.2.3.apk
+            qltc-v1.2.4.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

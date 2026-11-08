@@ -20,15 +20,23 @@ import {
   Camera,
   Mail,
   Phone,
+  Edit2,
   Edit3,
   Trash2,
   Landmark,
-  Settings
+  Settings,
+  QrCode,
+  Building2,
+  MapPin,
+  Check
 } from 'lucide-react';
 import { BankAccount, UserProfile } from '../types';
 import { formatVND } from '../utils/financeMath';
 import { CurrencyInput } from './CurrencyInput';
 import { ConfirmSheet } from './ConfirmSheet';
+import { BankPickerModal } from './BankPickerModal';
+import { AccountQrModal } from './AccountQrModal';
+import { findBankByCode, VietnamBank } from '../utils/vietnamBanks';
 
 interface RawLog {
   id: string;
@@ -46,6 +54,7 @@ interface SettingsModalProps {
   onClose: () => void;
   accounts: BankAccount[];
   onAddAccount: (acc: BankAccount) => void;
+  onUpdateAccount?: (acc: BankAccount) => Promise<void> | void;
   onUpdateAccountBalance?: (
     accountId: string,
     newBalance: number,
@@ -67,6 +76,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   accounts,
   onAddAccount,
+  onUpdateAccount,
   onUpdateAccountBalance,
   onDeleteAccount,
   privacyMode,
@@ -77,11 +87,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   userProfile,
   onUpdateUserProfile
 }) => {
+  // Account Form & Management State
   const [showAddForm, setShowAddForm] = useState(false);
-  const [name, setName] = useState('');
-  const [bankCode, setBankCode] = useState('VCB');
-  const [mask, setMask] = useState('');
-  const [newAccBalance, setNewAccBalance] = useState<number>(0);
+  const [editingAccount, setEditingAccount] = useState<BankAccount | null>(null);
+  const [isBankPickerOpen, setIsBankPickerOpen] = useState(false);
+  const [qrModalAccount, setQrModalAccount] = useState<BankAccount | null>(null);
+  const [copiedAccountId, setCopiedAccountId] = useState<string | null>(null);
+
+  // Form inputs
+  const [accName, setAccName] = useState('');
+  const [accBankCode, setAccBankCode] = useState('VCB');
+  const [accBankBin, setAccBankBin] = useState('970436');
+  const [accNumber, setAccNumber] = useState('');
+  const [accHolder, setAccHolder] = useState('');
+  const [accBranch, setAccBranch] = useState('');
+  const [accType, setAccType] = useState<BankAccount['type']>('bank');
+  const [accBalance, setAccBalance] = useState<number>(0);
+  const [accFormError, setAccFormError] = useState('');
+
   const [editingAccId, setEditingAccId] = useState<string | null>(null);
   const [editingAccBalance, setEditingAccBalance] = useState<number>(0);
   const [confirmDeleteAcc, setConfirmDeleteAcc] = useState<BankAccount | null>(null);
@@ -196,7 +219,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.2.4';
+  const CURRENT_VERSION = 'v1.2.5';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -204,8 +227,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.2.4',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk',
+    tagName: 'v1.2.5',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -267,15 +290,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.2.4';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk';
+      let latestTag = 'v1.2.5';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk';
       let releaseBody = '';
 
       try {
         const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
         if (res.ok) {
           const data = await res.json();
-          latestTag = data.tag_name || 'v1.2.4';
+          latestTag = data.tag_name || 'v1.2.5';
           const apkAsset = Array.isArray(data.assets)
             ? data.assets.find((a: any) => a.name.endsWith('.apk'))
             : null;
@@ -319,11 +342,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.2.4',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk',
+        tagName: 'v1.2.5',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.4. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.5. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -338,7 +361,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk');
       return;
     }
 
@@ -346,7 +369,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v1.2.4'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v1.2.5'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -442,23 +465,115 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleCreateAccount = (e: React.FormEvent) => {
+  const openCreateAccountForm = () => {
+    setEditingAccount(null);
+    setAccName('');
+    setAccBankCode('VCB');
+    setAccBankBin('970436');
+    setAccNumber('');
+    setAccHolder(userProfile?.name?.toUpperCase() || '');
+    setAccBranch('');
+    setAccType('bank');
+    setAccBalance(0);
+    setAccFormError('');
+    setShowAddForm(true);
+  };
+
+  const openEditAccountForm = (acc: BankAccount) => {
+    setEditingAccount(acc);
+    setAccName(acc.name);
+    setAccBankCode(acc.bankCode || 'VCB');
+    setAccBankBin(acc.bankBin || findBankByCode(acc.bankCode)?.bin || '970436');
+    setAccNumber(acc.accountNumber || (acc.accountNumberMask ? `*${acc.accountNumberMask}` : ''));
+    setAccHolder(acc.accountHolder || '');
+    setAccBranch(acc.branch || '');
+    setAccType(acc.type || 'bank');
+    setAccBalance(acc.balance || 0);
+    setAccFormError('');
+    setShowAddForm(true);
+  };
+
+  const handleSelectBank = (bank: VietnamBank) => {
+    setAccBankCode(bank.code);
+    setAccBankBin(bank.bin);
+    if (!accName.trim() || findBankByCode(accBankCode)?.shortName === accName.trim()) {
+      setAccName(bank.shortName);
+    }
+    if (bank.code === 'CASH') {
+      setAccType('cash');
+    } else if (['MOMO', 'ZALOPAY', 'VIETTELMONEY', 'VNPTMONEY'].includes(bank.code)) {
+      setAccType('ewallet');
+    } else {
+      setAccType('bank');
+    }
+  };
+
+  const handleSaveAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!accName.trim()) {
+      setAccFormError('Vui lòng nhập tên tài khoản / ví gợi nhớ');
+      return;
+    }
 
-    onAddAccount({
-      id: `acc_${Date.now()}`,
-      name: name.trim(),
-      bankCode,
-      accountNumberMask: bankCode === 'CASH' ? undefined : (mask.slice(-4) || '9999'),
-      balance: Math.round(newAccBalance || 0),
-      type: bankCode === 'CASH' ? 'cash' : 'bank'
-    });
+    const cleanNumber = accNumber.replace(/\D/g, '');
+    let cleanMask = cleanNumber ? cleanNumber.slice(-4) : undefined;
+    if (!cleanMask && editingAccount?.accountNumberMask) {
+      cleanMask = editingAccount.accountNumberMask;
+    }
 
-    setName('');
-    setMask('');
-    setNewAccBalance(0);
+    if (editingAccount) {
+      const updated: BankAccount = {
+        ...editingAccount,
+        name: accName.trim(),
+        bankCode: accType === 'cash' ? undefined : accBankCode,
+        bankBin: accType === 'cash' ? undefined : accBankBin,
+        accountNumber: accType === 'cash' ? undefined : (cleanNumber || undefined),
+        accountHolder: accType === 'cash' ? undefined : (accHolder.trim().toUpperCase() || undefined),
+        branch: accType === 'cash' ? undefined : (accBranch.trim() || undefined),
+        accountNumberMask: accType === 'cash' ? undefined : cleanMask,
+        balance: Math.round(accBalance || 0),
+        type: accType
+      };
+
+      if (onUpdateAccount) {
+        await onUpdateAccount(updated);
+      } else if (onUpdateAccountBalance) {
+        await onUpdateAccountBalance(updated.id, updated.balance, updated.name, updated.type);
+      }
+    } else {
+      const newAcc: BankAccount = {
+        id: `acc_${Date.now()}`,
+        name: accName.trim(),
+        bankCode: accType === 'cash' ? undefined : accBankCode,
+        bankBin: accType === 'cash' ? undefined : accBankBin,
+        accountNumber: accType === 'cash' ? undefined : (cleanNumber || undefined),
+        accountHolder: accType === 'cash' ? undefined : (accHolder.trim().toUpperCase() || undefined),
+        branch: accType === 'cash' ? undefined : (accBranch.trim() || undefined),
+        accountNumberMask: accType === 'cash' ? undefined : cleanMask,
+        balance: Math.round(accBalance || 0),
+        type: accType
+      };
+
+      onAddAccount(newAcc);
+    }
+
     setShowAddForm(false);
+    setEditingAccount(null);
+  };
+
+  const handleCopyAccount = (acc: BankAccount) => {
+    const bank = findBankByCode(acc.bankCode);
+    const num = acc.accountNumber || (acc.accountNumberMask ? `*${acc.accountNumberMask}` : '');
+    const lines = [
+      `🏦 Ngân hàng: ${bank?.shortName || acc.bankCode || 'Ngân hàng'}`,
+      num ? `💳 Số TK: ${num}` : '',
+      acc.accountHolder ? `👤 Chủ TK: ${acc.accountHolder.toUpperCase()}` : '',
+      acc.branch ? `📍 Chi nhánh: ${acc.branch}` : ''
+    ].filter(Boolean);
+
+    navigator.clipboard.writeText(lines.join('\n'));
+    setCopiedAccountId(acc.id);
+    setTimeout(() => setCopiedAccountId(null), 2500);
   };
 
   const handleExportData = () => {
@@ -1021,153 +1136,351 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {settingsTab === 'accounts' && (
           <div className="space-y-3 animate-fade-in">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider">
-                Tài khoản & Ví ngân hàng ({accounts.length})
-              </span>
+              <div>
+                <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block">
+                  Tài khoản & Ví ngân hàng ({accounts.length})
+                </span>
+                <span className="text-[10px] text-[#869699]">
+                  Hỗ trợ VietQR 24/7, sao chép STK và xuất mã QR chuyển khoản
+                </span>
+              </div>
               <button
                 type="button"
-                onClick={() => setShowAddForm(!showAddForm)}
-                className="px-2.5 py-1 rounded-xl bg-[#20292B] border border-[#8CC7AE]/30 text-xs font-semibold text-[#8CC7AE] flex items-center gap-1 active:scale-95"
+                onClick={() => {
+                  if (showAddForm) {
+                    setShowAddForm(false);
+                    setEditingAccount(null);
+                  } else {
+                    openCreateAccountForm();
+                  }
+                }}
+                className="px-2.5 py-1.5 rounded-xl bg-[#20292B] hover:bg-[#28383B] border border-[#8CC7AE]/30 text-xs font-semibold text-[#8CC7AE] flex items-center gap-1 active:scale-95 shadow-sm"
               >
-                <Plus size={14} /> {showAddForm ? 'Đóng' : 'Thêm tài khoản'}
+                <Plus size={14} /> {showAddForm ? 'Đóng form' : 'Thêm tài khoản'}
               </button>
             </div>
 
+            {/* FORM THÊM MỚI / CHỈNH SỬA TÀI KHOẢN ĐẦY ĐỦ THÔNG TIN */}
             {showAddForm && (
-              <form onSubmit={handleCreateAccount} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5">
-                <input
-                  type="text"
-                  placeholder="Tên tài khoản (VD: Techcombank, Ví tiền mặt...)"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <select
-                    value={bankCode}
-                    onChange={(e) => setBankCode(e.target.value)}
-                    className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]"
+              <form
+                onSubmit={handleSaveAccount}
+                className="bg-gradient-to-br from-[#202B2E] to-[#161F21] border border-[#8BA5AA]/25 rounded-3xl p-4 space-y-3 shadow-xl animate-fade-in"
+              >
+                <div className="flex items-center justify-between border-b border-[#8BA5AA]/15 pb-2">
+                  <span className="text-xs font-bold text-[#F2F5F5] flex items-center gap-1.5">
+                    <Building2 size={14} className="text-[#8CC7AE]" />
+                    {editingAccount ? 'Chỉnh sửa tài khoản ngân hàng' : 'Thêm tài khoản ngân hàng mới'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setEditingAccount(null);
+                    }}
+                    className="text-[#869699] hover:text-white text-xs"
                   >
-                    <option value="VCB">Vietcombank</option>
-                    <option value="TCB">Techcombank</option>
-                    <option value="HDBank">HDBank</option>
-                    <option value="MB">MB Bank</option>
-                    <option value="ACB">ACB</option>
-                    <option value="TPB">TPBank</option>
-                    <option value="VPB">VPBank</option>
-                    <option value="BIDV">BIDV</option>
-                    <option value="CASH">Tiền mặt</option>
-                  </select>
+                    Đóng ✕
+                  </button>
+                </div>
+
+                {accFormError && (
+                  <div className="p-2 rounded-xl bg-[#3B2022] border border-[#E06D6D]/40 text-[#E06D6D] text-xs">
+                    {accFormError}
+                  </div>
+                )}
+
+                {/* 1. CHỌN NGÂN HÀNG TỪ DANH SÁCH 76+ NGÂN HÀNG VIỆT NAM */}
+                <div>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Ngân hàng / Đơn vị cung cấp
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsBankPickerOpen(true)}
+                    className="w-full p-2.5 rounded-2xl bg-[#161C1E] border border-[#8BA5AA]/25 hover:border-[#8CC7AE]/50 flex items-center justify-between text-left transition-all active:scale-98"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 overflow-hidden shadow">
+                        {findBankByCode(accBankCode)?.logo ? (
+                          <img
+                            src={findBankByCode(accBankCode)?.logo}
+                            alt={accBankCode}
+                            className="w-full h-full object-contain"
+                          />
+                        ) : (
+                          <Building2 size={16} className="text-[#0E1314]" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-[#F2F5F5] flex items-center gap-1.5 truncate">
+                          <span>{findBankByCode(accBankCode)?.shortName || accBankCode}</span>
+                          <span className="text-[10px] font-mono text-[#869699] px-1 rounded bg-[#0E1314]">
+                            {accBankCode}
+                          </span>
+                        </div>
+                        <div className="text-[10.5px] text-[#869699] truncate">
+                          {findBankByCode(accBankCode)?.name || 'Chạm để tìm và đổi ngân hàng khác'}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-semibold text-[#8CC7AE] px-2.5 py-1 rounded-xl bg-[#8CC7AE]/10 border border-[#8CC7AE]/20 shrink-0">
+                      Đổi ngân hàng ▾
+                    </span>
+                  </button>
+                </div>
+
+                {/* 2. SỐ TÀI KHOẢN ĐẦY ĐỦ */}
+                <div>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Số tài khoản đầy đủ
+                  </label>
                   <input
                     type="text"
-                    placeholder="4 số cuối (VD: 9737)"
-                    maxLength={4}
-                    disabled={bankCode === 'CASH'}
-                    value={mask}
-                    onChange={(e) => setMask(e.target.value)}
-                    className="bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none disabled:opacity-40"
+                    inputMode="numeric"
+                    placeholder="VD: 19036888888888"
+                    value={accNumber}
+                    onChange={(e) => setAccNumber(e.target.value)}
+                    className="w-full bg-[#161C1E] border border-[#8BA5AA]/25 rounded-xl px-3.5 py-2 text-xs font-mono text-[#F2F5F5] placeholder-[#869699] focus:outline-none focus:border-[#8CC7AE]"
                   />
+                  <span className="text-[10px] text-[#869699] mt-0.5 block">
+                    Hệ thống sẽ dùng số tài khoản này để tự động tạo mã QR VietQR chuyển khoản nhanh.
+                  </span>
                 </div>
+
+                {/* 3. TÊN CHỦ TÀI KHOẢN & CHI NHÁNH */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                      Tên chủ tài khoản
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: DO TIEN DUC"
+                      value={accHolder}
+                      onChange={(e) => setAccHolder(e.target.value.toUpperCase())}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/25 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] placeholder-[#869699] focus:outline-none focus:border-[#8CC7AE] uppercase font-semibold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                      Chi nhánh (Không bắt buộc)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: Chi nhánh Ba Đình"
+                      value={accBranch}
+                      onChange={(e) => setAccBranch(e.target.value)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/25 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] placeholder-[#869699] focus:outline-none focus:border-[#8CC7AE]"
+                    />
+                  </div>
+                </div>
+
+                {/* 4. TÊN GỢI NHỚ VÀ LOẠI VÍ */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                      Tên gợi nhớ tài khoản / Ví
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: Techcombank chính, Ví tiền mặt..."
+                      value={accName}
+                      onChange={(e) => setAccName(e.target.value)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/25 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] placeholder-[#869699] focus:outline-none focus:border-[#8CC7AE]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                      Loại tài sản / Ví
+                    </label>
+                    <select
+                      value={accType}
+                      onChange={(e) => setAccType(e.target.value as any)}
+                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/25 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]"
+                    >
+                      <option value="bank" className="bg-[#161C1E] text-white">🏦 Tài khoản Ngân hàng</option>
+                      <option value="cash" className="bg-[#161C1E] text-white">💵 Ví Tiền mặt</option>
+                      <option value="ewallet" className="bg-[#161C1E] text-white">📱 Ví Điện tử (MoMo/ZaloPay)</option>
+                      <option value="savings" className="bg-[#161C1E] text-white">💰 Sổ Tiết kiệm</option>
+                      <option value="securities" className="bg-[#161C1E] text-white">📈 Tài khoản Chứng khoán</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* 5. SỐ DƯ HIỆN TẠI */}
                 <div>
-                  <label className="text-[10.5px] text-[#869699] block mb-1">Số dư hiện tại (₫)</label>
+                  <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                    Số dư hiện tại (₫)
+                  </label>
                   <CurrencyInput
-                    value={newAccBalance}
-                    onChange={setNewAccBalance}
+                    value={accBalance}
+                    onChange={setAccBalance}
                     className="text-sm font-bold"
                   />
                 </div>
-                <button
-                  type="submit"
-                  className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-98"
-                >
-                  Lưu tài khoản mới
-                </button>
+
+                {/* Cụm nút Lưu / Hủy */}
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setEditingAccount(null);
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-xs font-semibold text-[#97A8AB] active:scale-95"
+                  >
+                    Hủy
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-[#8CC7AE] hover:bg-[#9ED4BD] text-[#0E1314] text-xs font-bold shadow active:scale-98 transition-transform"
+                  >
+                    {editingAccount ? 'Lưu thay đổi' : 'Lưu tài khoản mới'}
+                  </button>
+                </div>
               </form>
             )}
 
-            <div className="space-y-2">
+            {/* DANH SÁCH TÀI KHOẢN ĐÃ SETUP */}
+            <div className="space-y-2.5">
               {accounts.length === 0 ? (
-                <div className="text-center py-6 text-xs text-[#869699] bg-[#1C2426]/60 rounded-2xl border border-dashed border-[#8BA5AA]/20">
-                  Chưa có tài khoản nào. Bấm <b>+ Thêm tài khoản</b> hoặc chờ thông báo ngân hàng tự khởi tạo.
+                <div className="text-center py-8 text-xs text-[#869699] bg-[#1C2426]/60 rounded-3xl border border-dashed border-[#8BA5AA]/20 p-4">
+                  Chưa có tài khoản nào. Bấm <b>+ Thêm tài khoản</b> để thiết lập ngân hàng của anh.
                 </div>
               ) : (
-                accounts.map((acc) => (
-                  <div
-                    key={acc.id}
-                    className="bg-[#1C2426] border border-[#8BA5AA]/12 rounded-2xl p-3 space-y-2"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-lg bg-[#232E31] border border-[#8BA5AA]/18 flex items-center justify-center font-bold text-xs text-[#BFD0D3] shrink-0">
-                          {acc.bankCode || 'CASH'}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-[#F2F5F5] truncate">{acc.name}</div>
-                          <div className="text-[10px] text-[#869699]">
-                            {acc.accountNumberMask ? `*${acc.accountNumberMask}` : 'Ví tiền mặt'}
+                accounts.map((acc) => {
+                  const bank = findBankByCode(acc.bankCode);
+                  const isCopied = copiedAccountId === acc.id;
+                  const displayNum = acc.accountNumber || (acc.accountNumberMask ? `*${acc.accountNumberMask}` : 'Ví tiền mặt');
+
+                  return (
+                    <div
+                      key={acc.id}
+                      className="bg-gradient-to-br from-[#20292B] to-[#172022] border border-[#8BA5AA]/20 rounded-2xl p-3.5 space-y-2.5 shadow-md"
+                    >
+                      {/* Dòng 1: Logo, Tên, Số TK và Số dư */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <div className="w-9 h-9 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 overflow-hidden shadow">
+                            {bank?.logo ? (
+                              <img
+                                src={bank.logo}
+                                alt={bank.shortName}
+                                className="w-full h-full object-contain"
+                              />
+                            ) : (
+                              <div className="w-full h-full bg-[#232E31] text-[#8CC7AE] font-bold text-xs flex items-center justify-center">
+                                {acc.bankCode || 'VÍ'}
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-bold text-[#F2F5F5] truncate flex items-center gap-1.5">
+                              <span>{acc.name}</span>
+                              {acc.bankCode && (
+                                <span className="text-[10px] font-mono px-1 rounded bg-[#0E1314] text-[#869699] border border-[#8BA5AA]/15">
+                                  {bank?.shortName || acc.bankCode}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-[#869699] font-mono mt-0.5 truncate flex items-center gap-1">
+                              <span>STK:</span>
+                              <span className="text-[#D5E1E3] font-semibold">{displayNum}</span>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <div className="text-right num text-xs font-bold text-[#8CC7AE] mr-1">
+                        {/* Số dư */}
+                        <div className="text-right num text-[13px] font-bold text-[#8CC7AE] shrink-0">
                           {privacyMode ? '•••••• ₫' : formatVND(acc.balance)}
                         </div>
-                        {onUpdateAccountBalance && (
+                      </div>
+
+                      {/* Dòng 2: Tên chủ tài khoản & Chi nhánh (nếu có) */}
+                      {(acc.accountHolder || acc.branch) && (
+                        <div className="bg-[#12191B]/70 rounded-xl px-2.5 py-1.5 text-[10.5px] text-[#869699] flex flex-wrap items-center gap-x-3 gap-y-1">
+                          {acc.accountHolder && (
+                            <span className="flex items-center gap-1">
+                              <User size={11} className="text-[#8CC7AE]" />
+                              <b className="text-[#F2F5F5] uppercase">{acc.accountHolder}</b>
+                            </span>
+                          )}
+                          {acc.branch && (
+                            <span className="flex items-center gap-1 truncate max-w-xs">
+                              <MapPin size={11} className="text-[#869699]" />
+                              <span>{acc.branch}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Dòng 3: Cụm nút tính năng: Copy STK, Mã QR VietQR, Sửa, Xóa */}
+                      <div className="flex items-center justify-between pt-1 border-t border-[#8BA5AA]/10">
+                        {/* Nút sao chép & Nút Mã QR */}
+                        <div className="flex items-center gap-1.5">
+                          {acc.type !== 'cash' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyAccount(acc)}
+                                className={`px-2.5 py-1 rounded-xl border text-[11px] font-semibold flex items-center gap-1 active:scale-95 transition-all ${
+                                  isCopied
+                                    ? 'bg-[#8CC7AE]/20 border-[#8CC7AE] text-[#8CC7AE]'
+                                    : 'bg-[#232D30] hover:bg-[#2C3B3F] border-[#8BA5AA]/20 text-[#D5E1E3]'
+                                }`}
+                                title="Sao chép số tài khoản & thông tin chuyển khoản"
+                              >
+                                {isCopied ? (
+                                  <>
+                                    <Check size={12} className="text-[#8CC7AE]" /> Đã chép
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy size={12} /> Sao chép STK
+                                  </>
+                                )}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setQrModalAccount(acc)}
+                                className="px-2.5 py-1 rounded-xl bg-[#8CC7AE]/15 hover:bg-[#8CC7AE]/25 border border-[#8CC7AE]/30 text-[11px] font-bold text-[#8CC7AE] flex items-center gap-1 active:scale-95 transition-all"
+                                title="Xem và tải mã QR VietQR chuyển khoản nhanh"
+                              >
+                                <QrCode size={12} /> Mã QR
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Cụm nút Sửa & Xóa */}
+                        <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            onClick={() => {
-                              if (editingAccId === acc.id) {
-                                setEditingAccId(null);
-                              } else {
-                                setEditingAccId(acc.id);
-                                setEditingAccBalance(acc.balance);
-                              }
-                            }}
-                            className="p-1.5 rounded-lg bg-[#232E31] text-[#D5E1E3] hover:bg-[#2C383C]"
-                            title="Sửa số dư"
+                            onClick={() => openEditAccountForm(acc)}
+                            className="p-1.5 rounded-lg bg-[#232E31] text-[#D5E1E3] hover:bg-[#2C383C] active:scale-90"
+                            title="Chỉnh sửa thông tin tài khoản"
                           >
-                            <Edit3 size={12} />
+                            <Edit2 size={13} />
                           </button>
-                        )}
-                        {onDeleteAccount && (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteAcc(acc)}
-                            className="p-1.5 rounded-lg bg-[#291B1D] text-[#E06D6D] hover:bg-[#382124]"
-                            title="Xóa tài khoản"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
+
+                          {onDeleteAccount && (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteAcc(acc)}
+                              className="p-1.5 rounded-lg bg-[#291B1D] text-[#E06D6D] hover:bg-[#382124] active:scale-90"
+                              title="Xóa tài khoản"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-
-                    {editingAccId === acc.id && onUpdateAccountBalance && (
-                      <div className="pt-2 border-t border-[#8BA5AA]/15 flex items-center gap-2">
-                        <div className="flex-1">
-                          <CurrencyInput
-                            value={editingAccBalance}
-                            onChange={setEditingAccBalance}
-                            showQuickChips={false}
-                            autoFocus
-                            className="py-1.5 text-xs font-bold"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await onUpdateAccountBalance(acc.id, editingAccBalance);
-                            setEditingAccId(null);
-                          }}
-                          className="px-3 py-2 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
-                        >
-                          Lưu
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -1194,6 +1507,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           setConfirmDeleteAcc(null);
         }}
         onCancel={() => setConfirmDeleteAcc(null)}
+      />
+
+      {/* Modal chọn ngân hàng Việt Nam */}
+      <BankPickerModal
+        isOpen={isBankPickerOpen}
+        onClose={() => setIsBankPickerOpen(false)}
+        selectedCode={accBankCode}
+        onSelect={handleSelectBank}
+      />
+
+      {/* Modal hiển thị mã VietQR chuyển khoản */}
+      <AccountQrModal
+        isOpen={Boolean(qrModalAccount)}
+        onClose={() => setQrModalAccount(null)}
+        account={qrModalAccount}
+        onEditAccount={(acc) => openEditAccountForm(acc)}
       />
     </div>
   );

@@ -102,7 +102,11 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'rules', c: 'category_name', type: "TEXT DEFAULT 'Chi tiêu'" },
       { t: 'rules', c: 'jar_code', type: "TEXT DEFAULT 'NEC'" },
       { t: 'rules', c: 'jar_id', type: 'TEXT' },
-      { t: 'rules', c: 'created_at', type: 'DATETIME' }
+      { t: 'rules', c: 'created_at', type: 'DATETIME' },
+      { t: 'accounts', c: 'account_number', type: 'TEXT' },
+      { t: 'accounts', c: 'account_holder', type: 'TEXT' },
+      { t: 'accounts', c: 'branch', type: 'TEXT' },
+      { t: 'accounts', c: 'bank_bin', type: 'TEXT' }
     ];
 
     for (const col of cols) {
@@ -146,7 +150,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.4', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.5', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -1214,11 +1218,31 @@ app.get('/api/accounts', async (c) => {
   const userId = 'user_default';
   const { results } = await db.prepare(`
     SELECT * FROM accounts WHERE user_id = ? AND is_active = 1 ORDER BY type, name
-  `).bind(userId).all();
-  return c.json({ accounts: results });
+  `).bind(userId).all<any>();
+
+  const formatted = (results || []).map(a => ({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    bankCode: a.bank_code,
+    accountNumberMask: a.account_number_mask,
+    accountNumber: a.account_number,
+    accountHolder: a.account_holder,
+    branch: a.branch,
+    bankBin: a.bank_bin,
+    balance: a.balance,
+    isActive: a.is_active,
+    bank_code: a.bank_code,
+    account_number_mask: a.account_number_mask,
+    account_number: a.account_number,
+    account_holder: a.account_holder,
+    bank_bin: a.bank_bin
+  }));
+
+  return c.json({ accounts: formatted });
 });
 
-// Thêm tài khoản mới (chấp nhận cả camelCase và snake_case)
+// Thêm tài khoản mới (chấp nhận cả camelCase và snake_case, lưu đầy đủ thông tin ngân hàng & QR)
 app.post('/api/accounts', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
@@ -1230,23 +1254,46 @@ app.post('/api/accounts', async (c) => {
     bankCode?: string;
     account_number_mask?: string;
     accountNumberMask?: string;
+    account_number?: string;
+    accountNumber?: string;
+    account_holder?: string;
+    accountHolder?: string;
+    branch?: string;
+    bank_bin?: string;
+    bankBin?: string;
     type?: string;
   }>();
 
   const id = body.id || `acc_${Date.now()}`;
   const bankCode = body.bankCode ?? body.bank_code ?? null;
-  const mask = body.accountNumberMask ?? body.account_number_mask ?? null;
+  const accountNumber = body.accountNumber ?? body.account_number ?? null;
+  const accountHolder = (body.accountHolder ?? body.account_holder ?? '') ? (body.accountHolder ?? body.account_holder) : null;
+  const branch = body.branch ?? null;
+  const bankBin = body.bankBin ?? body.bank_bin ?? null;
+
+  let mask = body.accountNumberMask ?? body.account_number_mask ?? null;
+  if (!mask && accountNumber && accountNumber.length >= 4) {
+    mask = accountNumber.slice(-4);
+  }
+
   const bal = Math.round(body.balance || 0);
 
   await db.prepare(`
-    INSERT INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO accounts (
+      id, user_id, name, type, bank_code, account_number_mask, balance,
+      account_number, account_holder, branch, bank_bin
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       type = excluded.type,
       bank_code = excluded.bank_code,
       account_number_mask = excluded.account_number_mask,
       balance = excluded.balance,
+      account_number = excluded.account_number,
+      account_holder = excluded.account_holder,
+      branch = excluded.branch,
+      bank_bin = excluded.bank_bin,
       updated_at = CURRENT_TIMESTAMP
   `).bind(
     id,
@@ -1255,13 +1302,17 @@ app.post('/api/accounts', async (c) => {
     body.type || 'bank',
     bankCode,
     mask,
-    bal
+    bal,
+    accountNumber,
+    accountHolder,
+    branch,
+    bankBin
   ).run();
 
   return c.json({ success: true, id, message: 'Đã thêm tài khoản mới' });
 });
 
-// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên... hỗ trợ camelCase & snake_case)
+// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên, thông tin STK, chủ TK, chi nhánh... hỗ trợ camelCase & snake_case)
 app.put('/api/accounts/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
@@ -1273,6 +1324,13 @@ app.put('/api/accounts/:id', async (c) => {
     bankCode?: string;
     account_number_mask?: string;
     accountNumberMask?: string;
+    account_number?: string;
+    accountNumber?: string;
+    account_holder?: string;
+    accountHolder?: string;
+    branch?: string;
+    bank_bin?: string;
+    bankBin?: string;
     type?: string;
   }>();
 
@@ -1292,11 +1350,39 @@ app.put('/api/accounts/:id', async (c) => {
     updates.push('bank_code = ?');
     params.push(bankCode);
   }
-  const mask = body.accountNumberMask !== undefined ? body.accountNumberMask : body.account_number_mask;
+
+  const accountNumber = body.accountNumber !== undefined ? body.accountNumber : body.account_number;
+  if (accountNumber !== undefined) {
+    updates.push('account_number = ?');
+    params.push(accountNumber);
+  }
+
+  const accountHolder = body.accountHolder !== undefined ? body.accountHolder : body.account_holder;
+  if (accountHolder !== undefined) {
+    updates.push('account_holder = ?');
+    params.push(accountHolder);
+  }
+
+  if (body.branch !== undefined) {
+    updates.push('branch = ?');
+    params.push(body.branch);
+  }
+
+  const bankBin = body.bankBin !== undefined ? body.bankBin : body.bank_bin;
+  if (bankBin !== undefined) {
+    updates.push('bank_bin = ?');
+    params.push(bankBin);
+  }
+
+  let mask = body.accountNumberMask !== undefined ? body.accountNumberMask : body.account_number_mask;
+  if (mask === undefined && accountNumber && accountNumber.length >= 4) {
+    mask = accountNumber.slice(-4);
+  }
   if (mask !== undefined) {
     updates.push('account_number_mask = ?');
     params.push(mask);
   }
+
   if (body.type !== undefined) {
     updates.push('type = ?');
     params.push(body.type);
@@ -1964,11 +2050,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.4'
+      'User-Agent': 'QLTC-Updater/1.2.5'
     }
   });
 
@@ -1982,7 +2068,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.4.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.5.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -1991,11 +2077,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.4)
+// Thông tin phiên bản & link cập nhật (v1.2.5)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.4',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk',
+    version: '1.2.5',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

@@ -4,7 +4,7 @@ export default {
 
     // Đường dẫn rút gọn tải file APK trực tiếp
     if (url.pathname === '/apk' || url.pathname === '/download') {
-      return Response.redirect('https://github.com/DUCDT3006/qltc/releases/download/v1.2.4/qltc-v1.2.4.apk', 302);
+      return Response.redirect('https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk', 302);
     }
 
     // Serve static assets or fallback to index.html for SPA routing

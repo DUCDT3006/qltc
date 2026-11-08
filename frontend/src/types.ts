@@ -18,6 +18,10 @@ export interface BankAccount {
   name: string;
   bankCode?: string;
   accountNumberMask?: string;
+  accountNumber?: string;
+  accountHolder?: string;
+  branch?: string;
+  bankBin?: string;
   balance: number;
   type: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings';
 }

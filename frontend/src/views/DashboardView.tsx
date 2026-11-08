@@ -5,6 +5,8 @@ import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from 
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { JarDetailModal } from '../components/JarDetailModal';
+import { AccountQrModal } from '../components/AccountQrModal';
+import { findBankByCode } from '../utils/vietnamBanks';
 import {
   RefreshCw,
   ChevronLeft,
@@ -19,7 +21,9 @@ import {
   X,
   ArrowUpRight,
   Scale,
-  Plus
+  Plus,
+  QrCode,
+  Copy
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -74,6 +78,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // Modal chỉnh nhanh số dư Ngân hàng / Tiền mặt ngay tại Tổng quan
   const [showQuickCashModal, setShowQuickCashModal] = useState(false);
   const [editingAccId, setEditingAccId] = useState<string>('');
+  const [qrModalAccount, setQrModalAccount] = useState<BankAccount | null>(null);
+  const [copiedAccId, setCopiedAccId] = useState<string | null>(null);
   const [editingBalance, setEditingBalance] = useState<number>(0);
   const [newCashName, setNewCashName] = useState('');
   const [newCashType, setNewCashType] = useState<'bank' | 'cash' | 'savings'>('cash');
@@ -831,54 +837,112 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             <div className="space-y-2">
-              {accounts.map(acc => (
-                <div
-                  key={acc.id}
-                  className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3 flex items-center justify-between gap-2"
-                >
-                  <div>
-                    <div className="text-xs font-bold text-[#F2F5F5]">{acc.name}</div>
-                    <div className="text-[10.5px] text-[#869699]">
-                      {acc.type === 'cash' ? '💵 Tiền mặt' : '🏦 Ngân hàng / Ví'}
-                    </div>
-                  </div>
+              {accounts.map(acc => {
+                const isCopied = copiedAccId === acc.id;
+                const bank = findBankByCode(acc.bankCode);
+                const displayNum = acc.accountNumber || (acc.accountNumberMask ? `*${acc.accountNumberMask}` : '');
 
-                  {editingAccId === acc.id ? (
-                    <form onSubmit={handleSaveQuickAccount} className="flex items-center gap-1.5">
-                      <div className="w-32">
-                        <CurrencyInput
-                          value={editingBalance}
-                          onChange={setEditingBalance}
-                          autoFocus
-                          showQuickChips={false}
-                          className="py-1.5 text-xs text-right"
-                        />
+                return (
+                  <div
+                    key={acc.id}
+                    className="bg-[#1C2426] border border-[#8BA5AA]/15 rounded-2xl p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold text-[#F2F5F5] truncate flex items-center gap-1.5">
+                          <span>{acc.name}</span>
+                          {bank && (
+                            <span className="text-[10px] font-mono px-1 rounded bg-[#0E1314] text-[#869699]">
+                              {bank.shortName}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10.5px] text-[#869699] flex items-center gap-1 mt-0.5">
+                          <span>{acc.type === 'cash' ? '💵 Tiền mặt' : '🏦 Ngân hàng / Ví'}</span>
+                          {displayNum && (
+                            <>
+                              <span>·</span>
+                              <span className="font-mono text-[#D5E1E3] font-semibold">{displayNum}</span>
+                            </>
+                          )}
+                        </div>
                       </div>
-                      <button
-                        type="submit"
-                        className="px-2.5 py-1.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
-                      >
-                        Lưu
-                      </button>
-                    </form>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="num text-xs font-bold text-[#8CC7AE]">
-                        {formatVND(acc.balance)}
-                      </span>
-                      <button
-                        onClick={() => {
-                          setEditingAccId(acc.id);
-                          setEditingBalance(acc.balance);
-                        }}
-                        className="px-2 py-1 rounded-lg bg-[#232D30] text-[11px] text-[#D5E1E3] hover:bg-[#2C3B3F]"
-                      >
-                        Sửa
-                      </button>
+
+                      {editingAccId === acc.id ? (
+                        <form onSubmit={handleSaveQuickAccount} className="flex items-center gap-1.5">
+                          <div className="w-28">
+                            <CurrencyInput
+                              value={editingBalance}
+                              onChange={setEditingBalance}
+                              autoFocus
+                              showQuickChips={false}
+                              className="py-1.5 text-xs text-right"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            className="px-2.5 py-1.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold"
+                          >
+                            Lưu
+                          </button>
+                        </form>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className="num text-xs font-bold text-[#8CC7AE]">
+                            {formatVND(acc.balance)}
+                          </span>
+                          <button
+                            onClick={() => {
+                              setEditingAccId(acc.id);
+                              setEditingBalance(acc.balance);
+                            }}
+                            className="px-2 py-1 rounded-lg bg-[#232D30] text-[11px] text-[#D5E1E3] hover:bg-[#2C3B3F]"
+                          >
+                            Sửa
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {/* Hàng nút Copy & Mã QR nếu là tài khoản ngân hàng */}
+                    {acc.type !== 'cash' && (
+                      <div className="flex items-center justify-between pt-1 border-t border-[#8BA5AA]/10 text-xs">
+                        <span className="text-[10.5px] text-[#869699] truncate">
+                          {acc.accountHolder ? `👤 ${acc.accountHolder}` : 'Chuyển khoản nhanh'}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const lines = [
+                                `🏦 Ngân hàng: ${bank?.shortName || acc.bankCode || 'Ngân hàng'}`,
+                                displayNum ? `💳 Số TK: ${displayNum}` : '',
+                                acc.accountHolder ? `👤 Chủ TK: ${acc.accountHolder.toUpperCase()}` : '',
+                                acc.branch ? `📍 Chi nhánh: ${acc.branch}` : ''
+                              ].filter(Boolean);
+                              navigator.clipboard.writeText(lines.join('\n'));
+                              setCopiedAccId(acc.id);
+                              setTimeout(() => setCopiedAccId(null), 2500);
+                            }}
+                            className="px-2 py-0.5 rounded-lg bg-[#232D30] hover:bg-[#2C3B3F] text-[10.5px] text-[#D5E1E3] flex items-center gap-1"
+                          >
+                            {isCopied ? <Check size={11} className="text-[#8CC7AE]" /> : <Copy size={11} />}
+                            {isCopied ? 'Đã chép' : 'Chép STK'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setQrModalAccount(acc)}
+                            className="px-2 py-0.5 rounded-lg bg-[#8CC7AE]/15 hover:bg-[#8CC7AE]/25 text-[10.5px] font-bold text-[#8CC7AE] border border-[#8CC7AE]/30 flex items-center gap-1"
+                          >
+                            <QrCode size={11} /> Mã QR
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {/* Thêm nhanh ví tiền mặt hoặc tài khoản ngân hàng */}
@@ -933,6 +997,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           setSelectedJarForDetail(null);
           onOpenBudget();
         }}
+      />
+
+      {/* Modal hiển thị mã QR VietQR chuyển khoản nhanh */}
+      <AccountQrModal
+        isOpen={Boolean(qrModalAccount)}
+        onClose={() => setQrModalAccount(null)}
+        account={qrModalAccount}
       />
     </div>
   );

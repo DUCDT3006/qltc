@@ -34,32 +34,32 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.4.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.5.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.4.apk
+          path: qltc-v1.2.5.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.4
-          name: "QLTC v1.2.4 - Chọn Duyệt Bất Kỳ Khoản Thu Chi Nào"
+          tag_name: v1.2.5
+          name: "QLTC v1.2.5 - Quản Lý Đầy Đủ Thông Tin Ngân Hàng, VietQR & Sao Chép STK Nhanh"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.4 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.5 - Android APK
 
-            Phiên bản `v1.2.4` nâng cấp trải nghiệm Hộp thư Giao dịch (Duyệt Thu Chi):
-            - **Chọn duyệt bất kỳ khoản nào:** Người dùng không còn bị bó buộc phải duyệt lần lượt từ trên xuống dưới. Anh có thể chọn bất kỳ giao dịch nào đang chờ duyệt để xử lý trước.
-            - **Thanh chọn nhanh giao dịch (Quick Chips Bar):** Chạm vào bất kỳ chip giao dịch nào để đưa ngay lên thẻ chính xem chi tiết, đổi hũ hoặc vuốt duyệt.
-            - **Chế độ Danh sách (List View) song song với Thẻ vuốt (Card View):** Hiển thị toàn bộ các khoản chờ duyệt dạng danh sách card trực quan, có tìm kiếm, lọc theo loại (Chi/Thu/Chuyển khoản).
-            - **Duyệt nhanh 1 chạm (Quick Confirm):** Nút Duyệt (✓) trực tiếp trên từng khoản trong danh sách và hàng đợi, duyệt ngay theo đề xuất mà không cần chuyển màn hình.
-            - **Duyệt tất cả (Batch Confirm):** Hỗ trợ duyệt nhanh toàn bộ các giao dịch đang chờ chỉ với 1 lần xác nhận an toàn.
+            Phiên bản `v1.2.5` nâng cấp toàn diện tính năng Quản lý Tài khoản & Ví ngân hàng:
+            - **Thông tin ngân hàng đầy đủ:** Thiết lập đầy đủ Tên chủ tài khoản, Số tài khoản ngân hàng, Chi nhánh, Tên ví gợi nhớ và Số dư thực tế.
+            - **Danh mục 76+ Ngân hàng Việt Nam chuẩn VietQR / Napas:** Tích hợp bộ chọn ngân hàng nhanh với tìm kiếm thông minh bằng chữ cái đầu (vcb, tcb, mb, hd, bidv...) hoặc tên đầy đủ, hiển thị logo chính hãng.
+            - **Tự động tạo mã QR chuyển khoản (VietQR / Napas 247):** Chạm vào nút "Mã QR" để xem và tải ảnh QR chuẩn ngân hàng, có tùy chọn nhập số tiền và lời nhắn chuyển khoản.
+            - **Sao chép tài khoản 1 chạm:** Nút "Sao chép STK" tiện lợi để gửi nhanh thông tin tài khoản qua Zalo, Messenger, SMS.
+            - **Chỉnh sửa linh hoạt:** Hỗ trợ xem và sửa lại toàn bộ thông tin tài khoản bất cứ lúc nào.
           files: |
-            qltc-v1.2.4.apk
+            qltc-v1.2.5.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

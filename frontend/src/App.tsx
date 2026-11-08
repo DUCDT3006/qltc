@@ -447,6 +447,22 @@ function AppContent() {
     }
   };
 
+  // Cập nhật toàn diện thông tin tài khoản (Tên, STK, Chủ TK, Chi nhánh, Số dư, Ngân hàng)
+  const handleUpdateAccount = async (updatedAcc: BankAccount) => {
+    const cleanAcc: BankAccount = { ...updatedAcc, balance: Math.round(updatedAcc.balance || 0) };
+    setAccounts(prev => prev.map(a => a.id === cleanAcc.id ? cleanAcc : a));
+    try {
+      await fetch(`${API_BASE}/accounts/${cleanAcc.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cleanAcc)
+      });
+      success(`Đã cập nhật thông tin "${cleanAcc.name}"`);
+    } catch (e) {
+      console.error('Lỗi cập nhật tài khoản:', e);
+    }
+  };
+
   // Thêm tài khoản mới
   const handleAddAccount = async (newAcc: BankAccount) => {
     const cleanAcc: BankAccount = { ...newAcc, balance: Math.round(newAcc.balance || 0) };
@@ -1340,6 +1356,7 @@ function AppContent() {
         onClose={() => setIsSettingsOpen(false)}
         accounts={accounts}
         onAddAccount={handleAddAccount}
+        onUpdateAccount={handleUpdateAccount}
         onUpdateAccountBalance={handleUpdateAccountBalance}
         onDeleteAccount={handleDeleteAccount}
         privacyMode={privacyMode}

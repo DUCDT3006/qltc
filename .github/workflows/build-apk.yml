@@ -34,31 +34,32 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.1.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.2.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.1.apk
+          path: qltc-v1.2.2.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.1
-          name: "QLTC v1.2.1 - Bản vá QA chuẩn hóa D1, đồng bộ số dư 2 chiều, bộ lọc kỳ UTC+7 & Cài đặt 4 Tab"
+          tag_name: v1.2.2
+          name: "QLTC v1.2.2 - Tách bạch Thêm Nguồn Thu & Khoản Thu Tiền Mặt, Sửa Lỗi Lưu Thu/Chi & Chống Trùng Tài Khoản HD"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.1 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.2 - Android APK
 
-            Bản vá QA toàn diện `v1.2.1` khắc phục triệt để các lỗi đồng bộ dữ liệu thực tế và nâng cấp độ ổn định sản phẩm:
-            - **Đồng bộ D1 & Chuẩn hóa trường dữ liệu:** Sửa lỗi tự động migrate cột DB (`rules`, `income_sources`, `planned_expenses`, `users`), đồng bộ đầy đủ Khoản thu/Chi dự kiến, Hồ sơ cá nhân & giá thị trường lên Cloudflare D1.
-            - **Chính xác tuyệt đối Bộ lọc Tháng / Quý / Năm (UTC+7):** Đọc chuẩn thời gian ISO (`occurredAtIso`) thay vì chuỗi hiển thị, đảm bảo mọi giao dịch thực tế đã duyệt đều được cộng chính xác vào Tổng quan & Ngân sách.
-            - **Sổ cái Số dư Tài khoản 2 chiều & Ghép cặp Chuyển nội bộ:** Hỗ trợ hoàn tác (Undo 5s) và xóa giao dịch tự động hoàn trả đúng số dư; chuyển khoản nội bộ chỉ hiện 1 thẻ duy nhất chuẩn chiều người gửi → người nhận.
-            - **Bảo vệ giá Vàng SJC / BĐS (`autoSync`) & Cài đặt 4 Tab:** Công tắc giữ giá tay không bị giá thế giới ghi đè; hộp thoại Cài đặt phân tách 4 tab gọn gàng (`Cá nhân`, `Ví`, `Tự động`, `Hệ thống`).
+            Phiên bản nâng cấp `v1.2.2` hoàn thiện trải nghiệm ghi chép và phân bổ nguồn thu theo đúng yêu cầu thực tế:
+            - **Tách bạch 2 tính năng rõ ràng:**
+              + **"Thêm nguồn thu"**: Thiết lập Nguồn thu nhập dự kiến (Lương, Thưởng, Cho thuê nhà...) để tự động chia hũ % và làm đích liên kết phân bổ tiền từ các tài khoản ngân hàng / tiền mặt.
+              + **"Thêm khoản thu"**: Dùng chuyên biệt để ghi chép Khoản thu thực tế bằng TIỀN MẶT vào Ví, có sẵn lựa chọn phân bổ vào nguồn thu đã tạo và xem tiến độ đạt được.
+            - **Khắc phục triệt để lỗi không ấn được nút Lưu:** Bổ sung thông báo kiểm tra dữ liệu trực quan màu đỏ khi thiếu tên hoặc số tiền <= 0 cho cả form Khoản thu, Nguồn thu và Khoản chi; gắn sự kiện click trực tiếp đảm bảo bấm ăn 100% trên mọi dòng điện thoại Android.
+            - **Xử lý tài khoản HD Bank và Chống trùng tài khoản:** Gộp tài khoản HD Bank chuẩn mã `HDBank` và số đuôi `9737`, nâng cấp cơ chế nhận diện thông minh theo tên tài khoản người dùng đã đặt, không bao giờ tự ý tạo thêm tài khoản trùng lặp khi nhận thông báo biến động số dư.
           files: |
-            qltc-v1.2.1.apk
+            qltc-v1.2.2.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

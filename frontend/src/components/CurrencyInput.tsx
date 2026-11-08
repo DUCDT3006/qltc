@@ -101,6 +101,20 @@ export const CurrencyInput: React.FC<CurrencyInputProps> = ({
           >
             +5tr
           </button>
+          <button
+            type="button"
+            onClick={() => handleAdd(10000000)}
+            className="px-2 py-0.5 rounded-lg bg-[#1C2426] hover:bg-[#232D30] text-[#D5E1E3] text-[10.5px] font-medium border border-[#8BA5AA]/15 active:scale-95 shrink-0"
+          >
+            +10tr
+          </button>
+          <button
+            type="button"
+            onClick={() => handleAdd(20000000)}
+            className="px-2 py-0.5 rounded-lg bg-[#1C2426] hover:bg-[#232D30] text-[#D5E1E3] text-[10.5px] font-medium border border-[#8BA5AA]/15 active:scale-95 shrink-0"
+          >
+            +20tr
+          </button>
           {value > 0 && (
             <button
               type="button"

@@ -1280,6 +1280,7 @@ function AppContent() {
             incomeSources={incomeSources}
             plannedExpenses={plannedExpenses}
             confirmedTransactions={confirmedTransactions}
+            accounts={accounts}
             onAddIncomeSource={handleAddIncomeSource}
             onUpdateIncomeSource={handleUpdateIncomeSource}
             onDeleteIncomeSource={handleDeleteIncomeSource}
@@ -1291,6 +1292,7 @@ function AppContent() {
             onBatchUpdateJarsPercent={handleBatchUpdateJarsPercent}
             onDeleteJar={handleDeleteJar}
             onAutoAllocateJars={handleAutoAllocateJars}
+            onAddTransaction={handleAddTransaction}
             onOpenQuickAddIncome={() => {
               setQuickAddInitialType('income');
               setIsQuickAddOpen(true);

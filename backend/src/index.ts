@@ -146,7 +146,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.1', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.2', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -257,12 +257,41 @@ app.post('/api/notifications/ingest', async (c) => {
     return c.json({ success: true, duplicate: true, message: 'Giao dịch đã được ghi nhận trước đó', txnId: existing.id });
   }
 
-  // 4. Tìm tài khoản khớp số đuôi hoặc mã ngân hàng (nếu chưa có thì tự động tạo mới)
+  // 4. Tìm tài khoản khớp số đuôi hoặc mã ngân hàng
   let account = await db.prepare(`
-    SELECT id, balance FROM accounts
+    SELECT id, balance, name, bank_code, account_number_mask FROM accounts
     WHERE user_id = ? AND (bank_code = ? OR account_number_mask = ?) AND is_active = 1
     LIMIT 1
-  `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string; balance: number }>();
+  `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string; balance: number; name: string; bank_code: string | null; account_number_mask: string | null }>();
+
+  // Nếu chưa tìm thấy theo bank_code hoặc mask, tìm kiếm thông minh theo tên tài khoản người dùng đã tạo (tránh tạo tài khoản trùng)
+  if (!account) {
+    const cleanBank = (parsed.bankCode || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const { results: existingAccounts } = await db.prepare(`
+      SELECT id, balance, name, bank_code, account_number_mask FROM accounts
+      WHERE user_id = ? AND is_active = 1
+    `).bind(userId).all<{ id: string; balance: number; name: string; bank_code: string | null; account_number_mask: string | null }>();
+
+    for (const a of (existingAccounts || [])) {
+      const cleanName = (a.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const isMatch =
+        cleanName.includes(cleanBank) ||
+        cleanBank.includes(cleanName) ||
+        (cleanBank.startsWith('hd') && cleanName.startsWith('hd')) ||
+        (cleanBank.startsWith('tcb') && cleanName.includes('tech')) ||
+        (cleanBank.startsWith('tp') && cleanName.startsWith('tp')) ||
+        (cleanBank.startsWith('mb') && cleanName.startsWith('mb')) ||
+        (cleanBank.startsWith('vcb') && cleanName.includes('vietcom'));
+
+      if (isMatch) {
+        account = a;
+        // Tự động bổ sung bank_code và số đuôi cho tài khoản hiện có của người dùng
+        await db.prepare('UPDATE accounts SET bank_code = ?, account_number_mask = COALESCE(account_number_mask, ?) WHERE id = ?')
+          .bind(parsed.bankCode, parsed.accountMask, a.id).run();
+        break;
+      }
+    }
+  }
 
   let accountId: string;
   if (account) {
@@ -270,7 +299,7 @@ app.post('/api/notifications/ingest', async (c) => {
     // L-01: KHÔNG sửa accounts.balance khi giao dịch đang ở trạng thái pending!
     // Số dư chỉ được cập nhật khi người dùng bấm Duyệt (confirmed).
   } else {
-    // Tự động thêm tài khoản ngân hàng mới vào danh sách tài khoản (khởi tạo số dư trước biến động để khi duyệt không bị cộng/trừ trùng)
+    // Chỉ tự tạo tài khoản mới nếu thực sự chưa có tài khoản nào của ngân hàng này
     accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
     const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
     const initialBal = parsed.balanceAfter && parsed.balanceAfter > 0
@@ -1935,11 +1964,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.2/qltc-v1.2.2.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.1'
+      'User-Agent': 'QLTC-Updater/1.2.2'
     }
   });
 
@@ -1947,13 +1976,13 @@ app.get('/api/download-apk', async (c) => {
     return c.text('Không thể tải file APK từ GitHub', 502);
   }
 
-  const contentLength = response.headers.get('content-length') || '5632640';
+  const contentLength = response.headers.get('content-length') || '5634256';
 
   return new Response(response.body, {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.1.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.2.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -1962,11 +1991,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.1)
+// Thông tin phiên bản & link cập nhật (v1.2.2)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.1',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.1/qltc-v1.2.1.apk',
+    version: '1.2.2',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.2/qltc-v1.2.2.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

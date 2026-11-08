@@ -10,6 +10,8 @@ interface QuickAddModalProps {
   incomeSources?: IncomeSource[];
   accounts: BankAccount[];
   initialType?: 'expense' | 'income' | 'transfer';
+  initialJarId?: string;
+  initialIncomeSourceId?: string;
   onAddTransaction: (txn: {
     type: 'income' | 'expense' | 'transfer';
     amount: number;
@@ -28,6 +30,8 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
   incomeSources = [],
   accounts,
   initialType = 'expense',
+  initialJarId,
+  initialIncomeSourceId,
   onAddTransaction
 }) => {
   const [type, setType] = useState<'expense' | 'income' | 'transfer'>(initialType);
@@ -39,13 +43,23 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
   const [toAccountId, setToAccountId] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
 
-  // Đồng bộ type, hũ mặc định (isDefault) và tài khoản khi mở modal hoặc khi dữ liệu từ D1 tải xong
+  // V2-20: Khởi tạo form sạch và áp dụng đúng preset mỗi lần mở mới
   useEffect(() => {
     if (isOpen) {
       setType(initialType);
+      setAmount(0);
+      setDescription('');
       setErrorMsg('');
+      if (initialJarId && jars.some(j => j.id === initialJarId)) {
+        setSelectedJarId(initialJarId);
+      }
+      if (initialIncomeSourceId !== undefined) {
+        setSelectedIncomeSourceId(initialIncomeSourceId || '');
+      } else {
+        setSelectedIncomeSourceId('');
+      }
     }
-  }, [isOpen, initialType]);
+  }, [isOpen, initialType, initialJarId, initialIncomeSourceId, jars]);
 
   useEffect(() => {
     if (!selectedJarId || !jars.some(j => j.id === selectedJarId)) {

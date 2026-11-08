@@ -1,24 +1,59 @@
+// Bank Notification Parser V2
+// Tuân thủ đầy đủ đặc tả V2-04 và V2-05
+
 export interface ParsedBankNotification {
   bankCode: string;
   accountMask: string;
   type: 'income' | 'expense';
   amount: number; // Số tiền nguyên VND
   balanceAfter?: number;
-  occurredAt: string; // ISO string
+  occurredAt: string; // ISO UTC string
   description: string;
   externalRef?: string;
   rawText: string;
+  parserVersion: 'v2';
+  parseStatus: 'success' | 'ambiguous' | 'failed';
+  reasonCode?: string;
 }
 
-// Hàm làm sạch chuỗi số tiền Việt Nam (ví dụ: "85,000", "25.000.000", "85000VND", "150,000.00")
+// Chuẩn hóa Unicode: dấu trừ Unicode U+2212 (MINUS SIGN) thành ASCII hyphen '-', khoảng trắng không ngắt
+export function normalizeNotificationText(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/\u2212/g, '-') // Unicode minus sign
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ') // Non-breaking spaces
+    .trim();
+}
+
+// Lọc bỏ OTP khỏi văn bản (tránh lưu OTP vào DB và log)
+export function redactOtp(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/(?:OTP|mã xác nhận|ma xac nhan|ma xac thuc|mã kích hoạt|ma kich hoat)[\s:]*([0-9A-Za-z]{4,8})/gi, '[OTP_REDACTED]')
+    .replace(/\b\d{6}\b(?=.*(?:OTP|xác nhận|xac nhan|kich hoat))/gi, '[OTP_REDACTED]');
+}
+
+// Kiểm tra có phải tin nhắn chứa mã OTP không
+export function isOtpNotification(text: string): boolean {
+  return /OTP|mã xác nhận|ma xac nhan|ma xac thuc|mã kích hoạt|ma kich hoat|ma OTP/i.test(text);
+}
+
+// Làm sạch và chuyển chuỗi tiền VND thành số nguyên an toàn
 export function parseVndAmount(raw: string): number {
   if (!raw) return 0;
   let str = raw.trim();
-  // Loại bỏ phần thập phân .00 hoặc ,00 ở cuối chuỗi tiền tệ (tránh nhân 100 lần thành 15.000.000 ₫)
-  str = str.replace(/([,\d]+)\.\d{1,2}$/, '$1').replace(/([.\d]+),\d{1,2}$/, '$1');
+
+  // Loại bỏ phần thập phân .00 hoặc ,00 ở cuối chuỗi tiền tệ (tránh nhân 100 lần)
+  str = str.replace(/([,\d]+)\.00(?!\d)/, '$1').replace(/([.\d]+),00(?!\d)/, '$1');
+  // Nếu có dạng 150,000.50 -> làm tròn
+  str = str.replace(/([,\d]+)\.\d{1,2}(?!\d)/, '$1').replace(/([.\d]+),\d{1,2}(?!\d)/, '$1');
+
   const cleaned = str.replace(/[^\d]/g, '');
   const parsed = parseInt(cleaned, 10);
-  return isNaN(parsed) ? 0 : parsed;
+  if (isNaN(parsed) || !isFinite(parsed) || parsed < 0 || parsed > Number.MAX_SAFE_INTEGER) {
+    return 0;
+  }
+  return parsed;
 }
 
 // Nhận diện mã ngân hàng từ packageName hoặc text
@@ -54,18 +89,18 @@ export function parseBankNotification(
   packageName: string,
   title: string,
   body: string,
-  occurredAtOverride?: string
+  occurredAtOverride?: string | number
 ): ParsedBankNotification | null {
-  const cleanTitle = (title || '').trim();
-  const cleanBody = (body || '').trim();
-  const fullText = `${cleanTitle}\n${cleanBody}`;
+  const normTitle = normalizeNotificationText(title);
+  const normBody = normalizeNotificationText(body);
+  const fullText = `${normTitle}\n${normBody}`.trim();
 
-  // 1. Tuyệt đối loại bỏ tin nhắn OTP / mã xác nhận bảo mật
-  if (/OTP|mã xác nhận|ma xac nhan|ma xac thuc|mã kích hoạt|ma kich hoat/i.test(fullText)) {
+  // 1. Tuyệt đối loại bỏ tin nhắn OTP / mã xác nhận bảo mật (V2-04)
+  if (isOtpNotification(fullText)) {
     return null;
   }
 
-  // 2. Lọc bỏ cuộc gọi / tin nhắn cá nhân hoặc Zalo không phải ngân hàng
+  // 2. Lọc bỏ cuộc gọi / tin nhắn cá nhân Zalo không phải biến động tài chính
   if (packageName.includes('zing.zalo')) {
     if (!/số dư|so du|giao dịch|giao dich|thanh toán|thanh toan|biến động|bien dong/i.test(fullText)) {
       return null;
@@ -76,15 +111,20 @@ export function parseBankNotification(
   const hasAccountOrBalance =
     /(?:TK|Tài khoản|Tai khoan|Số TK|So TK|Thẻ|The)\s*[:.\s#]*[0-9*xX.]/i.test(fullText) ||
     /(?:Số dư|So du|SD|Kha dung|Khả dụng)/i.test(fullText) ||
-    /(?:biến động|bien dong|giao dịch|giao dich|GD:)/i.test(fullText);
+    /(?:biến động|bien dong|giao dịch|giao dich|GD:)/i.test(fullText) ||
+    /(?:thanh toán|chuyển tiền|nhận tiền|cộng tiền|trừ tiền)/i.test(fullText);
 
-  // 4. Trích xuất loại giao dịch (income / expense) và số tiền
+  // Chuẩn bị trường ngày: Tạm thời thay thế các ngày định dạng DD-MM-YYYY hoặc DD/MM/YYYY
+  // để tránh việc dấu '-' trong ngày (ví dụ 08-11-2026) bị bắt nhầm thành dấu trừ chi tiêu!
+  const textWithoutDateHyphens = fullText.replace(/(\d{1,2})-(\d{1,2})-(\d{2,4})/g, '$1_$2_$3');
+
   let type: 'income' | 'expense' | null = null;
   let amount = 0;
+  const foundCandidates: { type: 'income' | 'expense'; amount: number }[] = [];
 
   // Cách A: Tìm trong Title trước (ví dụ Techcombank: "+ VND 65,000" hoặc "- VND 150,000")
-  const titleSignMatch = cleanTitle.match(/([+-])\s*(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i) ||
-                         cleanTitle.match(/(?:VND|VNĐ|đ|d)?\s*([\d.,]+)\s*([+-])/i);
+  const titleSignMatch = normTitle.match(/([+-])\s*(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i) ||
+                         normTitle.match(/(?:VND|VNĐ|đ|d)?\s*([\d.,]+)\s*([+-])/i);
   if (titleSignMatch) {
     const sign = titleSignMatch[1] === '+' || titleSignMatch[2] === '+' ? '+' : '-';
     const rawAmt = titleSignMatch[1] === '+' || titleSignMatch[1] === '-' ? titleSignMatch[2] : titleSignMatch[1];
@@ -92,18 +132,20 @@ export function parseBankNotification(
     if (parsed > 0) {
       type = sign === '+' ? 'income' : 'expense';
       amount = parsed;
+      foundCandidates.push({ type, amount });
     }
   }
 
-  // Cách B: Tìm dòng độc lập có dấu +/- (ví dụ HDBank: dòng riêng "-2,000,000" hoặc "-65,000")
+  // Cách B: Tìm dòng độc lập có dấu +/- (ví dụ HDBank: "-2,000,000" hoặc "+500,000")
   if (!type || amount <= 0) {
-    const lines = cleanBody.split('\n');
+    const lines = normBody.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
       const standaloneMatch = trimmed.match(/^([+-])\s*(?:VND|VNĐ|đ|d)?\s*([\d.,]+)\s*(?:VND|VNĐ|đ|d)?$/i);
       if (standaloneMatch) {
         type = standaloneMatch[1] === '+' ? 'income' : 'expense';
         amount = parseVndAmount(standaloneMatch[2]);
+        foundCandidates.push({ type, amount });
         break;
       }
     }
@@ -112,7 +154,7 @@ export function parseBankNotification(
   // Cách C: Tìm dấu [+-] đi kèm số tiền trong toàn bộ body (loại trừ phần Số dư / SD)
   if (!type || amount <= 0) {
     // Tách bỏ phần Số dư phía sau nếu có để tránh nhầm
-    const withoutBal = cleanBody.replace(/(?:Số dư|So du|SD|Kha dung|Khả dụng)[:\s]+(?:VND|VNĐ|đ|d)?\s*[\d.,]+/gi, '');
+    const withoutBal = textWithoutDateHyphens.replace(/(?:Số dư|So du|SD|Kha dung|Khả dụng)[:\s]+(?:VND|VNĐ|đ|d)?\s*[\d.,]+/gi, '');
     const bodySignMatch = withoutBal.match(/([+-])\s*(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i) ||
                           withoutBal.match(/([\d.,]+)\s*(?:VND|VNĐ|đ|d)?\s*([+-])/i);
     if (bodySignMatch) {
@@ -122,26 +164,29 @@ export function parseBankNotification(
       if (parsed > 0) {
         type = sign === '+' ? 'income' : 'expense';
         amount = parsed;
+        foundCandidates.push({ type, amount });
       }
     }
   }
 
-  // Cách D: Tìm qua từ khóa tiếng Việt (nhận tiền, cộng tiền, thanh toán, trừ tiền)
+  // Cách D: Tìm qua từ khóa tiếng Việt (nhận tiền, cộng tiền, thanh toán, trừ tiền - hỗ trợ cả không dấu)
   if (!type || amount <= 0) {
-    const incomeWord = fullText.match(/(?:nhận|cộng|nạp|chuyển đến|hoàn tiền|tăng)\s+(?:thành công\s+)?(?:tiền\s+)?(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i);
+    const incomeWord = textWithoutDateHyphens.match(/(?:nhận|nhan|cộng|cong|nạp|nap|chuyển đến|chuyen den|hoàn tiền|hoan tien|tăng|tang)\s+(?:thành công\s+|thanh cong\s+)?(?:tiền\s+|tien\s+)?(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i);
     if (incomeWord) {
       const parsed = parseVndAmount(incomeWord[1]);
       if (parsed > 0) {
         type = 'income';
         amount = parsed;
+        foundCandidates.push({ type, amount });
       }
     } else {
-      const expenseWord = fullText.match(/(?:chi|thanh toán|trừ|chuyển đi|rút|phí)\s+(?:thành công\s+)?(?:tiền\s+)?(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i);
+      const expenseWord = textWithoutDateHyphens.match(/(?:chi|thanh toán|thanh toan|trừ|tru|chuyển đi|chuyen di|rút|rut|phí|phi)\s+(?:thành công\s+|thanh cong\s+)?(?:tiền\s+|tien\s+)?(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i);
       if (expenseWord) {
         const parsed = parseVndAmount(expenseWord[1]);
         if (parsed > 0) {
           type = 'expense';
           amount = parsed;
+          foundCandidates.push({ type, amount });
         }
       }
     }
@@ -167,24 +212,27 @@ export function parseBankNotification(
     }
   }
 
-  // 7. Trích xuất số dư sau biến động (balanceAfter)
+  // 7. Trích xuất số dư sau biến động (balanceAfter).
+  // ĐẶC TẢ V2-04: Nhận balanceAfter = 0 (số dư = 0 là giá trị hợp lệ!)
   let balanceAfter: number | undefined;
   const balMatch = fullText.match(/(?:Số dư|So du|SD|Kha dung|Khả dụng|Số dư khả dụng)\s*[:.\s]*(?:VND|VNĐ|đ|d)?\s*([\d.,]+)/i);
   if (balMatch) {
-    const b = parseVndAmount(balMatch[1]);
-    if (b > 0) balanceAfter = b;
+    const rawBal = balMatch[1].trim();
+    if (rawBal === '0' || rawBal === '0.00' || rawBal === '0,00') {
+      balanceAfter = 0;
+    } else {
+      const b = parseVndAmount(rawBal);
+      if (b >= 0) balanceAfter = b;
+    }
   }
 
   // 8. Trích xuất nội dung / mô tả giao dịch (description)
   let description = '';
-
-  // Ưu tiên dòng có tiền tố ND / Nội dung / Ref / Lý do (tránh nhầm chữ ND trong VND)
   const ndPrefixMatch = fullText.match(/(?:^|\n|\s)(?:Nội dung|Noi dung|Ref|Lý do|Ly do|(?<!V)ND)[:.\s]+(.*)$/im);
   if (ndPrefixMatch && ndPrefixMatch[1].trim().length > 0) {
     description = ndPrefixMatch[1].trim();
   } else {
-    // Nếu không có tiền tố ND, tìm dòng văn bản trong body (ví dụ Techcombank: dòng 3 là nội dung)
-    const lines = cleanBody.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const lines = normBody.split('\n').map(l => l.trim()).filter(l => l.length > 0);
     for (const line of lines) {
       const isAccountLine = /^(?:Tài khoản|Tai khoan|Số TK|So TK|TK|Thẻ|The)/i.test(line);
       const isBalanceLine = /^(?:Số dư|So du|SD|Kha dung|Khả dụng)/i.test(line);
@@ -199,8 +247,8 @@ export function parseBankNotification(
   }
 
   if (!description) {
-    description = cleanTitle && !cleanTitle.includes('+') && !cleanTitle.includes('-')
-      ? cleanTitle
+    description = normTitle && !normTitle.includes('+') && !normTitle.includes('-')
+      ? normTitle
       : `Giao dịch ${bankCode} *${accountMask}`;
   }
 
@@ -208,15 +256,39 @@ export function parseBankNotification(
   const extRefMatch = fullText.match(/(?:Ref|ID|Mã GD|Ma GD)[:.\s]*([a-zA-Z0-9.*]+)/i);
   const externalRef = extRefMatch ? extRefMatch[1] : undefined;
 
+  // Chuẩn hóa thời gian occurredAt (V2-05)
+  let finalOccurredAt = new Date().toISOString();
+  if (occurredAtOverride) {
+    if (typeof occurredAtOverride === 'number') {
+      // Milliseconds epoch từ Android
+      finalOccurredAt = new Date(occurredAtOverride).toISOString();
+    } else if (typeof occurredAtOverride === 'string') {
+      const parsedNum = Number(occurredAtOverride);
+      if (!isNaN(parsedNum) && parsedNum > 100000000000) {
+        finalOccurredAt = new Date(parsedNum).toISOString();
+      } else {
+        const d = new Date(occurredAtOverride);
+        if (!isNaN(d.getTime())) {
+          finalOccurredAt = d.toISOString();
+        }
+      }
+    }
+  }
+
+  // Tránh lưu OTP vào rawText
+  const redactedRaw = redactOtp(fullText);
+
   return {
     bankCode,
     accountMask,
     type,
     amount,
     balanceAfter,
-    occurredAt: occurredAtOverride || new Date().toISOString(),
-    description,
+    occurredAt: finalOccurredAt,
+    description: redactOtp(description),
     externalRef,
-    rawText: fullText
+    rawText: redactedRaw,
+    parserVersion: 'v2',
+    parseStatus: 'success'
   };
 }

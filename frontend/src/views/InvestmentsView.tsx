@@ -240,13 +240,25 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           <span className="text-lg text-[#95B0B4] font-normal">₫</span>
         </div>
 
-        <div className="flex items-center justify-between text-xs mt-2">
-          <span className={`num font-semibold ${profit >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
-            {profit >= 0 ? '▲ +' : '▼ −'}{formatVND(Math.abs(profit))} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(1)}%)
-          </span>
-          <span className="text-[#869699] num text-[11px]">
-            Giá vốn: {formatVND(totalCost)}
-          </span>
+        <div className="flex flex-col gap-1 text-xs mt-2.5 pt-2.5 border-t border-[#8BA5AA]/15">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-[#869699]">
+              Lãi/lỗ chưa thực hiện theo giá vốn:
+            </span>
+            <span className={`num font-semibold ${totalCost <= 0 ? 'text-[#869699]' : profit >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
+              {totalCost <= 0 ? (
+                'Chưa có giá vốn'
+              ) : (
+                <>
+                  {profit >= 0 ? '▲ +' : '▼ −'}{formatVND(Math.abs(profit))} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(1)}%)
+                </>
+              )}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-[#869699]">
+            <span>Tổng giá vốn ban đầu:</span>
+            <span className="num text-[#D5E1E3] font-medium">{totalCost > 0 ? formatVND(totalCost) : 'Chưa nhập'}</span>
+          </div>
         </div>
 
         {/* Thanh phân bổ tài sản thực tế */}
@@ -295,7 +307,8 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
         ) : (
           filteredHoldings.map((h) => {
             const val = h.quantity * h.currentPrice;
-            const p = h.avgCost > 0 ? ((h.currentPrice - h.avgCost) / h.avgCost) * 100 : 0;
+            const hasCost = h.avgCost > 0;
+            const p = hasCost ? ((h.currentPrice - h.avgCost) / h.avgCost) * 100 : 0;
             const isUp = p >= 0;
 
             return (
@@ -334,8 +347,8 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                   <div className="text-[13.5px] font-bold text-[#F2F5F5]">
                     {formatVND(val)}
                   </div>
-                  <div className={`text-[11px] font-medium ${isUp ? 'text-[#8CC7AE]' : 'text-[#D98A8A]'}`}>
-                    {isUp ? '+' : ''}{p.toFixed(1)}%
+                  <div className={`text-[11px] font-medium ${!hasCost ? 'text-[#869699]' : isUp ? 'text-[#8CC7AE]' : 'text-[#D98A8A]'}`}>
+                    {!hasCost ? 'Chưa có giá vốn' : `${isUp ? '+' : ''}${p.toFixed(1)}%`}
                   </div>
                 </div>
               </div>

@@ -73,9 +73,10 @@ export interface PeriodTargetSpec {
 // Kiểm tra giao dịch có nằm trong tháng, quý, hoặc năm đang chọn (tính theo giờ Việt Nam UTC+7)
 export function isTxnInPeriod(
   isoDate: string | undefined,
-  periodType: 'month' | 'quarter' | 'year',
+  periodType: 'month' | 'quarter' | 'year' | 'all',
   offsetOrTarget: number | Date | PeriodTargetSpec = 0
 ): boolean {
+  if (periodType === 'all') return true;
   const parsed = parseIsoOrSqliteUtc(isoDate);
   if (!parsed) return false;
 

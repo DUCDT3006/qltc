@@ -42,7 +42,8 @@ interface BudgetViewProps {
   onBatchUpdateJarsPercent?: (updates: Array<{ id: string; targetPercent: number; monthlyLimit: number }>) => Promise<void>;
   onDeleteJar: (jarId: string) => Promise<void>;
   onAutoAllocateJars: (totalIncome: number) => Promise<void>;
-  onOpenQuickAddIncome?: () => void;
+  onOpenQuickAddIncome?: (sourceId?: string) => void;
+  onOpenQuickAddExpense?: (jarId?: string) => void;
   onAddTransaction?: (txn: {
     type: 'income' | 'expense' | 'transfer';
     amount: number;
@@ -76,6 +77,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   onDeleteJar,
   onAutoAllocateJars,
   onOpenQuickAddIncome,
+  onOpenQuickAddExpense,
   onAddTransaction
 }) => {
   const [subTab, setSubTab] = useState<'planned' | 'actual'>('planned');
@@ -182,7 +184,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       .reduce((sum, t) => sum + t.amount, 0);
   });
 
-  const totalActualSpent = jarActualSpent.reduce((sum, val) => sum + val, 0);
+  // V2-13: Tổng chi thực tế bao gồm toàn bộ confirmed expenses trong kỳ (kể cả khoản chưa gắn hũ)
+  const totalActualSpent = actualExpenseTxns.reduce((sum, t) => sum + t.amount, 0);
   const actualJarPercentages = computeExact100Percentages(jarActualSpent);
   const totalActualPercentSum = actualJarPercentages.reduce((s, p) => s + p, 0);
   const remainingPlanned = totalLimit - totalActualSpent;
@@ -2004,8 +2007,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         }}
         onQuickAddExpense={(jarId) => {
           setSelectedJarForDetail(null);
-          if (onOpenQuickAddIncome) {
-            onOpenQuickAddIncome();
+          if (onOpenQuickAddExpense) {
+            onOpenQuickAddExpense(jarId);
           }
         }}
       />

@@ -15,17 +15,11 @@ interface DonutChartProps {
 export const DonutChart: React.FC<DonutChartProps> = ({
   segments,
   centerLabel = 'Tài sản',
-  centerValue = '100%'
+  centerValue = '0%'
 }) => {
-  const defaultSegments: Segment[] = [
-    { label: 'Cổ phiếu', percent: 45, color: '#B8CDD0' },
-    { label: 'Quỹ CCQ', percent: 30, color: '#859FA4' },
-    { label: 'Crypto', percent: 15, color: '#657D81' },
-    { label: 'Vàng', percent: 10, color: '#3F5154' }
-  ];
-
-  const activeSegments = segments && segments.length > 0 ? segments : defaultSegments;
-  // Chu vi hình tròn r = 15.9155 là đúng bằng 100
+  // V2-24: Không dùng danh mục mẫu ảo nếu người dùng chưa có tài sản
+  const hasData = segments && segments.length > 0 && segments.some(s => s.percent > 0);
+  const activeSegments = hasData ? segments! : [];
   const circumference = 100;
   let accumulated = 0;
 

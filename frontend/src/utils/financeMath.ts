@@ -4,6 +4,18 @@ export function formatVND(amount: number): string {
   return new Intl.NumberFormat('vi-VN').format(Math.round(amount)) + ' ₫';
 }
 
+// Định dạng tiền tệ có hỗ trợ chế độ riêng tư (Privacy Mode - V2-23)
+export function formatPrivacyVND(amount: number, isPrivacy = false): string {
+  if (isPrivacy) return '•••••• ₫';
+  return formatVND(amount);
+}
+
+// Định dạng số có che riêng tư cho số lượng hoặc giá trị khác
+export function formatPrivacyText(text: string | number, isPrivacy = false): string {
+  if (isPrivacy) return '••••••';
+  return String(text);
+}
+
 export const RECURRENCE_PRESETS = [
   { value: 'Hàng tháng', label: 'Hàng tháng', divisor: 1, hint: 'Nhận đều mỗi tháng' },
   { value: 'Hàng quý', label: 'Hàng quý (3 tháng/lần)', divisor: 3, hint: 'Tự động chia 3 cho hàng tháng' },
@@ -32,7 +44,31 @@ export function normalizeToMonthlyAmount(amount?: number, recurrence?: string): 
   return Math.round(amount);
 }
 
-// Phương pháp Số Dư Lớn Nhất (Largest Remainder Method) đảm bảo tổng các tỷ lệ % luôn đúng bằng 100%
+// Phân bổ số tiền VND chính xác từng đồng theo tỷ trọng (Largest Remainder Method - V2-17)
+export function allocateVndExact(totalVnd: number, weights: (number | { weight: number })[]): number[] {
+  if (weights.length === 0) return [];
+  const numWeights = weights.map(w => (typeof w === 'number' ? w : w.weight));
+  if (totalVnd <= 0) return numWeights.map(() => 0);
+
+  const totalWeight = numWeights.reduce((s, w) => s + Math.max(0, w), 0);
+  if (totalWeight <= 0) return numWeights.map(() => 0);
+
+  const rawShares = numWeights.map(w => (totalVnd * Math.max(0, w)) / totalWeight);
+  const floors = rawShares.map(s => Math.floor(s));
+  const remainders = rawShares.map((s, idx) => ({ remainder: s - floors[idx], idx }));
+
+  let floorSum = floors.reduce((s, f) => s + f, 0);
+  let diff = totalVnd - floorSum;
+
+  remainders.sort((a, b) => b.remainder - a.remainder);
+
+  for (let i = 0; i < diff; i++) {
+    const targetIdx = remainders[i % remainders.length].idx;
+    floors[targetIdx] += 1;
+  }
+
+  return floors;
+}
 export function computeExact100Percentages(values: number[]): number[] {
   const sum = values.reduce((s, v) => s + (v > 0 ? v : 0), 0);
   if (sum <= 0) {

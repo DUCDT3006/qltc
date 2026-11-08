@@ -2,8 +2,10 @@
   "name": "qltc-backend",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "test": "npx tsx --test tests/v2_suite.test.ts",
     "deploy": "wrangler deploy",
     "d1:init": "wrangler d1 execute qltc-db --local --file=./schema.sql",
     "d1:init:prod": "wrangler d1 execute qltc-db --remote --file=./schema.sql"

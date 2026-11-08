@@ -21,6 +21,11 @@ interface IncomeSourceDetailModalProps {
   isUnassigned?: boolean;
   transactions: Transaction[];
   privacyMode?: boolean;
+  periodLabel?: string;
+  periodMode?: 'month' | 'quarter' | 'year' | 'all';
+  periodYear?: number;
+  periodMonth?: number;
+  periodQuarter?: number;
   onEditSource?: (source: IncomeSource) => void;
   onQuickAddIncome?: (sourceId?: string) => void;
 }
@@ -32,13 +37,22 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
   isUnassigned = false,
   transactions,
   privacyMode = false,
+  periodLabel = 'Tháng này',
+  periodMode = 'month',
+  periodYear,
+  periodMonth,
+  periodQuarter,
   onEditSource,
   onQuickAddIncome
 }) => {
-  const [filterPeriod, setFilterPeriod] = useState<'month' | 'all'>('month');
+  const [filterPeriod, setFilterPeriod] = useState<'period' | 'all'>('period');
   const nowVN = useMemo(() => getVietnamDate(), []);
 
-  // Tất cả các giao dịch của nguồn thu này (không lọc theo kỳ)
+  const activeYear = periodYear || nowVN.getFullYear();
+  const activeMonth = periodMonth || (nowVN.getMonth() + 1);
+  const activeQuarter = periodQuarter || (Math.floor((activeMonth - 1) / 3) + 1);
+
+  // V2-12: Tất cả các giao dịch của nguồn thu này (khớp duy nhất theo ID hoặc unassigned, TUYỆT ĐỐI không dò tên)
   const allSourceTransactions = useMemo(() => {
     if (!incomeSource && !isUnassigned) return [];
 
@@ -50,30 +64,23 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
         return !t.incomeSourceId;
       }
 
-      if (t.incomeSourceId) {
-        return t.incomeSourceId === incomeSource!.id;
-      }
-
-      // Fallback khớp theo tên danh mục nếu chưa có incomeSourceId
-      const catLower = (t.suggestedCategory || '').toLowerCase();
-      const descLower = (t.description || '').toLowerCase();
-      const nameLower = incomeSource!.name.toLowerCase();
-      return catLower === nameLower || catLower.includes(nameLower) || descLower.includes(nameLower);
+      return t.incomeSourceId === incomeSource!.id;
     });
   }, [incomeSource, isUnassigned, transactions]);
 
-  // Các giao dịch theo kỳ đang chọn (tháng này hoặc tất cả)
+  // Các giao dịch theo kỳ đang chọn (kỳ hiện tại hoặc tất cả)
   const sourceTransactions = useMemo(() => {
     return allSourceTransactions.filter(t => {
-      if (filterPeriod === 'month') {
-        return isTxnInPeriod(t.occurredAtIso || t.occurredAt, 'month', {
-          year: nowVN.getFullYear(),
-          month: nowVN.getMonth() + 1
+      if (filterPeriod === 'period') {
+        return isTxnInPeriod(t.occurredAtIso || t.occurredAt, periodMode, {
+          year: activeYear,
+          month: activeMonth,
+          quarter: activeQuarter
         });
       }
       return true;
     });
-  }, [allSourceTransactions, filterPeriod, nowVN]);
+  }, [allSourceTransactions, filterPeriod, periodMode, activeYear, activeMonth, activeQuarter]);
 
   if (!isOpen || (!incomeSource && !isUnassigned)) return null;
 
@@ -83,7 +90,9 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
     ? normalizeToMonthlyAmount(incomeSource.expectedAmount, incomeSource.recurrence)
     : 0;
 
-  const hasExpected = monthlyExpected > 0;
+  // V2-15: Khi xem "Tất cả thời gian", ẩn KPI tháng; với kỳ hữu hạn, tính chuẩn
+  const isAllTime = filterPeriod === 'all';
+  const hasExpected = !isAllTime && monthlyExpected > 0;
   const pctAchieved = hasExpected ? Math.round((totalActual / monthlyExpected) * 100) : 0;
   const isTargetAchieved = pctAchieved >= 100;
 
@@ -157,7 +166,7 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-[#869699] font-medium flex items-center gap-1">
               <DollarSign size={12} className="text-[#8CC7AE]" />
-              {filterPeriod === 'month' ? `Đã thực thu Tháng ${nowVN.getMonth() + 1}` : 'Tổng đã thực thu'}
+              {filterPeriod === 'period' ? `Đã thực thu (${periodLabel})` : 'Tổng đã thực thu'}
             </span>
             {hasExpected ? (
               <span
@@ -211,18 +220,18 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
 
         {/* Thanh công cụ: Bộ lọc kỳ & Nút Thêm thu tiền */}
         <div className="flex items-center justify-between pb-2">
-          {/* Bộ lọc kỳ */}
+          {/* Bộ lọc kỳ (V2-15: Kế thừa chuẩn xác từ màn hình cha) */}
           <div className="flex items-center gap-1 bg-[#12181A] p-0.5 rounded-xl border border-[#8BA5AA]/15">
             <button
               type="button"
-              onClick={() => setFilterPeriod('month')}
+              onClick={() => setFilterPeriod('period')}
               className={`px-2.5 py-1 rounded-lg text-[10.5px] font-semibold transition-colors ${
-                filterPeriod === 'month'
+                filterPeriod === 'period'
                   ? 'bg-[#657D81] text-[#F2F5F5]'
                   : 'text-[#869699] hover:text-[#D5E1E3]'
               }`}
             >
-              Tháng {nowVN.getMonth() + 1}
+              {periodLabel}
             </button>
             <button
               type="button"
@@ -306,7 +315,7 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
                 <Receipt size={18} />
               </div>
               <div className="text-xs text-[#869699]">
-                Chưa có giao dịch thu nào được ghi nhận cho <b>{displayName}</b> {filterPeriod === 'month' ? 'trong tháng này' : ''}.
+                Chưa có giao dịch thu nào được ghi nhận cho <b>{displayName}</b> {filterPeriod === 'period' ? `trong ${periodLabel}` : ''}.
               </div>
               {onQuickAddIncome && (
                 <button

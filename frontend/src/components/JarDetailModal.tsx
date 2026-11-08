@@ -22,6 +22,11 @@ interface JarDetailModalProps {
   jar: Jar | null;
   transactions: Transaction[];
   privacyMode?: boolean;
+  periodLabel?: string;
+  periodMode?: 'month' | 'quarter' | 'year' | 'all';
+  periodYear?: number;
+  periodMonth?: number;
+  periodQuarter?: number;
   onEditJar?: (jar: Jar) => void;
   onQuickAddExpense?: (jarId: string) => void;
 }
@@ -32,47 +37,55 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
   jar,
   transactions,
   privacyMode = false,
+  periodLabel = 'Tháng này',
+  periodMode = 'month',
+  periodYear,
+  periodMonth,
+  periodQuarter,
   onEditJar,
   onQuickAddExpense
 }) => {
-  const [filterPeriod, setFilterPeriod] = useState<'month' | 'all'>('month');
+  const [filterPeriod, setFilterPeriod] = useState<'period' | 'all'>('period');
 
   const nowVN = useMemo(() => getVietnamDate(), []);
+  const activeYear = periodYear || nowVN.getFullYear();
+  const activeMonth = periodMonth || (nowVN.getMonth() + 1);
+  const activeQuarter = periodQuarter || (Math.floor((activeMonth - 1) / 3) + 1);
 
-  // Lọc các giao dịch chi tiêu thuộc hũ này
-  const jarTransactions = useMemo(() => {
+  // Tất cả các giao dịch của hũ này
+  const allJarTransactions = useMemo(() => {
     if (!jar) return [];
-
     return transactions.filter(t => {
-      // 1. Chỉ các khoản chi tiêu (expense) mới thuộc hũ chi tiêu!
       if (t.type !== 'expense') return false;
-
-      // 2. Không hiển thị các chân phụ đã ẩn
       if (t.status === 'paired_hidden') return false;
+      return t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code;
+    });
+  }, [jar, transactions]);
 
-      // 3. Khớp chính xác theo jarId hoặc theo suggestedJarCode
-      const isMatchJar = t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code;
-      if (!isMatchJar) return false;
-
-      if (filterPeriod === 'month') {
-        return isTxnInPeriod(t.occurredAtIso || t.occurredAt, 'month', {
-          year: nowVN.getFullYear(),
-          month: nowVN.getMonth() + 1
+  // Lọc các giao dịch chi tiêu theo kỳ đang chọn
+  const jarTransactions = useMemo(() => {
+    return allJarTransactions.filter(t => {
+      if (filterPeriod === 'period') {
+        return isTxnInPeriod(t.occurredAtIso || t.occurredAt, periodMode, {
+          year: activeYear,
+          month: activeMonth,
+          quarter: activeQuarter
         });
       }
       return true;
     });
-  }, [jar, transactions, filterPeriod, nowVN]);
+  }, [allJarTransactions, filterPeriod, periodMode, activeYear, activeMonth, activeQuarter]);
 
   if (!isOpen || !jar) return null;
 
   // Tính tổng chi tiêu của hũ
   const totalExpense = jarTransactions.reduce((s, t) => s + t.amount, 0);
 
-  const remaining = jar.monthlyLimit - totalExpense;
-  const pctUsed = jar.monthlyLimit > 0
-    ? Math.round((totalExpense / jar.monthlyLimit) * 100)
-    : 0;
+  // V2-15: Khi xem "Tất cả thời gian", ẩn hạn mức tháng và KPI tháng
+  const isAllTime = filterPeriod === 'all';
+  const hasLimit = !isAllTime && jar.monthlyLimit > 0;
+  const remaining = hasLimit ? jar.monthlyLimit - totalExpense : 0;
+  const pctUsed = hasLimit ? Math.round((totalExpense / jar.monthlyLimit) * 100) : 0;
   const isOverBudget = pctUsed > 100;
 
   return (
@@ -127,54 +140,64 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
           </div>
         </div>
 
-        {/* Hero Card Thống kê hũ */}
+        {/* Hero Card Thống kê hũ (V2-15) */}
         <div className="my-3.5 p-3.5 rounded-2xl bg-gradient-to-br from-[#202A2C] to-[#141A1C] border border-[#8BA5AA]/20 space-y-2.5">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-[#869699] font-medium flex items-center gap-1">
               <Receipt size={12} />
-              {filterPeriod === 'month' ? `Đã chi Tháng ${nowVN.getMonth() + 1}` : 'Tổng đã chi'}
+              {filterPeriod === 'period' ? `Đã chi ${periodLabel}` : 'Tổng đã chi từ trước đến nay'}
             </span>
-            <span
-              className={`num text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                isOverBudget
-                  ? 'bg-[#E07A5F]/20 text-[#E07A5F] border border-[#E07A5F]/35'
-                  : 'bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/25'
-              }`}
-            >
-              Đã tiêu {pctUsed}%
-            </span>
+            {hasLimit ? (
+              <span
+                className={`num text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                  isOverBudget
+                    ? 'bg-[#E07A5F]/20 text-[#E07A5F] border border-[#E07A5F]/35'
+                    : 'bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/25'
+                }`}
+              >
+                Đã tiêu {pctUsed}%
+              </span>
+            ) : (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/25">
+                {isAllTime ? 'Lịch sử toàn thời gian' : 'Chưa đặt hạn mức'}
+              </span>
+            )}
           </div>
 
           <div className="flex items-baseline justify-between">
             <div className="num text-[24px] font-bold text-[#F2F5F5]">
               {privacyMode ? '••••••' : formatVND(totalExpense)}
             </div>
-            <div className="text-right">
-              <span className="text-[10px] text-[#869699] block">Hạn mức tháng</span>
-              <span className="num text-xs font-semibold text-[#D5E1E3]">
-                {privacyMode ? '••••••' : formatVND(jar.monthlyLimit)}
-              </span>
-            </div>
+            {hasLimit && (
+              <div className="text-right">
+                <span className="text-[10px] text-[#869699] block">Hạn mức tháng</span>
+                <span className="num text-xs font-semibold text-[#D5E1E3]">
+                  {privacyMode ? '••••••' : formatVND(jar.monthlyLimit)}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Thanh tiến trình */}
-          <div className="h-2 rounded-full bg-[#161C1E] overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-300"
-              style={{
-                width: `${Math.min(100, pctUsed)}%`,
-                backgroundColor: isOverBudget ? '#E07A5F' : (jar.color || '#8CC7AE')
-              }}
-            />
-          </div>
+          {hasLimit && (
+            <div className="h-2 rounded-full bg-[#161C1E] overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-300"
+                style={{
+                  width: `${Math.min(100, pctUsed)}%`,
+                  backgroundColor: isOverBudget ? '#E07A5F' : (jar.color || '#8CC7AE')
+                }}
+              />
+            </div>
+          )}
 
           {/* Dòng tóm tắt còn lại */}
-          <div className="flex items-center justify-between text-[11px] pt-0.5">
+          <div className="flex items-center justify-between text-[11px] pt-0.5 border-t border-[#8BA5AA]/10">
             <span className="text-[#869699]">
-              {remaining >= 0 ? 'Còn lại trong hạn mức:' : 'Vượt hạn mức:'}
+              {hasLimit ? (remaining >= 0 ? 'Còn lại trong hạn mức:' : 'Vượt hạn mức:') : 'Số khoản đã chi:'}
             </span>
-            <span className={`num font-bold ${remaining >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
-              {privacyMode ? '••••••' : formatVND(Math.abs(remaining))}
+            <span className={`num font-bold ${hasLimit ? (remaining >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]') : 'text-[#F2F5F5]'}`}>
+              {hasLimit ? (privacyMode ? '••••••' : formatVND(Math.abs(remaining))) : `${jarTransactions.length} giao dịch`}
             </span>
           </div>
         </div>
@@ -185,14 +208,14 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
           <div className="flex items-center gap-1 bg-[#12181A] p-0.5 rounded-xl border border-[#8BA5AA]/15">
             <button
               type="button"
-              onClick={() => setFilterPeriod('month')}
+              onClick={() => setFilterPeriod('period')}
               className={`px-2.5 py-1 rounded-lg text-[10.5px] font-semibold transition-colors ${
-                filterPeriod === 'month'
+                filterPeriod === 'period'
                   ? 'bg-[#657D81] text-[#F2F5F5]'
                   : 'text-[#869699] hover:text-[#D5E1E3]'
               }`}
             >
-              Tháng {nowVN.getMonth() + 1}
+              {periodLabel}
             </button>
             <button
               type="button"
@@ -276,7 +299,7 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
                 <Receipt size={18} />
               </div>
               <div className="text-xs text-[#869699]">
-                Chưa có khoản thu chi nào được ghi nhận cho hũ <b>{jar.name}</b> {filterPeriod === 'month' ? 'trong tháng này' : ''}.
+                Chưa có khoản thu chi nào được ghi nhận cho hũ <b>{jar.name}</b> {filterPeriod === 'period' ? `trong ${periodLabel}` : ''}.
               </div>
               {onQuickAddExpense && (
                 <button

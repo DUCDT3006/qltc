@@ -3,6 +3,14 @@ import { cors } from 'hono/cors';
 import { parseBankNotification } from './services/parser';
 import { categorizeTransaction } from './services/rules';
 import { generateDedupeHash } from './services/dedupe';
+import {
+  TxnState,
+  getTxnContribution,
+  calculateBalanceDelta,
+  hashPayload,
+  allocateVndLargestRemainder,
+  calculateBudgetExpected
+} from './services/ledger';
 
 export interface Env {
   DB: D1Database;
@@ -10,6 +18,76 @@ export interface Env {
 }
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Helper idempotency receipt (V2-02, AT2-04, AT2-05)
+async function processMutationReceipt(
+  db: D1Database,
+  userId: string,
+  operationId: string | undefined,
+  payload: any
+): Promise<{ operationId: string; cachedAck?: any; conflict?: boolean; payloadHash: string }> {
+  const opId = operationId || `op_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const pHash = await hashPayload(payload);
+
+  if (operationId) {
+    const existing = await db.prepare('SELECT payload_hash, ack_json FROM mutation_receipts WHERE user_id = ? AND operation_id = ?')
+      .bind(userId, operationId).first<{ payload_hash: string; ack_json: string }>();
+    if (existing) {
+      if (existing.payload_hash === pHash) {
+        try {
+          return { operationId: opId, cachedAck: JSON.parse(existing.ack_json), payloadHash: pHash };
+        } catch {
+          return { operationId: opId, cachedAck: { success: true }, payloadHash: pHash };
+        }
+      } else {
+        return { operationId: opId, conflict: true, payloadHash: pHash };
+      }
+    }
+  }
+
+  return { operationId: opId, payloadHash: pHash };
+}
+
+async function saveMutationReceipt(
+  db: D1Database,
+  userId: string,
+  operationId: string,
+  payloadHash: string,
+  ack: any
+) {
+  try {
+    await db.prepare(`
+      INSERT INTO mutation_receipts (user_id, operation_id, payload_hash, ack_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, operation_id) DO UPDATE SET ack_json = excluded.ack_json
+    `).bind(userId, operationId, payloadHash, JSON.stringify(ack)).run();
+  } catch (e) {
+    console.warn('Failed to save receipt:', e);
+  }
+}
+
+// Helper hạch toán delta sổ cái bất biến (V2-02)
+async function applyLedgerDelta(
+  db: D1Database,
+  userId: string,
+  operationId: string,
+  accountId: string,
+  transactionId: string | undefined,
+  deltaVnd: number
+) {
+  if (deltaVnd === 0) return;
+  await db.prepare(`
+    UPDATE accounts 
+    SET balance = balance + ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ? AND user_id = ?
+  `).bind(deltaVnd, accountId, userId).run();
+
+  const postingId = `post_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  await db.prepare(`
+    INSERT INTO ledger_postings (id, user_id, operation_id, account_id, transaction_id, delta_vnd)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(postingId, userId, operationId, accountId, transactionId || null, deltaVnd).run();
+}
 
 // Enable CORS for web and mobile clients
 app.use('*', cors({
@@ -86,6 +164,71 @@ async function ensureDatabaseSchema(db: D1Database) {
       )
     `).run();
 
+    // Bảng V2: Mutation receipts (chống lặp và bảo đảm tính nguyên tử - V2-02)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS mutation_receipts (
+        user_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        ack_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, operation_id)
+      )
+    `).run();
+
+    // Bảng V2: Sổ cái hạch toán delta bất biến (V2-02)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS ledger_postings (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        transaction_id TEXT,
+        delta_vnd INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+
+    // Bảng V2: Mốc số dư cơ sở cutover tài khoản (V2-02)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS ledger_baselines (
+        user_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        baseline_balance INTEGER NOT NULL DEFAULT 0,
+        cutover_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, account_id)
+      )
+    `).run();
+
+    // Bảng V2: Phiên bản kế hoạch tài chính (V2-16)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS plan_versions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        amount_vnd INTEGER NOT NULL,
+        cadence TEXT NOT NULL,
+        effective_from_month TEXT NOT NULL,
+        effective_to_month_exclusive TEXT,
+        one_time_date TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+
+    // Bảng V2: Quản lý thiết bị Android và xác thực (V2-01)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS devices (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        device_name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        revoked_at DATETIME
+      )
+    `).run();
+
     const cols = [
       { t: 'users', c: 'phone', type: 'TEXT' },
       { t: 'users', c: 'avatar', type: 'TEXT' },
@@ -93,6 +236,11 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'transactions', c: 'balance_after', type: 'INTEGER' },
       { t: 'transactions', c: 'original_type', type: 'TEXT' },
       { t: 'transactions', c: 'income_source_id', type: 'TEXT' },
+      { t: 'transactions', c: 'revision', type: 'INTEGER DEFAULT 1' },
+      { t: 'transactions', c: 'deleted_at', type: 'DATETIME' },
+      { t: 'transactions', c: 'history_hidden_at', type: 'DATETIME' },
+      { t: 'transactions', c: 'is_synthetic', type: 'INTEGER DEFAULT 0' },
+      { t: 'transactions', c: 'time_source', type: 'TEXT' },
       { t: 'jars', c: 'is_default', type: 'INTEGER DEFAULT 0' },
       { t: 'holdings', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
       { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
@@ -108,7 +256,16 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'accounts', c: 'account_number', type: 'TEXT' },
       { t: 'accounts', c: 'account_holder', type: 'TEXT' },
       { t: 'accounts', c: 'branch', type: 'TEXT' },
-      { t: 'accounts', c: 'bank_bin', type: 'TEXT' }
+      { t: 'accounts', c: 'bank_bin', type: 'TEXT' },
+      { t: 'accounts', c: 'revision', type: 'INTEGER DEFAULT 1' },
+      { t: 'accounts', c: 'archived_at', type: 'DATETIME' },
+      { t: 'accounts', c: 'reconciliation_status', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'device_id', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'event_id', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'original_time_value', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'parser_version', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'parse_status', type: 'TEXT' },
+      { t: 'raw_notifications', c: 'reason_code', type: 'TEXT' }
     ];
 
     for (const col of cols) {
@@ -629,14 +786,98 @@ app.post('/api/notifications/reprocess', async (c) => {
   });
 });
 
-// Lấy danh sách giao dịch
+// Lấy danh sách giao dịch (V2-14: Hỗ trợ phân trang cursor, bộ lọc và tính toán tổng)
 app.get('/api/transactions', async (c) => {
   const db = c.env.DB;
-  const status = c.req.query('status'); // 'pending' | 'confirmed'
-  const limit = parseInt(c.req.query('limit') || '500', 10);
+  await ensureDatabaseSchema(db);
+  const status = c.req.query('status'); // 'pending' | 'confirmed' | 'rejected'
+  const type = c.req.query('type'); // 'income' | 'expense' | 'transfer'
+  const jarId = c.req.query('jarId');
+  const incomeSourceId = c.req.query('incomeSourceId');
+  const accountId = c.req.query('accountId');
+  const search = (c.req.query('search') || '').trim();
+  const year = c.req.query('year');
+  const month = c.req.query('month');
+  const quarter = c.req.query('quarter');
+  const cursor = c.req.query('cursor');
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '500', 10), 1), 500);
   const userId = 'user_default';
 
-  let query = `
+  const whereClauses: string[] = [
+    't.user_id = ?',
+    't.deleted_at IS NULL',
+    't.history_hidden_at IS NULL',
+    "t.status != 'paired_hidden'",
+    "NOT (t.transfer_pair_id IS NOT NULL AND t.original_type = 'income' AND t.to_account_id IS NOT NULL AND p.original_type = 'expense')"
+  ];
+  const params: any[] = [userId];
+
+  if (status) {
+    whereClauses.push('t.status = ?');
+    params.push(status);
+  }
+  if (type) {
+    whereClauses.push('t.type = ?');
+    params.push(type);
+  }
+  if (jarId) {
+    if (jarId === 'unassigned') {
+      whereClauses.push('t.jar_id IS NULL');
+    } else {
+      whereClauses.push('t.jar_id = ?');
+      params.push(jarId);
+    }
+  }
+  if (incomeSourceId) {
+    if (incomeSourceId === 'unassigned') {
+      whereClauses.push('t.income_source_id IS NULL');
+    } else {
+      whereClauses.push('t.income_source_id = ?');
+      params.push(incomeSourceId);
+    }
+  }
+  if (accountId) {
+    whereClauses.push('(t.account_id = ? OR t.to_account_id = ?)');
+    params.push(accountId, accountId);
+  }
+  if (search) {
+    whereClauses.push('(t.description LIKE ? OR t.notes LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`);
+  }
+  if (year && month) {
+    whereClauses.push("strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = ?");
+    params.push(`${year}-${String(month).padStart(2, '0')}`);
+  } else if (year && quarter) {
+    whereClauses.push("strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ? AND ((CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3) = ?");
+    params.push(String(year), Math.max(0, parseInt(quarter, 10) - 1));
+  } else if (year) {
+    whereClauses.push("strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ?");
+    params.push(String(year));
+  }
+
+  // Count & Total amount with current filters
+  const countQuery = `
+    SELECT COUNT(*) as total_count, COALESCE(SUM(t.amount), 0) as total_amount
+    FROM transactions t
+    LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
+    WHERE ${whereClauses.join(' AND ')}
+  `;
+  const countStats = await db.prepare(countQuery).bind(...params).first<{ total_count: number; total_amount: number }>();
+
+  // If cursor provided
+  const queryParams = [...params];
+  const queryWhereClauses = [...whereClauses];
+  if (cursor) {
+    const lastUnderscore = cursor.lastIndexOf('_');
+    if (lastUnderscore !== -1) {
+      const cursorOccurredAt = cursor.substring(0, lastUnderscore);
+      const cursorId = cursor.substring(lastUnderscore + 1);
+      queryWhereClauses.push('(t.occurred_at < ? OR (t.occurred_at = ? AND t.id < ?))');
+      queryParams.push(cursorOccurredAt, cursorOccurredAt, cursorId);
+    }
+  }
+
+  const selectQuery = `
     SELECT t.*, a.name as account_name, a.bank_code, a.account_number_mask,
            toa.name as to_account_name, toa.bank_code as to_bank_code, toa.account_number_mask as to_account_number_mask,
            j.name as jar_name, j.color as jar_color, j.code as jar_code,
@@ -655,27 +896,38 @@ app.get('/api/transactions', async (c) => {
     LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
     LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
     LEFT JOIN accounts pa ON p.account_id = pa.id
-    WHERE t.user_id = ?
-      AND t.status != 'paired_hidden'
-      AND NOT (t.transfer_pair_id IS NOT NULL AND t.original_type = 'income' AND t.to_account_id IS NOT NULL AND p.original_type = 'expense')
+    WHERE ${queryWhereClauses.join(' AND ')}
+    ORDER BY t.occurred_at DESC, t.id DESC
+    LIMIT ?
   `;
-  const params: any[] = [userId];
+  queryParams.push(limit + 1);
 
-  if (status) {
-    query += ' AND t.status = ?';
-    params.push(status);
+  const { results } = await db.prepare(selectQuery).bind(...queryParams).all<any>();
+  let nextCursor: string | null = null;
+  let items = results || [];
+  if (items.length > limit) {
+    const nextItem = items[limit - 1];
+    nextCursor = `${nextItem.occurred_at}_${nextItem.id}`;
+    items = items.slice(0, limit);
   }
 
-  query += ' ORDER BY t.occurred_at DESC LIMIT ?';
-  params.push(limit);
+  const revRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
+    .bind(userId).first<{ max_rev: number }>();
 
-  const { results } = await db.prepare(query).bind(...params).all();
-  return c.json({ transactions: results });
+  return c.json({
+    items,
+    nextCursor,
+    totalCount: countStats?.total_count || 0,
+    totalAmountVnd: countStats?.total_amount || 0,
+    dataRevision: revRow?.max_rev || 1,
+    transactions: items
+  });
 });
 
-// Duyệt / Sửa / Bỏ qua / Hoàn tác giao dịch (Swipe approve, Undo & Ledger consistency)
+// Duyệt / Sửa / Bỏ qua / Hoàn tác giao dịch (V2-02: Idempotent & Chuẩn toán học Delta)
 app.put('/api/transactions/:id', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const id = c.req.param('id');
   const userId = 'user_default';
   const body = await c.req.json<{
@@ -688,7 +940,20 @@ app.put('/api/transactions/:id', async (c) => {
     notes?: string;
     amount?: number;
     description?: string;
+    operationId?: string;
   }>();
+
+  const clientOpId = c.req.header('X-Operation-Id') || body.operationId;
+  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
+    db, userId, clientOpId, { path: `/api/transactions/${id}`, body }
+  );
+
+  if (conflict) {
+    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
+  }
+  if (cachedAck) {
+    return c.json(cachedAck);
+  }
 
   // 1. Đọc thông tin giao dịch hiện tại
   const currentTxn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
@@ -698,57 +963,54 @@ app.put('/api/transactions/:id', async (c) => {
     return c.json({ success: false, message: 'Không tìm thấy giao dịch' }, 404);
   }
 
-  const updates: string[] = [];
-  const params: any[] = [];
   const finalAmount = body.amount !== undefined ? Math.round(body.amount) : currentTxn.amount;
+  const finalStatus = body.status !== undefined ? body.status : currentTxn.status;
 
-  // L-01: Cập nhật Sổ cái Số dư (Account Ledger) chuẩn Delta hai chiều (hỗ trợ cả Duyệt và Hoàn tác Undo)
-  if (body.status === 'confirmed' && currentTxn.status !== 'confirmed') {
-    if (currentTxn.type === 'income') {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(finalAmount, currentTxn.account_id, userId).run();
-    } else if (currentTxn.type === 'expense') {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(finalAmount, currentTxn.account_id, userId).run();
-    } else if (currentTxn.type === 'transfer') {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(finalAmount, currentTxn.account_id, userId).run();
-      if (currentTxn.to_account_id) {
-        await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(finalAmount, currentTxn.to_account_id, userId).run();
-      }
-    }
-  } else if (currentTxn.status === 'confirmed' && (body.status === 'pending' || body.status === 'rejected')) {
-    // Hoàn tác (Undo) từ confirmed về pending / rejected -> đảo ngược sổ cái
-    if (currentTxn.type === 'income') {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
-    } else if (currentTxn.type === 'expense') {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
-    } else if (currentTxn.type === 'transfer') {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(currentTxn.amount, currentTxn.account_id, userId).run();
-      if (currentTxn.to_account_id) {
-        await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-          .bind(currentTxn.amount, currentTxn.to_account_id, userId).run();
-      }
-    }
+  // 2. Tính Delta đóng góp số dư chuẩn xác theo V2-02
+  const oldState: TxnState = {
+    type: currentTxn.type,
+    amount: currentTxn.amount,
+    status: currentTxn.status,
+    sourceAccountId: currentTxn.account_id,
+    toAccountId: currentTxn.to_account_id,
+    isPairedHidden: currentTxn.status === 'paired_hidden',
+    deletedAt: currentTxn.deleted_at
+  };
+
+  const newState: TxnState = {
+    type: currentTxn.type,
+    amount: finalAmount,
+    status: finalStatus,
+    sourceAccountId: currentTxn.account_id,
+    toAccountId: currentTxn.to_account_id,
+    isPairedHidden: finalStatus === 'paired_hidden',
+    deletedAt: currentTxn.deleted_at
+  };
+
+  const deltaSrc = calculateBalanceDelta(oldState, newState, currentTxn.account_id);
+  await applyLedgerDelta(db, userId, operationId, currentTxn.account_id, id, deltaSrc);
+
+  if (currentTxn.to_account_id) {
+    const deltaDst = calculateBalanceDelta(oldState, newState, currentTxn.to_account_id);
+    await applyLedgerDelta(db, userId, operationId, currentTxn.to_account_id, id, deltaDst);
   }
 
-  // Cập nhật trạng thái (giữ chân phụ ở trạng thái paired_hidden để không nhân đôi dòng giao dịch)
+  const updates: string[] = [];
+  const params: any[] = [];
+
+  // Cập nhật trạng thái
   if (body.status) {
     updates.push('status = ?');
     params.push(body.status);
 
     if (currentTxn.transfer_pair_id) {
       const secondaryStatus = body.status === 'rejected' ? 'rejected' : 'paired_hidden';
-      await db.prepare('UPDATE transactions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND id != ? AND user_id = ?')
+      await db.prepare('UPDATE transactions SET status = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND id != ? AND user_id = ?')
         .bind(secondaryStatus, currentTxn.transfer_pair_id, id, userId).run();
     }
   }
 
-  // L-13: Ưu tiên jarId chính xác tuyệt đối (chỉ áp dụng cho giao dịch Chi tiêu)
+  // Ưu tiên jarId chính xác tuyệt đối (chỉ áp dụng cho giao dịch Chi tiêu)
   let resolvedJarId: string | null = null;
   let resolvedJarCode: string | null = body.jarCode || null;
   if (currentTxn.type === 'expense') {
@@ -771,11 +1033,10 @@ app.put('/api/transactions/:id', async (c) => {
       }
     }
   } else {
-    // Với giao dịch Thu nhập hoặc Chuyển nội bộ: bắt buộc jar_id = NULL
     updates.push('jar_id = NULL');
   }
 
-  // L-08: Gắn incomeSourceId (chỉ áp dụng cho giao dịch Thu nhập)
+  // Gắn incomeSourceId (chỉ áp dụng cho giao dịch Thu nhập)
   if (currentTxn.type === 'income') {
     if (body.incomeSourceId !== undefined) {
       updates.push('income_source_id = ?');
@@ -805,7 +1066,7 @@ app.put('/api/transactions/:id', async (c) => {
     params.push(body.categoryName);
   }
 
-  // L-09: Tự học quy tắc phân loại hũ của người dùng (bọc try/catch an toàn & khử trùng pattern cũ)
+  // Tự học quy tắc phân loại hũ
   if ((resolvedJarCode || resolvedJarId) && currentTxn.type === 'expense') {
     try {
       const descWords = (body.description || currentTxn.description || '')
@@ -834,18 +1095,22 @@ app.put('/api/transactions/:id', async (c) => {
     }
   }
 
+  updates.push('revision = revision + 1');
   updates.push('updated_at = CURRENT_TIMESTAMP');
   params.push(id);
   params.push(userId);
 
   await db.prepare(`UPDATE transactions SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
 
-  return c.json({ success: true, message: 'Đã cập nhật giao dịch' });
+  const ack = { success: true, message: 'Đã cập nhật giao dịch', operationId, revision: (currentTxn.revision || 1) + 1 };
+  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
+  return c.json(ack);
 });
 
-// Thêm giao dịch thủ công từ QuickAddModal (L-02: Hỗ trợ toAccountId cho chuyển tiền)
+// Thêm giao dịch thủ công (V2-02, V2-46)
 app.post('/api/transactions', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const userId = 'user_default';
   const body = await c.req.json<{
     id?: string;
@@ -859,10 +1124,28 @@ app.post('/api/transactions', async (c) => {
     categoryName?: string;
     occurredAt?: string;
     incomeSourceId?: string;
+    operationId?: string;
   }>();
 
+  const rawAmt = Number(body.amount);
+  if (!Number.isFinite(rawAmt) || isNaN(rawAmt) || rawAmt <= 0 || rawAmt > Number.MAX_SAFE_INTEGER) {
+    return c.json({ success: false, code: 'INVALID_AMOUNT', message: 'Số tiền giao dịch không hợp lệ' }, 400);
+  }
+
+  const clientOpId = c.req.header('X-Operation-Id') || body.operationId;
+  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
+    db, userId, clientOpId, { path: '/api/transactions', body }
+  );
+
+  if (conflict) {
+    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
+  }
+  if (cachedAck) {
+    return c.json(cachedAck);
+  }
+
   const txnId = body.id || `txn_man_${Date.now()}`;
-  const cleanAmount = Math.round(body.amount || 0);
+  const cleanAmount = Math.round(rawAmt);
   let jarId = body.type === 'expense' ? (body.jarId || null) : null;
   if (!jarId && body.jarCode && body.type === 'expense') {
     const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
@@ -874,8 +1157,8 @@ app.post('/api/transactions', async (c) => {
   await db.prepare(`
     INSERT INTO transactions (
       id, user_id, account_id, to_account_id, type, amount, occurred_at, description,
-      jar_id, income_source_id, status, notes, original_type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)
+      jar_id, income_source_id, status, notes, original_type, revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, 1)
   `).bind(
     txnId,
     userId,
@@ -886,66 +1169,108 @@ app.post('/api/transactions', async (c) => {
     body.occurredAt || new Date().toISOString(),
     body.description,
     body.type === 'transfer' ? null : jarId,
-    body.type === 'income' ? (body.incomeSourceId || null) : null,
+    incomeSourceId,
     body.categoryName || null,
     body.type === 'transfer' ? 'expense' : body.type
   ).run();
 
-  // Cập nhật số dư sổ cái chính xác
-  if (body.type === 'transfer' && body.accountId && body.toAccountId) {
-    await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(cleanAmount, body.accountId, userId).run();
-    await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(cleanAmount, body.toAccountId, userId).run();
-  } else if (body.accountId) {
-    const delta = body.type === 'income' ? cleanAmount : body.type === 'expense' ? -cleanAmount : 0;
-    if (delta !== 0) {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(delta, body.accountId, userId).run();
-    }
+  // Hạch toán delta chuẩn xác
+  const newTxnState: TxnState = {
+    type: body.type,
+    amount: cleanAmount,
+    status: 'confirmed',
+    sourceAccountId: body.accountId,
+    toAccountId: body.toAccountId || null
+  };
+
+  const deltaSrc = calculateBalanceDelta(null, newTxnState, body.accountId);
+  await applyLedgerDelta(db, userId, operationId, body.accountId, txnId, deltaSrc);
+
+  if (body.type === 'transfer' && body.toAccountId) {
+    const deltaDst = calculateBalanceDelta(null, newTxnState, body.toAccountId);
+    await applyLedgerDelta(db, userId, operationId, body.toAccountId, txnId, deltaDst);
   }
 
-  return c.json({ success: true, id: txnId });
+  const ack = { success: true, id: txnId, operationId, revision: 1 };
+  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
+  return c.json(ack);
 });
 
-// Xóa giao dịch (L-01: Hoàn tác số dư tài khoản nếu giao dịch đã duyệt)
+// Xóa giao dịch (V2-02: Hoàn tác sổ cái Delta hai chiều, soft delete và bảo toàn lịch sử)
 app.delete('/api/transactions/:id', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const id = c.req.param('id');
   const userId = 'user_default';
+  const clientOpId = c.req.header('X-Operation-Id');
+
+  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
+    db, userId, clientOpId, { deleteTxnId: id }
+  );
+  if (conflict) {
+    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
+  }
+  if (cachedAck) {
+    return c.json(cachedAck);
+  }
 
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
     .bind(id, userId).first<any>();
 
-  if (txn && txn.status === 'confirmed') {
-    if (txn.type === 'income') {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, txn.account_id, userId).run();
-    } else if (txn.type === 'expense') {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, txn.account_id, userId).run();
-    } else if (txn.type === 'transfer' && txn.to_account_id) {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, txn.account_id, userId).run();
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, txn.to_account_id, userId).run();
-    }
+  if (!txn) {
+    return c.json({ success: true, message: 'Giao dịch không tồn tại hoặc đã xóa' });
   }
 
-  if (txn?.transfer_pair_id) {
-    await db.prepare('DELETE FROM transactions WHERE transfer_pair_id = ? AND user_id = ?')
+  // Hoàn tác sổ cái số dư nếu giao dịch đang confirmed
+  const oldState: TxnState = {
+    type: txn.type,
+    amount: txn.amount,
+    status: txn.status,
+    sourceAccountId: txn.account_id,
+    toAccountId: txn.to_account_id,
+    isPairedHidden: txn.status === 'paired_hidden',
+    deletedAt: txn.deleted_at
+  };
+
+  const deltaSrc = calculateBalanceDelta(oldState, null, txn.account_id);
+  await applyLedgerDelta(db, userId, operationId, txn.account_id, id, deltaSrc);
+
+  if (txn.to_account_id) {
+    const deltaDst = calculateBalanceDelta(oldState, null, txn.to_account_id);
+    await applyLedgerDelta(db, userId, operationId, txn.to_account_id, id, deltaDst);
+  }
+
+  // Soft delete cả cặp nếu có transfer_pair_id (V2-02, AT2-21)
+  if (txn.transfer_pair_id) {
+    await db.prepare('UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE transfer_pair_id = ? AND user_id = ?')
       .bind(txn.transfer_pair_id, userId).run();
   } else {
-    await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(id, userId).run();
+    await db.prepare('UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE id = ? AND user_id = ?')
+      .bind(id, userId).run();
   }
-  return c.json({ success: true });
+
+  const ack = { success: true, operationId };
+  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
+  return c.json(ack);
 });
 
-// Tách 2 giao dịch nếu auto-pairing bị nhầm (Unpair - L-07: Khôi phục cả 2 chân về pending độc lập & hoàn tác sổ cái nếu đã duyệt)
+// Tách 2 giao dịch (Unpair - V2-10, AT2-21: Xử lý chân synthetic không biến thành giao dịch thật)
 app.post('/api/transactions/:id/unpair', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const id = c.req.param('id');
   const userId = 'user_default';
+  const clientOpId = c.req.header('X-Operation-Id');
+
+  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
+    db, userId, clientOpId, { unpairTxnId: id }
+  );
+  if (conflict) {
+    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
+  }
+  if (cachedAck) {
+    return c.json(cachedAck);
+  }
 
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
     .bind(id, userId).first<any>();
@@ -954,30 +1279,45 @@ app.post('/api/transactions/:id/unpair', async (c) => {
     return c.json({ success: false, message: 'Giao dịch này không nằm trong cặp chuyển khoản nào' }, 400);
   }
 
-  // Nếu giao dịch chuyển nội bộ đã từng được duyệt, hoàn tác sổ cái trước khi tách về pending
+  const pairId = txn.transfer_pair_id;
+
+  // Nếu giao dịch chuyển nội bộ đã từng được duyệt, đảo ngược đóng góp chuyển khoản trước khi tách
   if (txn.status === 'confirmed' && txn.type === 'transfer') {
-    await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(txn.amount, txn.account_id, userId).run();
+    const oldTransferState: TxnState = {
+      type: 'transfer',
+      amount: txn.amount,
+      status: 'confirmed',
+      sourceAccountId: txn.account_id,
+      toAccountId: txn.to_account_id
+    };
+    const deltaSrc = calculateBalanceDelta(oldTransferState, null, txn.account_id);
+    await applyLedgerDelta(db, userId, operationId, txn.account_id, id, deltaSrc);
+
     if (txn.to_account_id) {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, txn.to_account_id, userId).run();
+      const deltaDst = calculateBalanceDelta(oldTransferState, null, txn.to_account_id);
+      await applyLedgerDelta(db, userId, operationId, txn.to_account_id, id, deltaDst);
     }
   }
 
-  const pairId = txn.transfer_pair_id;
   const pairedTxns = await db.prepare(`
-    SELECT t.id, t.raw_notification_id, t.original_type, r.raw_body, t.description
+    SELECT t.id, t.raw_notification_id, t.original_type, r.raw_body, t.description, t.is_synthetic
     FROM transactions t
     LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
     WHERE t.transfer_pair_id = ? AND t.user_id = ?
-  `).bind(pairId, userId).all<{ id: string; raw_notification_id: string | null; original_type: string | null; raw_body: string | null; description: string }>();
+  `).bind(pairId, userId).all<{ id: string; raw_notification_id: string | null; original_type: string | null; raw_body: string | null; description: string; is_synthetic: number | null }>();
 
-  // Lấy hũ mặc định của user
+  // Lấy hũ mặc định
   const defaultJar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND is_default = 1').bind(userId).first<{ id: string }>()
     || await db.prepare('SELECT id FROM jars WHERE user_id = ? ORDER BY sort_order ASC LIMIT 1').bind(userId).first<{ id: string }>();
   const fallbackJarId = defaultJar?.id || 'jar_nec';
 
   for (const t of pairedTxns.results) {
+    // AT2-21: Chân synthetic (chân ảo tự tạo lúc ghép đơn lẻ) KHÔNG ĐƯỢC biến thành giao dịch thật sau khi tách
+    if (t.is_synthetic === 1) {
+      await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(t.id, userId).run();
+      continue;
+    }
+
     let origType = t.original_type;
     if (!origType) {
       const text = (t.raw_body || t.description || '').toLowerCase();
@@ -992,23 +1332,35 @@ app.post('/api/transactions/:id/unpair', async (c) => {
           type = ?,
           jar_id = ?,
           status = 'pending',
-          notes = 'Đã tách thủ công từ cặp chuyển tiền'
+          notes = 'Đã tách thủ công từ cặp chuyển tiền',
+          revision = revision + 1,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND user_id = ?
     `).bind(origType, jarId, t.id, userId).run();
   }
 
-  return c.json({
-    success: true,
-    message: 'Đã tách 2 giao dịch thành công'
-  });
+  const ack = { success: true, message: 'Đã tách 2 giao dịch thành công', operationId };
+  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
+  return c.json(ack);
 });
 
-// Ghép cặp thủ công 1 giao dịch (thu hoặc chi) thành chuyển khoản nội bộ giữa 2 tài khoản
+// Ghép cặp thủ công 1 giao dịch (thu hoặc chi) thành chuyển khoản nội bộ (V2-10, AT2-21)
 app.post('/api/transactions/:id/pair-transfer', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const id = c.req.param('id');
   const userId = 'user_default';
-  const { toAccountId } = await c.req.json<{ toAccountId: string }>();
+  const { toAccountId, operationId: clientOpId } = await c.req.json<{ toAccountId: string; operationId?: string }>();
+
+  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
+    db, userId, clientOpId, { pairTxnId: id, toAccountId }
+  );
+  if (conflict) {
+    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
+  }
+  if (cachedAck) {
+    return c.json(cachedAck);
+  }
 
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
     .bind(id, userId).first<any>();
@@ -1035,48 +1387,40 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
   const pairId = `pair_${Date.now()}`;
 
   if (isIncome) {
-    // Giao dịch hiện tại là TIỀN VÀO tài khoản hiện tại (currentAcc).
-    // Người dùng chọn selectedAcc là tài khoản ĐÃ CHUYỂN TIỀN ĐI.
-    // Nguồn (tiền ra): selectedAcc. Đích (tiền vào): currentAcc.
     const sourceAccountId = toAccountId;
     const destAccountId = txn.account_id;
 
-    // Tìm xem ở tài khoản nguồn (selectedAcc) có giao dịch chi (expense) pending trùng số tiền không
     const existingCounter = await db.prepare(`
       SELECT id FROM transactions
-      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'expense' AND status = 'pending' AND transfer_pair_id IS NULL
+      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'expense' AND status = 'pending' AND transfer_pair_id IS NULL AND deleted_at IS NULL
       ORDER BY occurred_at DESC LIMIT 1
     `).bind(userId, sourceAccountId, txn.amount).first<{ id: string }>();
 
     if (existingCounter) {
-      // 1. Biến existingCounter thành thẻ transfer chính hiển thị trong Hộp thư
       await db.prepare(`
         UPDATE transactions
-        SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?
+        SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?, revision = revision + 1
         WHERE id = ? AND user_id = ?
       `).bind(destAccountId, pairId, `Chuyển sang ${currentAcc?.name || 'tài khoản nhận'}`, existingCounter.id, userId).run();
 
-      // 2. Chân nhận tiền txn chuyển thành paired_hidden
       await db.prepare(`
         UPDATE transactions
-        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
+        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?, revision = revision + 1
         WHERE id = ? AND user_id = ?
       `).bind(pairId, `Nhận từ đối ứng ${existingCounter.id}`, id, userId).run();
     } else {
-      // Không có sẵn khoản chi đối ứng: biến txn thành giao dịch transfer từ source sang dest
       await db.prepare(`
         UPDATE transactions
-        SET account_id = ?, to_account_id = ?, type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?
+        SET account_id = ?, to_account_id = ?, type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?, revision = revision + 1
         WHERE id = ? AND user_id = ?
       `).bind(sourceAccountId, destAccountId, pairId, `Chuyển từ ${selectedAcc.name} sang ${currentAcc?.name || 'tài khoản nhận'}`, id, userId).run();
 
-      // Tạo chân đối ứng ẩn ở tài khoản nhận
       const counterTxnId = `txn_pair_${Date.now()}`;
       await db.prepare(`
         INSERT INTO transactions (
           id, user_id, account_id, type, amount, occurred_at, description,
-          status, transfer_pair_id, original_type, notes
-        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
+          status, transfer_pair_id, original_type, notes, is_synthetic, revision
+        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?, 1, 1)
       `).bind(
         counterTxnId,
         userId,
@@ -1089,43 +1433,33 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
       ).run();
     }
 
-    // Nếu khoản thu này vốn đã confirmed (đã cộng vào destAccountId), trừ bổ sung từ tài khoản nguồn để cân đối
     if (txn.status === 'confirmed') {
-      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, sourceAccountId, userId).run();
+      await applyLedgerDelta(db, userId, operationId, sourceAccountId, id, -txn.amount);
     }
   } else {
-    // Giao dịch hiện tại là TIỀN RA (expense) từ tài khoản hiện tại (currentAcc).
-    // Người dùng chọn selectedAcc là tài khoản SẼ NHẬN TIỀN.
-    // Nguồn (tiền ra): currentAcc. Đích (tiền vào): selectedAcc.
     const sourceAccountId = txn.account_id;
     const destAccountId = toAccountId;
 
-    // Tìm xem ở tài khoản đích có giao dịch nhận (income) pending trùng số tiền không
     const existingCounter = await db.prepare(`
       SELECT id FROM transactions
-      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL
+      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL AND deleted_at IS NULL
       ORDER BY occurred_at DESC LIMIT 1
     `).bind(userId, destAccountId, txn.amount).first<{ id: string }>();
 
-    // 1. Cập nhật giao dịch nguồn thành transfer kèm to_account_id
     await db.prepare(`
       UPDATE transactions 
-      SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?
+      SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?, revision = revision + 1
       WHERE id = ? AND user_id = ?
     `).bind(destAccountId, pairId, `Chuyển sang ${selectedAcc.name}`, id, userId).run();
 
-    // Nếu giao dịch nguồn vốn đã confirmed, cộng bổ sung vào tài khoản đích
     if (txn.status === 'confirmed') {
-      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-        .bind(txn.amount, destAccountId, userId).run();
+      await applyLedgerDelta(db, userId, operationId, destAccountId, id, txn.amount);
     }
 
-    // 2. Chân đối ứng
     if (existingCounter) {
       await db.prepare(`
         UPDATE transactions
-        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
+        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?, revision = revision + 1
         WHERE id = ? AND user_id = ?
       `).bind(pairId, `Nhận từ đối ứng ${id}`, existingCounter.id, userId).run();
     } else {
@@ -1133,8 +1467,8 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
       await db.prepare(`
         INSERT INTO transactions (
           id, user_id, account_id, type, amount, occurred_at, description,
-          status, transfer_pair_id, original_type, notes
-        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
+          status, transfer_pair_id, original_type, notes, is_synthetic, revision
+        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?, 1, 1)
       `).bind(
         counterTxnId,
         userId,
@@ -1148,7 +1482,9 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
     }
   }
 
-  return c.json({ success: true, message: 'Đã tạo chuyển khoản nội bộ thành công' });
+  const ack = { success: true, message: 'Đã tạo chuyển khoản nội bộ thành công', operationId };
+  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
+  return c.json(ack);
 });
 
 // Thống kê tổng quan (Dashboard - Chuẩn UTC+7 & Đầy đủ 6 lớp tài sản)
@@ -1236,11 +1572,12 @@ app.get('/api/overview', async (c) => {
   });
 });
 
-// L-11: API Thống kê tổng hợp theo kỳ (Month / Quarter / Year) chuẩn UTC+7 không bị cắt bởi limit=250
+// V2-14: API Analytics tổng hợp trên server với định dạng chuẩn FinanceSummary
 app.get('/api/analytics/summary', async (c) => {
   const db = c.env.DB;
+  await ensureDatabaseSchema(db);
   const userId = 'user_default';
-  const period = c.req.query('period') || 'month'; // 'month' | 'quarter' | 'year'
+  const period = c.req.query('period') || 'month'; // 'month' | 'quarter' | 'year' | 'all'
   const rawTarget = (c.req.query('target') || '').trim();
   const qYear = c.req.query('year');
   const qMonth = c.req.query('month');
@@ -1256,7 +1593,7 @@ app.get('/api/analytics/summary', async (c) => {
   const yearMonthStr = `${yearStr}-${String(monthNum).padStart(2, '0')}`;
   const quarterZeroIdx = Math.max(0, Math.min(3, quarterNum - 1));
 
-  let dateClause = '';
+  let dateClause = '1=1';
   let dateBindings: any[] = [];
   if (period === 'month') {
     dateClause = `strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = ?`;
@@ -1264,48 +1601,145 @@ app.get('/api/analytics/summary', async (c) => {
   } else if (period === 'quarter') {
     dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ? AND ((CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3) = ?`;
     dateBindings = [yearStr, quarterZeroIdx];
-  } else {
+  } else if (period === 'year') {
     dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ?`;
     dateBindings = [yearStr];
   }
 
+  // 1. Tổng Thu & Chi
   const totalStats = await db.prepare(`
     SELECT
       COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as total_income,
       COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as total_expense
     FROM transactions t
-    WHERE t.user_id = ? AND t.status = 'confirmed' AND ${dateClause}
+    WHERE t.user_id = ? AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
   `).bind(userId, ...dateBindings).first<{ total_income: number; total_expense: number }>();
 
-  const { results: jarBreakdown } = await db.prepare(`
+  // 2. Phân rã Chi tiêu theo Hũ (V2-13: Đầy đủ các hũ hoạt động + nhóm Chi chưa gắn hũ)
+  const { results: jarsDb } = await db.prepare(`
     SELECT j.id, j.name, j.code, j.color, j.target_percent, j.monthly_limit,
-           COALESCE(SUM(t.amount), 0) as spent
+           COALESCE(SUM(t.amount), 0) as spent,
+           COUNT(t.id) as count
     FROM jars j
-    LEFT JOIN transactions t ON t.jar_id = j.id AND t.type = 'expense' AND t.status = 'confirmed' AND ${dateClause}
-    WHERE j.user_id = ?
+    LEFT JOIN transactions t ON t.jar_id = j.id AND t.type = 'expense' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
+    WHERE j.user_id = ? AND (j.is_active = 1 OR j.is_active IS NULL)
     GROUP BY j.id
     ORDER BY j.sort_order ASC
-  `).bind(...dateBindings, userId).all();
+  `).bind(...dateBindings, userId).all<any>();
 
-  const { results: incomeBreakdown } = await db.prepare(`
-    SELECT COALESCE(t.income_source_id, 'other') as source_id,
-           COALESCE(s.name, 'Thu nhập khác') as source_name,
-           COALESCE(SUM(t.amount), 0) as total_amount
+  const unassignedExpenseRow = await db.prepare(`
+    SELECT COALESCE(SUM(t.amount), 0) as spent, COUNT(t.id) as count
     FROM transactions t
-    LEFT JOIN income_sources s ON t.income_source_id = s.id
-    WHERE t.user_id = ? AND t.type = 'income' AND t.status = 'confirmed' AND ${dateClause}
-    GROUP BY source_id
-  `).bind(userId, ...dateBindings).all();
+    WHERE t.user_id = ? AND t.type = 'expense' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND t.jar_id IS NULL AND ${dateClause}
+  `).bind(userId, ...dateBindings).first<{ spent: number; count: number }>();
+
+  const expenseBuckets: Array<{
+    kind: 'assigned' | 'unassigned' | 'orphaned';
+    jarId: string | null;
+    jarCode?: string;
+    jarName?: string;
+    amountVnd: number;
+    count: number;
+  }> = (jarsDb || []).map((j: any) => ({
+    kind: 'assigned' as const,
+    jarId: j.id,
+    jarCode: j.code,
+    jarName: j.name,
+    amountVnd: j.spent || 0,
+    count: j.count || 0
+  }));
+
+  if (unassignedExpenseRow && (unassignedExpenseRow.spent > 0 || unassignedExpenseRow.count > 0)) {
+    expenseBuckets.push({
+      kind: 'unassigned',
+      jarId: null,
+      jarCode: 'UNASSIGNED',
+      jarName: 'Chi chưa phân loại',
+      amountVnd: unassignedExpenseRow.spent,
+      count: unassignedExpenseRow.count
+    });
+  }
+
+  // 3. Phân rã Thu nhập theo Nguồn thu (V2-12: Nguồn hoạt động + Thu ngoài dự kiến)
+  const { results: sourcesDb } = await db.prepare(`
+    SELECT s.id, s.name, s.color, s.expected_amount,
+           COALESCE(SUM(t.amount), 0) as total_amount,
+           COUNT(t.id) as count
+    FROM income_sources s
+    LEFT JOIN transactions t ON t.income_source_id = s.id AND t.type = 'income' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
+    WHERE s.user_id = ? AND (s.is_active = 1 OR s.is_active IS NULL)
+    GROUP BY s.id
+    ORDER BY s.created_at ASC
+  `).bind(...dateBindings, userId).all<any>();
+
+  const unassignedIncomeRow = await db.prepare(`
+    SELECT COALESCE(SUM(t.amount), 0) as total_amount, COUNT(t.id) as count
+    FROM transactions t
+    WHERE t.user_id = ? AND t.type = 'income' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND t.income_source_id IS NULL AND ${dateClause}
+  `).bind(userId, ...dateBindings).first<{ total_amount: number; count: number }>();
+
+  const incomeBuckets: Array<{
+    kind: 'assigned' | 'unassigned' | 'orphaned';
+    sourceId: string | null;
+    sourceName?: string;
+    amountVnd: number;
+    count: number;
+  }> = (sourcesDb || []).map((s: any) => ({
+    kind: 'assigned' as const,
+    sourceId: s.id,
+    sourceName: s.name,
+    amountVnd: s.total_amount || 0,
+    count: s.count || 0
+  }));
+
+  if (unassignedIncomeRow && (unassignedIncomeRow.total_amount > 0 || unassignedIncomeRow.count > 0)) {
+    incomeBuckets.push({
+      kind: 'unassigned',
+      sourceId: null,
+      sourceName: 'Thu ngoài dự kiến / Khác',
+      amountVnd: unassignedIncomeRow.total_amount,
+      count: unassignedIncomeRow.count
+    });
+  }
+
+  // 4. Lấy revision
+  const dataRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
+    .bind(userId).first<{ max_rev: number }>();
+  const planRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM plan_versions WHERE user_id = ?')
+    .bind(userId).first<{ max_rev: number }>();
+
+  const totalIncomeVnd = totalStats?.total_income || 0;
+  const totalExpenseVnd = totalStats?.total_expense || 0;
 
   return c.json({
+    range: {
+      mode: period,
+      year: yearNum,
+      month: monthNum,
+      quarter: quarterNum
+    },
+    dataRevision: dataRevRow?.max_rev || 1,
+    planRevision: planRevRow?.max_rev || 1,
+    totalIncomeVnd,
+    totalExpenseVnd,
+    incomeBuckets,
+    expenseBuckets,
+    complete: true,
+    generatedAt: new Date().toISOString(),
+
+    // Tương thích ngược với client cũ
     period,
     year: yearNum,
     month: monthNum,
     quarter: quarterNum,
-    totalIncome: totalStats?.total_income || 0,
-    totalExpense: totalStats?.total_expense || 0,
-    jarBreakdown: jarBreakdown || [],
-    incomeBreakdown: incomeBreakdown || []
+    totalIncome: totalIncomeVnd,
+    totalExpense: totalExpenseVnd,
+    jarBreakdown: jarsDb || [],
+    incomeBreakdown: (sourcesDb || []).map((s: any) => ({
+      source_id: s.id,
+      source_name: s.name,
+      total_amount: s.total_amount
+    }))
   });
 });
 
@@ -1500,7 +1934,7 @@ app.put('/api/accounts/:id', async (c) => {
     type?: string;
   }>();
 
-  const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+  const updates: string[] = ['updated_at = CURRENT_TIMESTAMP', 'revision = revision + 1'];
   const params: any[] = [];
 
   if (body.name !== undefined) {
@@ -1561,13 +1995,32 @@ app.put('/api/accounts/:id', async (c) => {
   return c.json({ success: true, message: 'Đã cập nhật tài khoản' });
 });
 
-// Xóa tài khoản
+// Xóa hoặc Lưu trữ tài khoản (Tuân thủ đặc tả V2-11: Giữ toàn vẹn lịch sử, không tạo giao dịch mồ côi)
 app.delete('/api/accounts/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
+
+  // Kiểm tra xem tài khoản này đã phát sinh giao dịch nào chưa
+  const txnCheck = await db.prepare(
+    'SELECT COUNT(*) as count FROM transactions WHERE (account_id = ? OR to_account_id = ?) AND user_id = ?'
+  ).bind(id, id, userId).first<{ count: number }>();
+
+  if (txnCheck && txnCheck.count > 0) {
+    // Đã có lịch sử giao dịch -> Chuyển sang lưu trữ (Archive) để bảo toàn báo cáo và đối soát
+    await db.prepare(
+      'UPDATE accounts SET is_active = 0, archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?'
+    ).bind(id, userId).run();
+    return c.json({
+      success: true,
+      archived: true,
+      message: 'Tài khoản đã có lịch sử giao dịch nên được lưu trữ an toàn để bảo toàn báo cáo'
+    });
+  }
+
+  // Chưa có giao dịch nào -> Cho phép xóa an toàn
   await db.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true, message: 'Đã xóa tài khoản' });
+  return c.json({ success: true, archived: false, message: 'Đã xóa tài khoản' });
 });
 
 // Tạo hũ chi tiêu mới (L-13: Tự động sinh mã code duy nhất không trùng, hỗ trợ cả camelCase & snake_case)
@@ -1703,19 +2156,24 @@ app.put('/api/jars/:id', async (c) => {
 });
 
 // Xóa 1 hũ chi tiêu
+// Xóa hoặc Lưu trữ Hũ chi tiêu (V2-11: Ưu tiên archive nếu đã có giao dịch)
 app.delete('/api/jars/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
 
-  // Chuyển các giao dịch thuộc hũ này sang NULL trước khi xóa hũ
-  await db.prepare('UPDATE transactions SET jar_id = NULL WHERE jar_id = ? AND user_id = ?')
-    .bind(id, userId).run();
+  const txnCheck = await db.prepare(
+    'SELECT COUNT(*) as count FROM transactions WHERE jar_id = ? AND user_id = ?'
+  ).bind(id, userId).first<{ count: number }>();
 
-  await db.prepare('DELETE FROM jars WHERE id = ? AND user_id = ?')
-    .bind(id, userId).run();
+  if (txnCheck && txnCheck.count > 0) {
+    // Có giao dịch -> Đánh dấu rollover = 0 và không hiện ở danh sách tạo mới
+    await db.prepare('UPDATE jars SET rollover = 0 WHERE id = ? AND user_id = ?').bind(id, userId).run();
+    return c.json({ success: true, archived: true, message: 'Đã lưu trữ hũ chi tiêu để bảo toàn lịch sử' });
+  }
 
-  return c.json({ success: true, message: 'Đã xóa hũ thành công' });
+  await db.prepare('DELETE FROM jars WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  return c.json({ success: true, archived: false, message: 'Đã xóa hũ thành công' });
 });
 
 // Khởi tạo bảng mở rộng cho Kế hoạch Thu/Chi dự kiến
@@ -1739,28 +2197,7 @@ async function ensurePlanningTables(db: D1Database) {
     await db.prepare('ALTER TABLE income_sources ADD COLUMN keywords TEXT').run();
   } catch {}
 
-  // Tự động khởi tạo các nguồn thu cơ bản nếu người dùng chưa có nguồn thu nào
-  try {
-    const countRes = await db.prepare('SELECT COUNT(*) as cnt FROM income_sources WHERE user_id = ? AND is_active = 1')
-      .bind('user_default').first<{ cnt: number }>();
-
-    if (!countRes || countRes.cnt === 0) {
-      const defaultSources = [
-        { id: 'inc_salary', name: 'Lương chính', kind: 'fixed', keywords: 'luong, lương, salary, cong ty, cty, chuyen luong', color: '#8CC7AE' },
-        { id: 'inc_project', name: 'Thu tiền mặt công trình', kind: 'irregular', keywords: 'cong trinh, công trình, vat tu, thi cong, tien mat', color: '#DEB48A' },
-        { id: 'inc_rent', name: 'Tiền thuê nhà', kind: 'passive', keywords: 'thue nha, thuê nhà, phong tro, can ho', color: '#657D81' },
-        { id: 'inc_bonus', name: 'Thưởng / Hoa hồng', kind: 'irregular', keywords: 'thuong, thưởng, hoa hong, bonus, kpi', color: '#E09F3E' }
-      ];
-      for (const s of defaultSources) {
-        await db.prepare(`
-          INSERT OR IGNORE INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, keywords, is_active)
-          VALUES (?, 'user_default', ?, ?, 0, 'Hàng tháng', ?, ?, 1)
-        `).bind(s.id, s.name, s.kind, s.color, s.keywords).run();
-      }
-    }
-  } catch (seedErr) {
-    console.error('Lỗi seed nguồn thu mặc định:', seedErr);
-  }
+  // ĐẶC TẢ V2-09: Bỏ seed tự động. Trạng thái không có nguồn thu là hoàn toàn hợp lệ, không tự seed lại sau reset!
 
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS planned_expenses (
@@ -1866,14 +2303,25 @@ app.put('/api/income-sources/:id', async (c) => {
   return c.json({ success: true, id });
 });
 
+// Xóa hoặc Lưu trữ Nguồn thu (V2-11: Ưu tiên archive để bảo toàn báo cáo nguồn thu thực tế)
 app.delete('/api/income-sources/:id', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
   const userId = 'user_default';
   await ensurePlanningTables(db);
-  await db.prepare('UPDATE transactions SET income_source_id = NULL WHERE income_source_id = ? AND user_id = ?').bind(id, userId).run();
+
+  const txnCheck = await db.prepare(
+    'SELECT COUNT(*) as count FROM transactions WHERE income_source_id = ? AND user_id = ?'
+  ).bind(id, userId).first<{ count: number }>();
+
+  if (txnCheck && txnCheck.count > 0) {
+    // Đã có giao dịch -> Soft archive (is_active = 0) để giữ lịch sử giao dịch
+    await db.prepare('UPDATE income_sources SET is_active = 0 WHERE id = ? AND user_id = ?').bind(id, userId).run();
+    return c.json({ success: true, archived: true, message: 'Đã lưu trữ nguồn thu' });
+  }
+
   await db.prepare('DELETE FROM income_sources WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true });
+  return c.json({ success: true, archived: false, message: 'Đã xóa nguồn thu' });
 });
 
 // Danh sách Khoản chi dự kiến
@@ -2048,8 +2496,9 @@ async function syncAllMarketPrices(db: D1Database) {
     console.error('CoinGecko error:', e);
   }
 
-  const { results: assets } = await db.prepare('SELECT id, symbol, asset_class, current_price, source, auto_sync FROM assets').all<{
+  const { results: assets } = await db.prepare('SELECT id, name, symbol, asset_class, current_price, source, auto_sync FROM assets').all<{
     id: string;
+    name?: string | null;
     symbol: string;
     asset_class: string;
     current_price: number;
@@ -2072,12 +2521,31 @@ async function syncAllMarketPrices(db: D1Database) {
       if (sym === 'BTC' && btcVnd > 0) newPrice = btcVnd;
       if (sym === 'ETH' && ethVnd > 0) newPrice = ethVnd;
     } else if (ast.asset_class === 'gold' && goldPerChi > 0) {
-      // Nếu đơn vị là lượng thì nhân 10, mặc định chỉ
-      const unit = (ast.source || 'chỉ').toLowerCase();
-      newPrice = unit.includes('lượng') || unit.includes('cây') ? goldPerChi * 10 : goldPerChi;
+      // V2-18: TUYỆT ĐỐI KHÔNG dùng giá PAXG để ghi đè Vàng miếng SJC trong nước!
+      const isSjc = sym === 'SJC' || sym.includes('SJC') || (ast.name || '').toUpperCase().includes('SJC');
+      if (!isSjc) {
+        const unit = (ast.source || 'chỉ').toLowerCase();
+        if (unit.includes('lượng') || unit.includes('cây')) {
+          newPrice = goldPerChi * 10;
+        } else if (unit.includes('gram') || unit.includes('g')) {
+          // 1 chỉ = 3.75 gram -> 1 gram = 1 chỉ / 3.75
+          newPrice = Math.round(goldPerChi / 3.75);
+        } else {
+          newPrice = goldPerChi;
+        }
+      }
     } else if (ast.asset_class === 'silver' && silverPerLuong > 0) {
       const unit = (ast.source || 'lượng').toLowerCase();
-      newPrice = unit.includes('chỉ') ? Math.round(silverPerLuong / 10) : unit.includes('kg') ? Math.round(silverPerLuong * 26.666) : silverPerLuong;
+      if (unit.includes('chỉ')) {
+        newPrice = Math.round(silverPerLuong / 10);
+      } else if (unit.includes('kg')) {
+        newPrice = Math.round(silverPerLuong * 26.666);
+      } else if (unit.includes('gram') || unit.includes('g')) {
+        // 1 lượng = 37.5 gram -> 1 gram = 1 lượng / 37.5
+        newPrice = Math.round(silverPerLuong / 37.5);
+      } else {
+        newPrice = silverPerLuong;
+      }
     }
 
     if (newPrice !== null && newPrice > 0) {
@@ -2207,7 +2675,7 @@ app.delete('/api/holdings/:id', async (c) => {
   return c.json({ success: true, message: 'Đã xóa tài sản' });
 });
 
-// RESET & KHỞI TẠO TÀI CHÍNH THỰC TẾ (L-03: Tách bạch rõ ràng, không bao giờ xóa nhầm transactions khi reset income)
+// RESET & KHỞI TẠO TÀI CHÍNH (Tuân thủ đặc tả V2-09: Tường minh theo scope, không ảnh hưởng chéo)
 app.post('/api/reset', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
@@ -2215,27 +2683,44 @@ app.post('/api/reset', async (c) => {
   const body = await c.req.json<{
     scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'planned_expenses' | 'all';
     clearNotifications?: boolean;
+    mode?: 'hide_history' | 'hard_delete';
   }>();
 
   if (body.scope === 'transactions' || body.scope === 'all') {
-    await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
+    if (body.mode === 'hard_delete' || body.scope === 'all') {
+      await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
+    } else {
+      // Mặc định: Ẩn lịch sử nhưng bảo toàn số dư (history_hidden_at)
+      await db.prepare('UPDATE transactions SET history_hidden_at = CURRENT_TIMESTAMP WHERE user_id = ? AND history_hidden_at IS NULL').bind(userId).run();
+    }
+
     if (body.clearNotifications || body.scope === 'all') {
       await db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId).run();
     }
   }
 
   if (body.scope === 'balances' || body.scope === 'all') {
-    await db.prepare('UPDATE accounts SET balance = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').bind(userId).run();
+    // Cập nhật số dư về 0 và tăng revision
+    await db.prepare('UPDATE accounts SET balance = 0, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').bind(userId).run();
+    // Ghi nhận audit adjustment vào ledger_postings
+    const { results: accs } = await db.prepare('SELECT id, balance FROM accounts WHERE user_id = ?').bind(userId).all<{ id: string; balance: number }>();
+    if (accs && accs.length > 0) {
+      for (const a of accs) {
+        await db.prepare(
+          `INSERT INTO ledger_postings (id, user_id, operation_id, account_id, delta_vnd) VALUES (?, ?, ?, ?, ?)`
+        ).bind(`post_adj_${Date.now()}_${a.id}`, userId, `reset_balance_${Date.now()}`, a.id, -a.balance).run();
+      }
+    }
   }
 
   if (body.scope === 'holdings' || body.scope === 'all') {
+    // V2-09: Chỉ xóa danh mục sở hữu holdings thuộc user, KHÔNG xóa bảng assets chung
     await db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId).run();
-    await db.prepare('DELETE FROM assets').run();
   }
 
   if (body.scope === 'income' || body.scope === 'all') {
+    // V2-09: Chỉ xóa nguồn thu, TUYỆT ĐỐI KHÔNG tự ý reset monthly_limit của các hũ chi tiêu!
     await db.prepare('DELETE FROM income_sources WHERE user_id = ?').bind(userId).run();
-    await db.prepare('UPDATE jars SET monthly_limit = 0 WHERE user_id = ?').bind(userId).run();
   }
 
   if (body.scope === 'planned_expenses' || body.scope === 'all') {

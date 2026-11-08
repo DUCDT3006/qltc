@@ -43,6 +43,10 @@ const mapAccount = (a: any): BankAccount => ({
   name: a.name || 'Tài khoản',
   bankCode: a.bankCode ?? a.bank_code ?? undefined,
   accountNumberMask: a.accountNumberMask ?? a.account_number_mask ?? undefined,
+  accountNumber: a.accountNumber ?? a.account_number ?? undefined,
+  accountHolder: a.accountHolder ?? a.account_holder ?? undefined,
+  branch: a.branch ?? undefined,
+  bankBin: a.bankBin ?? a.bank_bin ?? undefined,
   balance: Math.round(Number(a.balance ?? 0)),
   type: (a.type || 'bank') as BankAccount['type']
 });
@@ -135,12 +139,30 @@ function AppContent() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [quickAddInitialType, setQuickAddInitialType] = useState<'expense' | 'income' | 'transfer'>('expense');
+  const [quickAddJarId, setQuickAddJarId] = useState<string | undefined>();
+  const [quickAddIncomeSourceId, setQuickAddIncomeSourceId] = useState<string | undefined>();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isResetOpen, setIsResetOpen] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSyncingPrices, setIsSyncingPrices] = useState(false);
   const lastBackPressRef = useRef<number>(0);
+
+  // V2-20: Callback thống nhất khởi tạo Transaction Composer
+  const openTransactionComposer = ({
+    type,
+    jarId,
+    incomeSourceId
+  }: {
+    type: 'income' | 'expense' | 'transfer';
+    jarId?: string;
+    incomeSourceId?: string;
+  }) => {
+    setQuickAddInitialType(type);
+    setQuickAddJarId(jarId);
+    setQuickAddIncomeSourceId(incomeSourceId);
+    setIsQuickAddOpen(true);
+  };
 
   // States - khởi tạo từ localStorage cache đã chuẩn hóa (không hiển thị dữ liệu mẫu 356,4tr ảo)
   const [jars, setJars] = useState<Jar[]>(() => {
@@ -1310,9 +1332,11 @@ function AppContent() {
             onDeleteJar={handleDeleteJar}
             onAutoAllocateJars={handleAutoAllocateJars}
             onAddTransaction={handleAddTransaction}
-            onOpenQuickAddIncome={() => {
-              setQuickAddInitialType('income');
-              setIsQuickAddOpen(true);
+            onOpenQuickAddIncome={(sourceId) => {
+              openTransactionComposer({ type: 'income', incomeSourceId: sourceId });
+            }}
+            onOpenQuickAddExpense={(jarId) => {
+              openTransactionComposer({ type: 'expense', jarId });
             }}
           />
         )}
@@ -1343,11 +1367,17 @@ function AppContent() {
       {/* Quick Add Modal */}
       <QuickAddModal
         isOpen={isQuickAddOpen}
-        onClose={() => setIsQuickAddOpen(false)}
+        onClose={() => {
+          setIsQuickAddOpen(false);
+          setQuickAddJarId(undefined);
+          setQuickAddIncomeSourceId(undefined);
+        }}
         jars={jars}
         incomeSources={incomeSources}
         accounts={accounts}
         initialType={quickAddInitialType}
+        initialJarId={quickAddJarId}
+        initialIncomeSourceId={quickAddIncomeSourceId}
         onAddTransaction={handleAddTransaction}
       />
 

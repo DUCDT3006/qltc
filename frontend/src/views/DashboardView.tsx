@@ -233,34 +233,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const expectedIncomeForPeriod = baseMonthlyExpectedIncome * periodMultiplier;
 
   const actualIncomeTxns = periodTransactions.filter(t => t.type === 'income');
-  const localIncomeForPeriod = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
-  const actualIncomeForPeriod =
-    serverSummary && confirmedTransactions.length >= 450
-      ? Math.max(localIncomeForPeriod, serverSummary.totalIncome || 0)
-      : localIncomeForPeriod;
+  // V2-12, V2-14: Tính tổng thu trực tiếp từ các giao dịch đã duyệt, không lấy Math.max giả
+  const actualIncomeForPeriod = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
 
   const incomeAchievedPct = expectedIncomeForPeriod > 0
     ? Math.round((actualIncomeForPeriod / expectedIncomeForPeriod) * 100)
     : 0;
 
-  // So sánh từng nguồn thu dự kiến với thực tế
+  // V2-12: Phân loại nguồn thu duy nhất theo incomeSourceId, tuyệt đối KHÔNG dò tên theo includes để cộng trùng!
   const incomeSourceComparison = incomeSources.map(src => {
     const monthlyExpected = normalizeToMonthlyAmount(src.expectedAmount, src.recurrence);
     const expected = monthlyExpected * periodMultiplier;
-    const localMatched = actualIncomeTxns
-      .filter(t => {
-        if (t.incomeSourceId && t.incomeSourceId === src.id) return true;
-        const cat = (t.suggestedCategory || '').toLowerCase();
-        const desc = (t.description || '').toLowerCase();
-        const nameLower = src.name.toLowerCase();
-        return cat === nameLower || cat.includes(nameLower) || desc.includes(nameLower);
-      })
+    // Khớp duy nhất theo ID nguồn thu
+    const matchedActual = actualIncomeTxns
+      .filter(t => t.incomeSourceId === src.id)
       .reduce((s, t) => s + t.amount, 0);
-    const srvSrc =
-      serverSummary && confirmedTransactions.length >= 450
-        ? serverSummary.incomeBreakdown?.find(ib => ib.source_id === src.id)
-        : undefined;
-    const matchedActual = srvSrc ? Math.max(localMatched, Number(srvSrc.total_amount || 0)) : localMatched;
     const pct = expected > 0 ? Math.round((matchedActual / expected) * 100) : 0;
     return {
       ...src,
@@ -272,25 +259,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   });
 
   const matchedActualTotal = incomeSourceComparison.reduce((s, i) => s + i.actual, 0);
-  const unmatchedActual = Math.max(0, actualIncomeForPeriod - matchedActualTotal);
+  // Khoản thu ngoài dự kiến là toàn bộ các khoản confirmed income chưa được gán source ID
+  const unmatchedActual = actualIncomeTxns
+    .filter(t => !t.incomeSourceId || !incomeSources.some(s => s.id === t.incomeSourceId))
+    .reduce((s, t) => s + t.amount, 0);
 
-  // ============================================================================
-  // 3. SO SÁNH CÁC HŨ THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM)
-  // ============================================================================
+  // 3. SO SÁNH CÁC HŨ THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM) - V2-13
   const actualExpenseTxns = periodTransactions.filter(t => t.type === 'expense');
+  const actualExpenseForPeriod = actualExpenseTxns.reduce((s, t) => s + t.amount, 0);
 
   const jarActualAmounts = jars.map(jar => {
-    const fromPeriodTxns = actualExpenseTxns
+    return actualExpenseTxns
       .filter(t => (t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code))
       .reduce((s, t) => s + t.amount, 0);
-    if (serverSummary && confirmedTransactions.length >= 450) {
-      const srvJar = serverSummary.jarBreakdown?.find(jb => jb.id === jar.id);
-      if (srvJar) return Math.max(fromPeriodTxns, Number(srvJar.spent || 0));
-    }
-    return fromPeriodTxns;
   });
 
-  const totalActualSpentForPeriod = jarActualAmounts.reduce((s, a) => s + a, 0);
+  const unassignedExpenses = actualExpenseTxns
+    .filter(t => !t.jarId && (!t.suggestedJarCode || !jars.some(j => j.code === t.suggestedJarCode)))
+    .reduce((s, t) => s + t.amount, 0);
+
+  const totalActualSpentForPeriod = actualExpenseForPeriod;
 
   // Tỷ trọng % thực tế của từng hũ (tổng = 100%)
   const actualJarSharePercents = computeExact100Percentages(jarActualAmounts);
@@ -436,10 +424,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
 
-        {/* Dynamic Sparkline */}
-        <Sparkline points={sparklinePoints} />
-
-        {/* U-01: Thanh phân bổ tỷ trọng 6 lớp tài sản trực quan */}
+        {/* U-01: Thanh phân bổ tỷ trọng 6 lớp tài sản trực quan (V2-24: Tỷ lệ thực tế) */}
         {totalCalculatedNetWorth > 0 && !privacyMode && (
           <div className="space-y-1.5">
             <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#121819]">
@@ -457,7 +442,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     key={seg.label}
                     title={`${seg.label}: ${Math.round((seg.val / totalCalculatedNetWorth) * 100)}%`}
                     style={{
-                      width: `${Math.max(3, Math.round((seg.val / totalCalculatedNetWorth) * 100))}%`,
+                      width: `${(seg.val / totalCalculatedNetWorth) * 100}%`,
                       backgroundColor: seg.color
                     }}
                     className="h-full transition-all duration-300"
@@ -593,6 +578,63 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ==========================================================================
+          DÒNG TIỀN THU - CHI TRONG KỲ (V2-21, V2-24: Đặt Sparkline đúng khối)
+         ========================================================================== */}
+      <div className="bg-[#1C2426]/85 backdrop-blur-md border border-[#8BA5AA]/15 rounded-3xl p-4.5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-[11px] font-bold text-[#869699] uppercase tracking-wider flex items-center gap-1">
+              <Scale size={13} className="text-[#95B0B4]" />
+              Dòng tiền Thu – Chi · {periodLabel}
+            </span>
+            <div className="text-[11px] text-[#869699] mt-0.5">
+              Chênh lệch ròng tích lũy từ các giao dịch đã duyệt
+            </div>
+          </div>
+          <span className={`px-2.5 py-1 rounded-full text-xs font-bold num border ${
+            actualIncomeForPeriod - actualExpenseForPeriod >= 0
+              ? 'bg-[#8CC7AE]/15 text-[#8CC7AE] border-[#8CC7AE]/35'
+              : 'bg-[#E07A5F]/15 text-[#E07A5F] border-[#E07A5F]/35'
+          }`}>
+            {actualIncomeForPeriod - actualExpenseForPeriod >= 0 ? 'Dư +' : 'Thâm hụt −'}
+            {privacyMode ? '••••••' : formatVND(Math.abs(actualIncomeForPeriod - actualExpenseForPeriod))}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 bg-[#141A1C]/90 rounded-2xl p-3 border border-[#8BA5AA]/10 text-center">
+          <div>
+            <span className="text-[10px] text-[#869699] block">Tổng Thu</span>
+            <span className="num text-[14px] font-bold text-[#8CC7AE] mt-0.5 block">
+              {privacyMode ? '••••••' : `+${formatVND(actualIncomeForPeriod)}`}
+            </span>
+          </div>
+          <div>
+            <span className="text-[10px] text-[#869699] block">Tổng Chi</span>
+            <span className="num text-[14px] font-bold text-[#DEB48A] mt-0.5 block">
+              {privacyMode ? '••••••' : `-${formatVND(actualExpenseForPeriod)}`}
+            </span>
+          </div>
+          <div>
+            <span className="text-[10px] text-[#869699] block">Dư Ròng</span>
+            <span className={`num text-[14px] font-bold mt-0.5 block ${
+              actualIncomeForPeriod - actualExpenseForPeriod >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'
+            }`}>
+              {privacyMode ? '••••••' : `${actualIncomeForPeriod - actualExpenseForPeriod >= 0 ? '+' : ''}${formatVND(actualIncomeForPeriod - actualExpenseForPeriod)}`}
+            </span>
+          </div>
+        </div>
+
+        {/* Dynamic Sparkline với nhãn rõ ràng */}
+        <div className="pt-1">
+          <div className="flex items-center justify-between text-[10.5px] text-[#869699] mb-1">
+            <span>Dòng tiền ròng tích lũy trong kỳ</span>
+            <span className="num text-[#D5E1E3]">{periodTransactions.length} giao dịch</span>
+          </div>
+          <Sparkline points={sparklinePoints} />
         </div>
       </div>
 
@@ -842,6 +884,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             );
           })}
+
+          {/* Khoản chi chưa phân loại / chưa gắn hũ (V2-13) */}
+          {unassignedExpenses > 0 && (
+            <div className="bg-[#141A1C]/85 border border-dashed border-[#8BA5AA]/20 rounded-2xl p-3 space-y-1">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span className="text-[#DEB48A]">✨ Chi chưa phân loại / Khác</span>
+                <span className="num text-[#DEB48A]">{privacyMode ? '••••••' : formatVND(unassignedExpenses)}</span>
+              </div>
+              <div className="text-[10.5px] text-[#869699]">
+                Khoản chi chưa gắn vào 6 hũ, chiếm {totalActualSpentForPeriod > 0 ? Math.round((unassignedExpenses / totalActualSpentForPeriod) * 100) : 0}% tổng chi
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1011,13 +1066,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       )}
-      {/* Modal chi tiết các khoản thu chi của hũ */}
+      {/* Modal chi tiết các khoản thu chi của hũ (V2-15: Kế thừa chuẩn xác từ Dashboard) */}
       <JarDetailModal
         isOpen={Boolean(selectedJarForDetail)}
         onClose={() => setSelectedJarForDetail(null)}
         jar={selectedJarForDetail}
         transactions={confirmedTransactions}
         privacyMode={privacyMode}
+        periodLabel={periodLabel}
+        periodMode={periodMode}
+        periodYear={selectedYear}
+        periodMonth={selectedMonth}
+        periodQuarter={selectedQuarter}
         onEditJar={() => {
           setSelectedJarForDetail(null);
           onOpenBudget();
@@ -1035,6 +1095,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         isUnassigned={isUnassignedIncomeDetail}
         transactions={confirmedTransactions}
         privacyMode={privacyMode}
+        periodLabel={periodLabel}
+        periodMode={periodMode}
+        periodYear={selectedYear}
+        periodMonth={selectedMonth}
+        periodQuarter={selectedQuarter}
         onEditSource={() => {
           setSelectedIncomeSourceForDetail(null);
           setIsUnassignedIncomeDetail(false);

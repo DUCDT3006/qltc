@@ -40,22 +40,23 @@ export const AccountQrModal: React.FC<AccountQrModalProps> = ({
     return findBankByCode(account.bankCode);
   }, [account?.bankCode]);
 
-  // Số tài khoản thực tế (ưu tiên accountNumber, fallback accountNumberMask)
-  const realAccountNumber = account?.accountNumber || account?.accountNumberMask || '';
-  const isMaskOnly = !account?.accountNumber && Boolean(account?.accountNumberMask);
+  // Số tài khoản thực tế: Chỉ chấp nhận STK đầy đủ (>= 6 chữ số), TUYỆT ĐỐI không sinh QR từ 4 số cuối mask (V2-08)
+  const hasFullAccountNumber = Boolean(account?.accountNumber && account.accountNumber.replace(/[^\d]/g, '').length >= 6);
+  const realAccountNumber = account?.accountNumber || '';
+  const isMaskOnly = !hasFullAccountNumber && Boolean(account?.accountNumberMask);
 
   // Đường link ảnh VietQR
   const qrUrl = useMemo(() => {
-    if (!account || !account.bankCode || !realAccountNumber) return '';
+    if (!account || !account.bankCode || !hasFullAccountNumber || !realAccountNumber) return '';
     return generateVietQrUrl({
       binOrBankCode: account.bankBin || bank?.bin || account.bankCode,
-      accountNumber: realAccountNumber,
+      accountNumber: realAccountNumber.replace(/[^\d]/g, ''),
       accountHolder: account.accountHolder,
       amount: amount > 0 ? amount : undefined,
       description: description.trim() || undefined,
       template: 'compact2'
     });
-  }, [account, bank, realAccountNumber, amount, description]);
+  }, [account, bank, hasFullAccountNumber, realAccountNumber, amount, description]);
 
   if (!isOpen || !account) return null;
 
@@ -175,8 +176,23 @@ export const AccountQrModal: React.FC<AccountQrModalProps> = ({
                 />
               </div>
             ) : (
-              <div className="py-12 text-center text-xs text-[#869699]">
-                Chưa đủ thông tin để tạo mã QR
+              <div className="py-10 px-4 text-center space-y-2.5">
+                <div className="text-sm font-semibold text-[#DEB48A]">Chưa thể tạo mã QR</div>
+                <p className="text-xs text-[#869699] max-w-xs mx-auto leading-relaxed">
+                  Tài khoản hiện chỉ có 4 số cuối (*{account.accountNumberMask}). Vui lòng bổ sung đầy đủ số tài khoản để tạo mã QR chuẩn VietQR chính xác.
+                </p>
+                {onEditAccount && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onEditAccount(account);
+                    }}
+                    className="mt-2 px-4 py-2 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-95 transition-transform"
+                  >
+                    Bổ sung số tài khoản
+                  </button>
+                )}
               </div>
             )}
 

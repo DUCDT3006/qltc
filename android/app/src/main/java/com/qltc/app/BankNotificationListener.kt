@@ -78,8 +78,8 @@ class BankNotificationListener : NotificationListenerService() {
             return
         }
 
-        // 3. Nhận diện dấu hiệu số tiền (+, -, VND, VNĐ, số + đ) ở cả Title lẫn Body
-        val hasMoneySign = combined.contains("+") || combined.contains("-") ||
+        // 3. Nhận diện dấu hiệu số tiền (+, -, Unicode minus −, VND, VNĐ, số + đ) ở cả Title lẫn Body
+        val hasMoneySign = combined.contains("+") || combined.contains("-") || combined.contains("−") ||
                            combined.contains("VND", ignoreCase = true) ||
                            combined.contains("VNĐ", ignoreCase = true) ||
                            Regex("""\d+\s*[đd]""").containsMatchIn(combined)
@@ -90,12 +90,19 @@ class BankNotificationListener : NotificationListenerService() {
 
         Log.i(TAG, "Phát hiện biến động số dư từ $packageName: $title - $fullBody")
 
-        // 4. Gửi lên Cloudflare Worker backend kèm thời gian thực tế xảy ra thông báo
+        // 4. Gửi lên Cloudflare Worker backend kèm thời gian thực tế xảy ra thông báo và eventId duy nhất (V2-04, V2-06)
         val postTime = sbn.postTime
-        sendToBackend(packageName, title, fullBody, postTime)
+        val eventId = java.util.UUID.randomUUID().toString()
+        sendToBackend(packageName, title, fullBody, postTime, eventId)
     }
 
-    private fun sendToBackend(packageName: String, title: String, text: String, postTime: Long = System.currentTimeMillis()) {
+    private fun sendToBackend(
+        packageName: String,
+        title: String,
+        text: String,
+        postTime: Long = System.currentTimeMillis(),
+        eventId: String = java.util.UUID.randomUUID().toString()
+    ) {
         val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
         val backendUrl = prefs.getString("backend_url", "https://qltc-backend.dtd-store.workers.dev") ?: "https://qltc-backend.dtd-store.workers.dev"
 
@@ -104,6 +111,7 @@ class BankNotificationListener : NotificationListenerService() {
             flushOfflineQueue(backendUrl, prefs)
 
             val payload = JSONObject().apply {
+                put("eventId", eventId)
                 put("packageName", packageName)
                 put("title", title)
                 put("text", text)
@@ -111,21 +119,29 @@ class BankNotificationListener : NotificationListenerService() {
                 put("userId", prefs.getString("user_id", "user_default"))
             }
 
-            val success = postJsonToBackend("$backendUrl/api/notifications/ingest", payload)
+            val success = postJsonToBackend("$backendUrl/api/notifications/ingest", payload, prefs)
             if (!success) {
-                // Nếu mất mạng hoặc gửi thất bại, lưu vào hàng đợi offline trong SharedPreferences
+                // Nếu mất mạng hoặc gửi thất bại, lưu vào hàng đợi offline trong SharedPreferences (V2-06)
                 enqueueOfflineNotif(prefs, payload)
             }
         }
     }
 
-    private fun postJsonToBackend(endpoint: String, payload: JSONObject): Boolean {
+    private fun postJsonToBackend(endpoint: String, payload: JSONObject, prefs: android.content.SharedPreferences): Boolean {
         return try {
             val url = URL(endpoint)
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json; utf-8")
             conn.setRequestProperty("Accept", "application/json")
+            
+            // Đính kèm device token nếu có (V2-01)
+            val deviceToken = prefs.getString("device_token", null)
+            if (!deviceToken.isNullOrBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer $deviceToken")
+                conn.setRequestProperty("X-Device-Token", deviceToken)
+            }
+
             conn.doOutput = true
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
@@ -166,7 +182,7 @@ class BankNotificationListener : NotificationListenerService() {
             val remaining = org.json.JSONArray()
             for (i in 0 until jsonArray.length()) {
                 val item = jsonArray.getJSONObject(i)
-                val ok = postJsonToBackend("$backendUrl/api/notifications/ingest", item)
+                val ok = postJsonToBackend("$backendUrl/api/notifications/ingest", item, prefs)
                 if (!ok) {
                     remaining.put(item)
                 }

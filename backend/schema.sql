@@ -153,9 +153,67 @@ CREATE TABLE IF NOT EXISTS investment_transactions (
   FOREIGN KEY (holding_id) REFERENCES holdings(id)
 );
 
+-- Bảng V2: Chống lặp và biên nhận mutation (V2-02)
+CREATE TABLE IF NOT EXISTS mutation_receipts (
+  user_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  ack_json TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, operation_id)
+);
+
+-- Bảng V2: Sổ cái hạch toán delta bất biến (V2-02)
+CREATE TABLE IF NOT EXISTS ledger_postings (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  transaction_id TEXT,
+  delta_vnd INTEGER NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Bảng V2: Mốc số dư cơ sở cutover tài khoản (V2-02)
+CREATE TABLE IF NOT EXISTS ledger_baselines (
+  user_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  baseline_balance INTEGER NOT NULL DEFAULT 0,
+  cutover_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, account_id)
+);
+
+-- Bảng V2: Phiên bản kế hoạch tài chính có lịch hiệu lực (V2-16)
+CREATE TABLE IF NOT EXISTS plan_versions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL, -- 'income', 'expense', 'jar_budget'
+  owner_id TEXT NOT NULL,
+  amount_vnd INTEGER NOT NULL,
+  cadence TEXT NOT NULL, -- 'monthly', 'weekly', 'quarterly', 'semiannual', 'annual', 'one_time'
+  effective_from_month TEXT NOT NULL, -- 'YYYY-MM'
+  effective_to_month_exclusive TEXT, -- 'YYYY-MM' or null
+  one_time_date TEXT, -- 'YYYY-MM-DD'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Bảng V2: Quản lý thiết bị Android và xác thực (V2-01)
+CREATE TABLE IF NOT EXISTS devices (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'active', -- 'active', 'revoked'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  revoked_at DATETIME
+);
+
 -- Chỉ mục tối ưu truy vấn
 CREATE INDEX IF NOT EXISTS idx_txn_user_time ON transactions(user_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_txn_account ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_txn_status ON transactions(status);
 CREATE INDEX IF NOT EXISTS idx_raw_notif_time ON raw_notifications(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_holdings_user ON holdings(user_id);
+CREATE INDEX IF NOT EXISTS idx_postings_account ON ledger_postings(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_postings_user ON ledger_postings(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_plan_versions_user ON plan_versions(user_id, type, owner_id);

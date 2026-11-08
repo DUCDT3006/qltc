@@ -152,7 +152,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.8', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.9', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -2251,11 +2251,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.8'
+      'User-Agent': 'QLTC-Updater/1.2.9'
     }
   });
 
@@ -2269,7 +2269,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.8.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.9.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -2278,11 +2278,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.8)
+// Thông tin phiên bản & link cập nhật (v1.2.9)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.8',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk',
+    version: '1.2.9',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

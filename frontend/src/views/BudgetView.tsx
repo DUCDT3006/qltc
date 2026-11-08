@@ -5,6 +5,7 @@ import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { JarDetailModal } from '../components/JarDetailModal';
+import { IncomeSourceDetailModal } from '../components/IncomeSourceDetailModal';
 import {
   Sparkles,
   Check,
@@ -114,6 +115,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [showBalanceModal, setShowBalanceModal] = useState(false);
   const [selectedJarForDetail, setSelectedJarForDetail] = useState<Jar | null>(null);
   const [selectedJarForEdit, setSelectedJarForEdit] = useState<Jar | null>(null);
+  const [selectedIncomeSourceForDetail, setSelectedIncomeSourceForDetail] = useState<IncomeSource | null>(null);
+  const [isUnassignedIncomeDetail, setIsUnassignedIncomeDetail] = useState(false);
   const [editName, setEditName] = useState('');
   const [editLimit, setEditLimit] = useState<number>(0);
   const [editPercentStr, setEditPercentStr] = useState('10');
@@ -573,7 +576,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       <button
                         key={s.id}
                         type="button"
-                        onClick={() => handleOpenEditIncome(s)}
+                        onClick={() => {
+                          setSelectedIncomeSourceForDetail(s);
+                          setIsUnassignedIncomeDetail(false);
+                        }}
                         className="inline-flex items-center gap-2 bg-[#161C1E]/90 hover:bg-[#20292B] px-3 py-2 rounded-xl border border-[#8BA5AA]/20 active:scale-95 transition-all group shadow-sm text-left"
                       >
                         <span
@@ -588,7 +594,17 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                                 🔑 {s.keywords}
                               </span>
                             )}
-                            <Edit3 size={11} className="text-[#869699] group-hover:text-[#F2F5F5] ml-0.5 shrink-0" />
+                            <span
+                              role="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenEditIncome(s);
+                              }}
+                              className="p-1 text-[#869699] hover:text-[#8CC7AE] rounded-lg active:scale-90 shrink-0 ml-0.5"
+                              title="Sửa nguồn thu này"
+                            >
+                              <Edit3 size={11} />
+                            </span>
                           </div>
                           <div className="flex items-center gap-1.5 mt-0.5">
                             {actualAmt > 0 ? (
@@ -606,7 +622,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                               </span>
                             ) : (
                               <span className="text-[10px] text-[#869699] opacity-75 italic">
-                                Chưa có khoản thu
+                                Thu theo thực tế
                               </span>
                             )}
                           </div>
@@ -899,7 +915,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                     <button
                       key={s.id}
                       type="button"
-                      onClick={() => handleOpenEditIncome(s)}
+                      onClick={() => {
+                        setSelectedIncomeSourceForDetail(s);
+                        setIsUnassignedIncomeDetail(false);
+                      }}
                       className="inline-flex items-center gap-2 bg-[#161C1E] hover:bg-[#20292B] px-3 py-2 rounded-xl border border-[#8BA5AA]/20 active:scale-95 transition-all text-left shadow-sm group"
                     >
                       <span
@@ -914,7 +933,17 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                               🔑 {s.keywords}
                             </span>
                           )}
-                          <Edit3 size={11} className="text-[#869699] group-hover:text-[#F2F5F5] ml-0.5 shrink-0" />
+                          <span
+                            role="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditIncome(s);
+                            }}
+                            className="p-1 text-[#869699] hover:text-[#8CC7AE] rounded-lg active:scale-90 shrink-0 ml-0.5"
+                            title="Sửa nguồn thu này"
+                          >
+                            <Edit3 size={11} />
+                          </span>
                         </div>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           {actualAmt > 0 ? (
@@ -936,6 +965,32 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                     </button>
                   );
                 })}
+
+                {/* Khoản thu ngoài dự kiến / Khác nếu có */}
+                {(() => {
+                  const unassignedAmt = actualIncomeTxns
+                    .filter(t => !t.incomeSourceId)
+                    .reduce((sum, t) => sum + t.amount, 0);
+                  if (unassignedAmt <= 0) return null;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedIncomeSourceForDetail(null);
+                        setIsUnassignedIncomeDetail(true);
+                      }}
+                      className="inline-flex items-center gap-2 bg-[#161C1E] hover:bg-[#20292B] px-3 py-2 rounded-xl border border-[#8CC7AE]/30 active:scale-95 transition-all text-left shadow-sm group"
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0 bg-[#8CC7AE]"></span>
+                      <div className="flex flex-col text-left">
+                        <span className="text-xs font-semibold text-[#8CC7AE]">Thu ngoài dự kiến / Khác</span>
+                        <span className="text-[10.5px] text-[#8CC7AE] font-bold num mt-0.5">
+                          +{formatVND(unassignedAmt)}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })()}
               </div>
             ) : (
               <div
@@ -1952,6 +2007,31 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
           if (onOpenQuickAddIncome) {
             onOpenQuickAddIncome();
           }
+        }}
+      />
+
+      {/* Modal xem chi tiết & thống kê các giao dịch đã duyệt của Nguồn thu */}
+      <IncomeSourceDetailModal
+        isOpen={Boolean(selectedIncomeSourceForDetail) || isUnassignedIncomeDetail}
+        onClose={() => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
+        }}
+        incomeSource={selectedIncomeSourceForDetail}
+        isUnassigned={isUnassignedIncomeDetail}
+        transactions={confirmedTransactions}
+        onEditSource={(s) => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
+          handleOpenEditIncome(s);
+        }}
+        onQuickAddIncome={(sourceId) => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
+          if (sourceId) {
+            setCashIncomeSourceId(sourceId);
+          }
+          setShowCashIncomeModal(true);
         }}
       />
 

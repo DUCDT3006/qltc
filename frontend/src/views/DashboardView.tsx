@@ -5,6 +5,7 @@ import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from 
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { JarDetailModal } from '../components/JarDetailModal';
+import { IncomeSourceDetailModal } from '../components/IncomeSourceDetailModal';
 import { AccountQrModal } from '../components/AccountQrModal';
 import { findBankByCode } from '../utils/vietnamBanks';
 import {
@@ -86,6 +87,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [newCashBalance, setNewCashBalance] = useState<number>(0);
   const [syncDone, setSyncDone] = useState(false);
   const [selectedJarForDetail, setSelectedJarForDetail] = useState<Jar | null>(null);
+  const [selectedIncomeSourceForDetail, setSelectedIncomeSourceForDetail] = useState<IncomeSource | null>(null);
+  const [isUnassignedIncomeDetail, setIsUnassignedIncomeDetail] = useState(false);
 
   // Điều hướng kỳ thống kê
   const handlePrevPeriod = () => {
@@ -660,7 +663,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* Chi tiết từng nguồn thu dự kiến */}
         <div className="pt-2 border-t border-[#8BA5AA]/12 space-y-2">
           {incomeSourceComparison.map(item => (
-            <div key={item.id} className="space-y-1">
+            <div
+              key={item.id}
+              onClick={() => {
+                const src = incomeSources.find(s => s.id === item.id);
+                if (src) {
+                  setSelectedIncomeSourceForDetail(src);
+                  setIsUnassignedIncomeDetail(false);
+                }
+              }}
+              className="space-y-1 p-2 rounded-xl hover:bg-[#20292B]/60 transition-colors cursor-pointer active:scale-98"
+              title="Chạm để xem các giao dịch thu đã duyệt"
+            >
               <div className="flex items-center justify-between text-[11.5px]">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-[#D5E1E3] font-medium truncate max-w-[130px]">{item.name}</span>
@@ -669,25 +683,36 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </span>
                 </div>
                 <div className="num text-right shrink-0">
-                  <b className="text-[#F2F5F5]">{formatVND(item.actual)}</b>
-                  <span className="text-[#869699]"> / {formatVND(item.expected)}</span>{' '}
-                  <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>
-                    ({item.pct}%)
-                  </span>
+                  <b className="text-[#8CC7AE]">+{formatVND(item.actual)}</b>
+                  {item.expected > 0 && <span className="text-[#869699]"> / {formatVND(item.expected)}</span>}{' '}
+                  {item.expected > 0 && (
+                    <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>
+                      ({item.pct}%)
+                    </span>
+                  )}
                 </div>
               </div>
-              <div className="h-1 rounded-full bg-[#141A1C] overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-[#8CC7AE]"
-                  style={{ width: `${Math.min(100, item.pct)}%` }}
-                />
-              </div>
+              {item.expected > 0 && (
+                <div className="h-1 rounded-full bg-[#141A1C] overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-[#8CC7AE]"
+                    style={{ width: `${Math.min(100, item.pct)}%` }}
+                  />
+                </div>
+              )}
             </div>
           ))}
 
           {/* Khoản thu ngoài dự kiến / khác nếu có */}
           {unmatchedActual > 0 && (
-            <div className="space-y-1 pt-1 border-t border-dashed border-[#8BA5AA]/15">
+            <div
+              onClick={() => {
+                setSelectedIncomeSourceForDetail(null);
+                setIsUnassignedIncomeDetail(true);
+              }}
+              className="space-y-1 p-2 rounded-xl hover:bg-[#20292B]/60 transition-colors cursor-pointer active:scale-98 border-t border-dashed border-[#8BA5AA]/15"
+              title="Chạm để xem các khoản thu ngoài dự kiến đã duyệt"
+            >
               <div className="flex items-center justify-between text-[11.5px]">
                 <span className="text-[#8CC7AE] font-medium">✨ Thu ngoài dự kiến / Khác</span>
                 <b className="num text-[#8CC7AE]">+{formatVND(unmatchedActual)}</b>
@@ -995,6 +1020,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         privacyMode={privacyMode}
         onEditJar={() => {
           setSelectedJarForDetail(null);
+          onOpenBudget();
+        }}
+      />
+
+      {/* Modal xem chi tiết & thống kê các giao dịch đã duyệt của Nguồn thu */}
+      <IncomeSourceDetailModal
+        isOpen={Boolean(selectedIncomeSourceForDetail) || isUnassignedIncomeDetail}
+        onClose={() => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
+        }}
+        incomeSource={selectedIncomeSourceForDetail}
+        isUnassigned={isUnassignedIncomeDetail}
+        transactions={confirmedTransactions}
+        privacyMode={privacyMode}
+        onEditSource={() => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
+          onOpenBudget();
+        }}
+        onQuickAddIncome={() => {
+          setSelectedIncomeSourceForDetail(null);
+          setIsUnassignedIncomeDetail(false);
           onOpenBudget();
         }}
       />

@@ -34,30 +34,31 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.8.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.9.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.8.apk
+          path: qltc-v1.2.9.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.8
-          name: "QLTC v1.2.8 - Chuẩn Hóa Lịch Sử Duyệt Từng Hũ Chi Tiêu & Khử Trùng Khoản Thu/Chuyển Tiền"
+          tag_name: v1.2.9
+          name: "QLTC v1.2.9 - Thống Kê & Lịch Sử Giao Dịch Đã Duyệt Theo Từng Nguồn Thu Thực Tế"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.8 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.9 - Android APK
 
-            Phiên bản `v1.2.8` sửa lỗi và tối ưu hóa hiển thị lịch sử duyệt cho các Hũ chi tiêu:
-            - **Chuẩn hóa lịch sử chi tiêu từng hũ:** Hũ chi tiêu chỉ ghi nhận và hiển thị các khoản chi thực tế (`expense`) thuộc đúng hũ đó; loại trừ hoàn toàn các khoản tiền vào (thu nhập) và chuyển khoản nội bộ.
-            - **Khử trùng dữ liệu DB D1:** Làm sạch các giao dịch thu nhập và chuyển khoản nội bộ cũ để không bị gán nhầm vào hũ Thiết yếu hay Tự do tài chính.
-            - **Khớp hũ chính xác tuyệt đối:** Kiểm tra chặt chẽ `jarId` và `jarCode`, đảm bảo mỗi hũ (Thiết yếu, Cho vay, Công trình...) chỉ hiển thị đúng các khoản chi đã duyệt tương ứng.
+            Phiên bản `v1.2.9` bổ sung tính năng thống kê và xem chi tiết giao dịch đã duyệt theo từng nguồn thu:
+            - **Thống kê theo nguồn thu thực tế:** Bấm vào bất kỳ chip/thẻ nguồn thu nào (hoặc nguồn Thu ngoài dự kiến) tại tab Thu chi thực tế, Kế hoạch hoặc Dashboard để mở modal thống kê chi tiết.
+            - **Lịch sử giao dịch đã duyệt:** Xem danh sách đầy đủ tất cả các khoản thu thực tế thuộc về nguồn đó, hỗ trợ lọc theo Tháng này hoặc Tất cả.
+            - **So sánh thực tế vs dự kiến:** Tính tổng số tiền thu được, tỷ lệ hoàn thành so với mục tiêu dự kiến (nếu có), số lượng giao dịch và ngày giao dịch gần nhất.
+            - **Thao tác nhanh:** Tích hợp nút chỉnh sửa nguồn thu và nút thêm nhanh khoản thu tiền mặt gắn trực tiếp với nguồn thu đang xem.
           files: |
-            qltc-v1.2.8.apk
+            qltc-v1.2.9.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

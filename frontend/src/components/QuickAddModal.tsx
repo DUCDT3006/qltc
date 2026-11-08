@@ -250,7 +250,7 @@ export const QuickAddModal: React.FC<QuickAddModalProps> = ({
                 </option>
                 {incomeSources.map((src) => (
                   <option key={src.id} value={src.id} className="bg-[#161C1E] text-white">
-                    {src.name} ({new Intl.NumberFormat('vi-VN').format(src.expectedAmount)} ₫ · {src.recurrence})
+                    {src.name} {src.expectedAmount && src.expectedAmount > 0 ? `(${new Intl.NumberFormat('vi-VN').format(src.expectedAmount)} ₫)` : ''}
                   </option>
                 ))}
               </select>

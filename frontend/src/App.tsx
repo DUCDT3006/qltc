@@ -66,7 +66,8 @@ const mapIncomeSource = (s: any): IncomeSource => ({
   kind: (s.kind || 'fixed') as IncomeSource['kind'],
   expectedAmount: Math.round(Number(s.expectedAmount ?? s.expected_amount ?? 0)),
   recurrence: s.recurrence || 'Hàng tháng',
-  color: s.color || '#8CC7AE'
+  color: s.color || '#8CC7AE',
+  keywords: s.keywords || undefined
 });
 
 const mapPlannedExpense = (e: any): PlannedExpense => ({

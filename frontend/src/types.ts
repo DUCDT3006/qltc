@@ -29,10 +29,11 @@ export interface BankAccount {
 export interface IncomeSource {
   id: string;
   name: string;
-  kind: 'fixed' | 'irregular' | 'passive';
-  expectedAmount: number;
-  recurrence: string;
+  kind?: 'fixed' | 'irregular' | 'passive';
+  expectedAmount?: number;
+  recurrence?: string;
   color?: string;
+  keywords?: string;
 }
 
 export const RECURRENCE_PRESETS: Array<{ value: string; label: string; divisor: number; hint: string }> = [
@@ -43,7 +44,7 @@ export const RECURRENCE_PRESETS: Array<{ value: string; label: string; divisor: 
   { value: 'Hàng tuần', label: 'Hàng tuần', divisor: 12 / 52, hint: 'Quy đổi 4.33 tuần/tháng' }
 ];
 
-export function getMonthlyIncomeAmount(amount: number, recurrence?: string): number {
+export function getMonthlyIncomeAmount(amount?: number, recurrence?: string): number {
   if (!amount || amount <= 0) return 0;
   const rec = (recurrence || '').toLowerCase().trim();
   if (rec.includes('năm') || rec.includes('year')) {
@@ -61,7 +62,7 @@ export function getMonthlyIncomeAmount(amount: number, recurrence?: string): num
   return amount; // Mặc định Hàng tháng
 }
 
-export function normalizeToMonthlyAmount(amount: number, recurrence?: string): number {
+export function normalizeToMonthlyAmount(amount?: number, recurrence?: string): number {
   return getMonthlyIncomeAmount(amount, recurrence);
 }
 

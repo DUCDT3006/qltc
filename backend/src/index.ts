@@ -54,7 +54,8 @@ async function ensureDatabaseSchema(db: D1Database) {
         kind TEXT NOT NULL DEFAULT 'fixed',
         recurrence TEXT DEFAULT 'Hàng tháng',
         expected_amount INTEGER DEFAULT 0,
-        color TEXT DEFAULT '#657D81',
+        color TEXT DEFAULT '#8CC7AE',
+        keywords TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -97,6 +98,7 @@ async function ensureDatabaseSchema(db: D1Database) {
       { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
       { t: 'income_sources', c: 'color', type: "TEXT DEFAULT '#657D81'" },
       { t: 'income_sources', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
+      { t: 'income_sources', c: 'keywords', type: 'TEXT' },
       { t: 'planned_expenses', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
       { t: 'planned_expenses', c: 'note', type: 'TEXT' },
       { t: 'rules', c: 'category_name', type: "TEXT DEFAULT 'Chi tiêu'" },
@@ -150,7 +152,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.5', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.6', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -345,13 +347,51 @@ app.post('/api/notifications/ingest', async (c) => {
 
   const jarId = parsed.type === 'expense' ? (jar ? jar.id : 'jar_nec') : null;
 
+  // Tự động nhận diện nguồn thu cho giao dịch cộng tiền (income) dựa trên tên nguồn thu hoặc từ khóa keywords
+  let incomeSourceId: string | null = null;
+  let incomeCategoryName: string = cat.categoryName;
+
+  if (parsed.type === 'income') {
+    try {
+      await ensurePlanningTables(db);
+      const { results: userIncomeSources } = await db.prepare(
+        'SELECT id, name, keywords FROM income_sources WHERE user_id = ? AND is_active = 1'
+      ).bind(userId).all<{ id: string; name: string; keywords: string | null }>();
+
+      if (userIncomeSources && userIncomeSources.length > 0) {
+        const cleanDesc = (parsed.description || '').toLowerCase();
+        const normalizeStr = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const normDesc = normalizeStr(cleanDesc);
+
+        for (const s of userIncomeSources) {
+          const normName = normalizeStr(s.name || '');
+          const kwList = (s.keywords || '')
+            .split(',')
+            .map(k => normalizeStr(k.trim()))
+            .filter(Boolean);
+
+          const matchName = normName.length >= 3 && normDesc.includes(normName);
+          const matchKw = kwList.some(kw => kw.length >= 2 && normDesc.includes(kw));
+
+          if (matchName || matchKw) {
+            incomeSourceId = s.id;
+            incomeCategoryName = s.name;
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Lỗi nhận diện nguồn thu tự động:', err);
+    }
+  }
+
   // 6. Tạo giao dịch ở trạng thái "Chờ duyệt" (pending) kèm balance_after và original_type
   const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   await db.prepare(`
     INSERT INTO transactions (
       id, user_id, account_id, type, amount, occurred_at, description,
-      jar_id, dedupe_hash, status, raw_notification_id, balance_after, original_type, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      jar_id, income_source_id, dedupe_hash, status, raw_notification_id, balance_after, original_type, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
   `).bind(
     txnId,
     userId,
@@ -361,11 +401,12 @@ app.post('/api/notifications/ingest', async (c) => {
     parsed.occurredAt,
     parsed.description,
     jarId,
+    incomeSourceId,
     dedupeHash,
     notifId,
     parsed.balanceAfter || null,
     parsed.type,
-    cat.categoryName
+    parsed.type === 'income' ? incomeCategoryName : cat.categoryName
   ).run();
 
   // Đánh dấu đã parse thành công và ghi mã ngân hàng
@@ -509,16 +550,52 @@ app.post('/api/notifications/reprocess', async (c) => {
         }
 
         const cat = categorizeTransaction(parsed.description, parsed.type);
-        const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
-          .bind(userId, cat.jarCode).first<{ id: string }>();
-        const jarId = jar ? jar.id : 'jar_nec';
+        const jar = parsed.type === 'expense'
+          ? await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?').bind(userId, cat.jarCode).first<{ id: string }>()
+          : null;
+        const jarId = parsed.type === 'expense' ? (jar ? jar.id : 'jar_nec') : null;
+
+        let incomeSourceId: string | null = null;
+        let incomeCategoryName: string = cat.categoryName;
+
+        if (parsed.type === 'income') {
+          try {
+            await ensurePlanningTables(db);
+            const { results: userIncomeSources } = await db.prepare(
+              'SELECT id, name, keywords FROM income_sources WHERE user_id = ? AND is_active = 1'
+            ).bind(userId).all<{ id: string; name: string; keywords: string | null }>();
+
+            if (userIncomeSources && userIncomeSources.length > 0) {
+              const cleanDesc = (parsed.description || '').toLowerCase();
+              const normalizeStr = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+              const normDesc = normalizeStr(cleanDesc);
+
+              for (const s of userIncomeSources) {
+                const normName = normalizeStr(s.name || '');
+                const kwList = (s.keywords || '')
+                  .split(',')
+                  .map(k => normalizeStr(k.trim()))
+                  .filter(Boolean);
+
+                const matchName = normName.length >= 3 && normDesc.includes(normName);
+                const matchKw = kwList.some(kw => kw.length >= 2 && normDesc.includes(kw));
+
+                if (matchName || matchKw) {
+                  incomeSourceId = s.id;
+                  incomeCategoryName = s.name;
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
 
         const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         await db.prepare(`
           INSERT INTO transactions (
             id, user_id, account_id, type, amount, occurred_at, description,
-            jar_id, dedupe_hash, status, raw_notification_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            jar_id, income_source_id, dedupe_hash, status, raw_notification_id, notes, original_type
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         `).bind(
           txnId,
           userId,
@@ -528,8 +605,11 @@ app.post('/api/notifications/reprocess', async (c) => {
           parsed.occurredAt,
           parsed.description,
           jarId,
+          incomeSourceId,
           dedupeHash,
-          notif.id
+          notif.id,
+          parsed.type === 'income' ? incomeCategoryName : cat.categoryName,
+          parsed.type
         ).run();
 
         createdTxns.push({ id: txnId, bank: parsed.bankCode, amount: parsed.amount, desc: parsed.description });
@@ -1562,11 +1642,39 @@ async function ensurePlanningTables(db: D1Database) {
       kind TEXT NOT NULL DEFAULT 'fixed',
       recurrence TEXT DEFAULT 'Hàng tháng',
       expected_amount INTEGER DEFAULT 0,
-      color TEXT DEFAULT '#657D81',
+      color TEXT DEFAULT '#8CC7AE',
+      keywords TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+
+  try {
+    await db.prepare('ALTER TABLE income_sources ADD COLUMN keywords TEXT').run();
+  } catch {}
+
+  // Tự động khởi tạo các nguồn thu cơ bản nếu người dùng chưa có nguồn thu nào
+  try {
+    const countRes = await db.prepare('SELECT COUNT(*) as cnt FROM income_sources WHERE user_id = ? AND is_active = 1')
+      .bind('user_default').first<{ cnt: number }>();
+
+    if (!countRes || countRes.cnt === 0) {
+      const defaultSources = [
+        { id: 'inc_salary', name: 'Lương chính', kind: 'fixed', keywords: 'luong, lương, salary, cong ty, cty, chuyen luong', color: '#8CC7AE' },
+        { id: 'inc_project', name: 'Thu tiền mặt công trình', kind: 'irregular', keywords: 'cong trinh, công trình, vat tu, thi cong, tien mat', color: '#DEB48A' },
+        { id: 'inc_rent', name: 'Tiền thuê nhà', kind: 'passive', keywords: 'thue nha, thuê nhà, phong tro, can ho', color: '#657D81' },
+        { id: 'inc_bonus', name: 'Thưởng / Hoa hồng', kind: 'irregular', keywords: 'thuong, thưởng, hoa hong, bonus, kpi', color: '#E09F3E' }
+      ];
+      for (const s of defaultSources) {
+        await db.prepare(`
+          INSERT OR IGNORE INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, keywords, is_active)
+          VALUES (?, 'user_default', ?, ?, 0, 'Hàng tháng', ?, ?, 1)
+        `).bind(s.id, s.name, s.kind, s.color, s.keywords).run();
+      }
+    }
+  } catch (seedErr) {
+    console.error('Lỗi seed nguồn thu mặc định:', seedErr);
+  }
 
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS planned_expenses (
@@ -1582,14 +1690,14 @@ async function ensurePlanningTables(db: D1Database) {
   `).run();
 }
 
-// Danh sách Nguồn thu dự kiến
+// Danh sách Nguồn thu
 app.get('/api/income-sources', async (c) => {
   const db = c.env.DB;
   const userId = 'user_default';
   await ensurePlanningTables(db);
-  const { results } = await db.prepare('SELECT * FROM income_sources WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC')
+  const { results } = await db.prepare('SELECT id, name, kind, expected_amount as expectedAmount, recurrence, color, keywords FROM income_sources WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC')
     .bind(userId).all();
-  return c.json({ incomeSources: results });
+  return c.json({ incomeSources: results || [] });
 });
 
 app.post('/api/income-sources', async (c) => {
@@ -1604,19 +1712,21 @@ app.post('/api/income-sources', async (c) => {
     expected_amount?: number;
     recurrence?: string;
     color?: string;
+    keywords?: string;
   }>();
   const id = body.id || `inc_${Date.now()}`;
   const amt = Math.round(body.expectedAmount ?? body.expected_amount ?? 0);
   await db.prepare(`
-    INSERT INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    INSERT INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, keywords, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
       expected_amount = excluded.expected_amount,
       recurrence = excluded.recurrence,
-      color = excluded.color
-  `).bind(id, userId, body.name, body.kind || 'fixed', amt, body.recurrence || 'Hàng tháng', body.color || '#657D81').run();
+      color = excluded.color,
+      keywords = excluded.keywords
+  `).bind(id, userId, body.name, body.kind || 'fixed', amt, body.recurrence || 'Hàng tháng', body.color || '#8CC7AE', body.keywords || null).run();
   return c.json({ success: true, id });
 });
 
@@ -1632,6 +1742,7 @@ app.put('/api/income-sources/:id', async (c) => {
     expected_amount?: number;
     recurrence?: string;
     color?: string;
+    keywords?: string;
   }>();
 
   const updates: string[] = [];
@@ -1656,6 +1767,10 @@ app.put('/api/income-sources/:id', async (c) => {
   if (body.color !== undefined) {
     updates.push('color = ?');
     params.push(body.color);
+  }
+  if (body.keywords !== undefined) {
+    updates.push('keywords = ?');
+    params.push(body.keywords || null);
   }
 
   if (updates.length > 0) {
@@ -2050,11 +2165,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.6/qltc-v1.2.6.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.5'
+      'User-Agent': 'QLTC-Updater/1.2.6'
     }
   });
 
@@ -2068,7 +2183,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.5.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.6.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -2077,11 +2192,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.5)
+// Thông tin phiên bản & link cập nhật (v1.2.6)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.5',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.5/qltc-v1.2.5.apk',
+    version: '1.2.6',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.6/qltc-v1.2.6.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

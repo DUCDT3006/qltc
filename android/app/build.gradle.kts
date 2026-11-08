@@ -11,8 +11,8 @@ android {
         applicationId = "com.qltc.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.2.5"
+        versionCode = 17
+        versionName = "1.2.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

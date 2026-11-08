@@ -54,7 +54,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div>
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-[#869699] font-medium">Hôm nay</span>
-            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">v1.2.5</span>
+            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">v1.2.6</span>
           </div>
           <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight truncate max-w-[150px]">
             {greeting}

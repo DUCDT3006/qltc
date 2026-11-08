@@ -134,9 +134,21 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
     }
 
     if (txn.type === 'income') {
-      const matchedSource = incomeSources.find(
-        s => s.id === txn.incomeSourceId || s.name.toLowerCase() === (txn.suggestedCategory || '').toLowerCase()
-      );
+      const normalizeStr = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const normDesc = normalizeStr(txn.description || '');
+      const normCat = normalizeStr(txn.suggestedCategory || '');
+
+      const matchedSource = incomeSources.find(s => {
+        if (txn.incomeSourceId && s.id === txn.incomeSourceId) return true;
+        const normName = normalizeStr(s.name || '');
+        if (normName && (normCat.includes(normName) || normDesc.includes(normName))) return true;
+        if (s.keywords) {
+          const kws = s.keywords.split(',').map(k => normalizeStr(k.trim())).filter(Boolean);
+          if (kws.some(kw => kw.length >= 2 && normDesc.includes(kw))) return true;
+        }
+        return false;
+      });
+
       if (matchedSource) {
         return {
           incomeSourceId: matchedSource.id,
@@ -1180,7 +1192,11 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                             {src.name}
                           </div>
                           <div className="text-[10.5px] text-[#869699] mt-0.5">
-                            {formatVND(src.expectedAmount)} · {src.recurrence}
+                            {src.expectedAmount && src.expectedAmount > 0
+                              ? `${formatVND(src.expectedAmount)} · ${src.recurrence || 'Hàng tháng'}`
+                              : src.keywords
+                              ? `🔑 ${src.keywords}`
+                              : (src.recurrence || 'Thu tự do')}
                           </div>
                         </div>
                       </div>
@@ -1318,7 +1334,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                   </option>
                   {incomeSources.map((src) => (
                     <option key={src.id} value={src.id} className="bg-[#161C1E] text-white">
-                      {src.name} ({formatVND(src.expectedAmount)})
+                      {src.name} {src.expectedAmount && src.expectedAmount > 0 ? `(${formatVND(src.expectedAmount)})` : ''}
                     </option>
                   ))}
                 </select>

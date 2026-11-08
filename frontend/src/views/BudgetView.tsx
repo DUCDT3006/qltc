@@ -80,13 +80,15 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [subTab, setSubTab] = useState<'planned' | 'actual'>('planned');
   const [allocatedSuccess, setAllocatedSuccess] = useState(false);
 
-  // Modal Thêm / Sửa Nguồn thu dự kiến (U-07: Hợp nhất và dễ sử dụng nhất)
+  // Modal Thêm / Sửa Nguồn thu (phân loại dòng tiền & tự động nhận diện từ thông báo)
   const [showIncomeModal, setShowIncomeModal] = useState(false);
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
   const [sourceAmount, setSourceAmount] = useState<number>(0);
   const [sourceRecurrence, setSourceRecurrence] = useState('Hàng tháng');
   const [sourceKind, setSourceKind] = useState<'fixed' | 'irregular' | 'passive'>('fixed');
+  const [sourceKeywords, setSourceKeywords] = useState('');
+  const [sourceColor, setSourceColor] = useState('#8CC7AE');
   const [sourceError, setSourceError] = useState('');
 
   // Modal Ghi nhận Khoản thu tiền mặt thực tế (vào Ví & Nguồn thu)
@@ -182,13 +184,15 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const totalActualPercentSum = actualJarPercentages.reduce((s, p) => s + p, 0);
   const remainingPlanned = totalLimit - totalActualSpent;
 
-  // --- HANDLERS NGUỒN THU DỰ KIẾN (Kế hoạch dòng tiền & chia hũ) ---
+  // --- HANDLERS NGUỒN THU (Phân loại dòng tiền & tự động nhận diện từ thông báo) ---
   const handleOpenAddIncome = () => {
     setEditingSourceId(null);
     setSourceName('');
     setSourceAmount(0);
     setSourceRecurrence('Hàng tháng');
     setSourceKind('fixed');
+    setSourceKeywords('');
+    setSourceColor('#8CC7AE');
     setSourceError('');
     setShowIncomeModal(true);
   };
@@ -196,9 +200,11 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const handleOpenEditIncome = (source: IncomeSource) => {
     setEditingSourceId(source.id);
     setSourceName(source.name);
-    setSourceAmount(source.expectedAmount);
+    setSourceAmount(source.expectedAmount || 0);
     setSourceRecurrence(source.recurrence || 'Hàng tháng');
     setSourceKind(source.kind || 'fixed');
+    setSourceKeywords(source.keywords || '');
+    setSourceColor(source.color || '#8CC7AE');
     setSourceError('');
     setShowIncomeModal(true);
   };
@@ -209,39 +215,42 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       setSourceError('Vui lòng nhập tên nguồn thu (ví dụ: Lương chính, Cho thuê nhà...)');
       return;
     }
-    if (sourceAmount <= 0) {
-      setSourceError('Vui lòng nhập số tiền dự kiến lớn hơn 0 ₫');
-      return;
-    }
     setSourceError('');
+
+    const cleanKeywords = sourceKeywords.trim();
+    const payload: Partial<IncomeSource> = {
+      name: sourceName.trim(),
+      expectedAmount: sourceAmount || 0,
+      recurrence: sourceRecurrence,
+      kind: sourceKind,
+      color: sourceColor,
+      keywords: cleanKeywords || undefined
+    };
 
     if (editingSourceId) {
       if (onUpdateIncomeSource) {
-        onUpdateIncomeSource(editingSourceId, {
-          name: sourceName.trim(),
-          expectedAmount: sourceAmount,
-          recurrence: sourceRecurrence,
-          kind: sourceKind
-        });
+        onUpdateIncomeSource(editingSourceId, payload);
       } else {
         onDeleteIncomeSource(editingSourceId);
         onAddIncomeSource({
           id: editingSourceId,
           name: sourceName.trim(),
-          expectedAmount: sourceAmount,
+          expectedAmount: sourceAmount || 0,
           recurrence: sourceRecurrence,
           kind: sourceKind,
-          color: '#8CC7AE'
+          color: sourceColor,
+          keywords: cleanKeywords || undefined
         });
       }
     } else {
       onAddIncomeSource({
         id: `inc_${Date.now()}`,
         name: sourceName.trim(),
-        expectedAmount: sourceAmount,
+        expectedAmount: sourceAmount || 0,
         recurrence: sourceRecurrence,
         kind: sourceKind,
-        color: '#8CC7AE'
+        color: sourceColor,
+        keywords: cleanKeywords || undefined
       });
     }
 
@@ -505,8 +514,19 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   Tổng Thu Dự Kiến ({incomeSources.length} nguồn)
                 </div>
                 <div className="num text-[23px] font-bold text-[#F2F5F5] mt-0.5">
-                  {formatVND(totalExpectedIncome)}{' '}
-                  <span className="text-xs text-[#869699] font-normal">/tháng</span>
+                  {totalExpectedIncome > 0 ? (
+                    <>
+                      {formatVND(totalExpectedIncome)}{' '}
+                      <span className="text-xs text-[#869699] font-normal">/tháng</span>
+                    </>
+                  ) : totalActualIncome > 0 ? (
+                    <>
+                      +{formatVND(totalActualIncome)}{' '}
+                      <span className="text-xs text-[#8CC7AE] font-normal">(thực thu)</span>
+                    </>
+                  ) : (
+                    <span className="text-base text-[#869699] font-medium">Theo thực tế</span>
+                  )}
                 </div>
               </div>
 
@@ -526,7 +546,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   type="button"
                   onClick={handleOpenAddIncome}
                   className="px-3.5 py-2 rounded-xl bg-[#8CC7AE] hover:bg-[#9ED4BC] text-[#0E1314] text-xs font-bold flex items-center gap-1.5 shadow-md active:scale-95 transition-all"
-                  title="Thiết lập nguồn thu dự kiến để tự động chia hũ & phân bổ"
+                  title="Thiết lập nguồn thu để tự động nhận diện từ thông báo ngân hàng"
                 >
                   <Sparkles size={14} />
                   Thêm nguồn thu
@@ -538,42 +558,59 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
             {incomeSources.length > 0 ? (
               <div className="space-y-1.5 pt-1">
                 <div className="text-[10.5px] text-[#869699]">
-                  💡 <i>Chạm vào nguồn thu để chỉnh sửa hoặc xem tiến độ thực thu tháng này:</i>
+                  💡 <i>Chạm vào nguồn thu để chỉnh sửa tên, từ khóa nhận diện tự động hoặc xem tiến độ:</i>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {incomeSources.map((s) => {
                     const monthly = normalizeToMonthlyAmount(s.expectedAmount, s.recurrence);
-                    const isMonthly = (s.recurrence || '').toLowerCase().includes('tháng') && !s.recurrence.toLowerCase().includes('6 tháng');
+                    const hasExpected = monthly > 0;
                     const actualAmt = actualIncomeTxns
                       .filter(t => t.incomeSourceId === s.id)
                       .reduce((sum, t) => sum + t.amount, 0);
-                    const pctActual = monthly > 0 ? Math.round((actualAmt / monthly) * 100) : 0;
+                    const pctActual = hasExpected ? Math.round((actualAmt / monthly) * 100) : 0;
 
                     return (
                       <button
                         key={s.id}
                         type="button"
                         onClick={() => handleOpenEditIncome(s)}
-                        className="inline-flex items-center gap-1.5 bg-[#161C1E]/90 hover:bg-[#20292B] px-3 py-1.5 rounded-xl border border-[#8BA5AA]/20 active:scale-95 transition-all group"
+                        className="inline-flex items-center gap-2 bg-[#161C1E]/90 hover:bg-[#20292B] px-3 py-2 rounded-xl border border-[#8BA5AA]/20 active:scale-95 transition-all group shadow-sm text-left"
                       >
-                        <span className={`w-2 h-2 rounded-full ${actualAmt >= monthly && monthly > 0 ? 'bg-[#8CC7AE]' : 'bg-[#DEB48A]'}`}></span>
-                        <span className="text-xs font-semibold text-[#F2F5F5]">{s.name}:</span>
-                        <b className="text-[#8CC7AE] num text-xs">{formatVND(monthly)}/th</b>
-                        {!isMonthly && (
-                          <span className="text-[10px] text-[#869699]">
-                            ({formatVND(s.expectedAmount)}/{s.recurrence})
-                          </span>
-                        )}
-                        {actualAmt > 0 ? (
-                          <span className="text-[10px] text-[#8CC7AE] font-medium bg-[#8CC7AE]/15 px-1.5 py-0.5 rounded-md">
-                            Thu: {formatVND(actualAmt)} ({pctActual}%)
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-[#869699] opacity-75">
-                            (chưa nhận)
-                          </span>
-                        )}
-                        <Edit3 size={11} className="text-[#869699] group-hover:text-[#F2F5F5] ml-0.5" />
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: s.color || '#8CC7AE' }}
+                        ></span>
+                        <div className="flex flex-col text-left">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-semibold text-[#F2F5F5]">{s.name}</span>
+                            {s.keywords && (
+                              <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#20292B] text-[#869699] border border-[#8BA5AA]/15 max-w-[110px] truncate" title={`Từ khóa: ${s.keywords}`}>
+                                🔑 {s.keywords}
+                              </span>
+                            )}
+                            <Edit3 size={11} className="text-[#869699] group-hover:text-[#F2F5F5] ml-0.5 shrink-0" />
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            {actualAmt > 0 ? (
+                              <span className="text-[11px] text-[#8CC7AE] font-bold num">
+                                +{formatVND(actualAmt)}
+                                {hasExpected && (
+                                  <span className="text-[9.5px] text-[#869699] font-normal ml-1">
+                                    / {formatVND(monthly)} ({pctActual}%)
+                                  </span>
+                                )}
+                              </span>
+                            ) : hasExpected ? (
+                              <span className="text-[10.5px] text-[#869699] num">
+                                Dự kiến: {formatVND(monthly)}/th
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-[#869699] opacity-75 italic">
+                                Chưa có khoản thu
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </button>
                     );
                   })}
@@ -582,9 +619,9 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
             ) : (
               <div
                 onClick={handleOpenAddIncome}
-                className="text-xs text-[#869699] bg-[#161C1E]/40 border border-dashed border-[#8BA5AA]/25 rounded-2xl p-3 text-center cursor-pointer hover:border-[#8CC7AE]/50 transition-colors"
+                className="text-xs text-[#869699] bg-[#161C1E]/40 border border-dashed border-[#8BA5AA]/25 rounded-2xl p-3.5 text-center cursor-pointer hover:border-[#8CC7AE]/50 transition-colors"
               >
-                Chưa có nguồn thu nào. Bấm <b>+ Thêm nguồn thu</b> để lên kế hoạch thu nhập & chia hũ, hoặc <b>+ Thêm khoản thu</b> để ghi chép tiền mặt!
+                Chưa có nguồn thu nào. Bấm <b>+ Thêm nguồn thu</b> để tạo nguồn thu (Lương, Công trình, Thuê nhà...) giúp tự động nhận diện từ ngân hàng!
               </div>
             )}
 
@@ -815,6 +852,101 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
             </div>
           </div>
 
+          {/* CARD DANH MỤC NGUỒN THU THỰC TẾ (Hiển thị chi tiết thực thu từng nguồn trong tháng) */}
+          <div className="bg-[#182022]/90 border border-[#8BA5AA]/20 rounded-3xl p-4 shadow-lg space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-bold text-[#869699] uppercase tracking-wider">
+                  Nguồn Thu Tháng Này ({incomeSources.length})
+                </span>
+                <span className="text-[10px] text-[#8CC7AE] bg-[#8CC7AE]/15 px-2 py-0.5 rounded-full font-bold num">
+                  +{formatVND(totalActualIncome)}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleOpenAddCashIncome}
+                  className="px-2.5 py-1 rounded-xl bg-[#202A2C] hover:bg-[#283538] text-[#8CC7AE] border border-[#8CC7AE]/30 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition-all"
+                  title="Ghi chép khoản thu tiền mặt"
+                >
+                  <Wallet size={12} />
+                  + Khoản thu
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenAddIncome}
+                  className="px-2.5 py-1 rounded-xl bg-[#8CC7AE] hover:bg-[#9ED4BC] text-[#0E1314] text-[11px] font-bold flex items-center gap-1 active:scale-95 transition-all"
+                  title="Thêm nguồn thu để tự động nhận diện từ ngân hàng"
+                >
+                  <Plus size={12} />
+                  + Nguồn thu
+                </button>
+              </div>
+            </div>
+
+            {incomeSources.length > 0 ? (
+              <div className="flex flex-wrap gap-2 pt-0.5">
+                {incomeSources.map((s) => {
+                  const actualAmt = actualIncomeTxns
+                    .filter(t => t.incomeSourceId === s.id)
+                    .reduce((sum, t) => sum + t.amount, 0);
+                  const monthly = normalizeToMonthlyAmount(s.expectedAmount, s.recurrence);
+                  const hasExpected = monthly > 0;
+                  const pctActual = hasExpected ? Math.round((actualAmt / monthly) * 100) : 0;
+
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => handleOpenEditIncome(s)}
+                      className="inline-flex items-center gap-2 bg-[#161C1E] hover:bg-[#20292B] px-3 py-2 rounded-xl border border-[#8BA5AA]/20 active:scale-95 transition-all text-left shadow-sm group"
+                    >
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: s.color || '#8CC7AE' }}
+                      ></span>
+                      <div className="flex flex-col text-left">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-semibold text-[#F2F5F5]">{s.name}</span>
+                          {s.keywords && (
+                            <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#20292B] text-[#869699] border border-[#8BA5AA]/15 max-w-[110px] truncate" title={`Từ khóa: ${s.keywords}`}>
+                              🔑 {s.keywords}
+                            </span>
+                          )}
+                          <Edit3 size={11} className="text-[#869699] group-hover:text-[#F2F5F5] ml-0.5 shrink-0" />
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          {actualAmt > 0 ? (
+                            <span className="text-[10.5px] text-[#8CC7AE] font-bold num">
+                              +{formatVND(actualAmt)}
+                              {hasExpected && (
+                                <span className="text-[9.5px] text-[#869699] font-normal ml-1">
+                                  / {formatVND(monthly)} ({pctActual}%)
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-[#869699] opacity-75 italic">
+                              Chưa có khoản thu
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div
+                onClick={handleOpenAddIncome}
+                className="text-xs text-[#869699] bg-[#161C1E]/40 border border-dashed border-[#8BA5AA]/25 rounded-2xl p-3 text-center cursor-pointer hover:border-[#8CC7AE]/50 transition-colors"
+              >
+                Chưa có nguồn thu nào. Bấm <b>+ Nguồn thu</b> để tạo nguồn thu (Lương, Công trình, Thuê nhà...) nhận diện tự động từ ngân hàng!
+              </div>
+            )}
+          </div>
+
           {/* Header Hũ Thực Tế (Tự động đồng bộ với tab Dự Kiến) */}
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-2">
@@ -999,12 +1131,44 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   </option>
                   {incomeSources.map(s => (
                     <option key={s.id} value={s.id} className="bg-[#161C1E] text-white">
-                      {s.name} ({formatVND(s.expectedAmount)} · {s.recurrence})
+                      {s.name} {s.expectedAmount && s.expectedAmount > 0 ? `(${formatVND(s.expectedAmount)} · ${s.recurrence || 'Hàng tháng'})` : ''}
                     </option>
                   ))}
                 </select>
-                <p className="text-[10px] text-[#869699] mt-1 italic">
-                  💡 Giúp đối soát xem nguồn thu này thực tế đã đạt bao nhiêu % so với dự kiến.
+
+                {/* Chọn nhanh 1-chạm dạng chip */}
+                {incomeSources.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setCashIncomeSourceId('')}
+                      className={`px-2.5 py-1 rounded-xl text-[10.5px] font-semibold border transition-all ${
+                        cashIncomeSourceId === ''
+                          ? 'bg-[#8CC7AE]/25 border-[#8CC7AE] text-[#8CC7AE]'
+                          : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#869699] hover:bg-[#283538]'
+                      }`}
+                    >
+                      ✨ Thu khác
+                    </button>
+                    {incomeSources.map(s => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => setCashIncomeSourceId(s.id)}
+                        className={`px-2.5 py-1 rounded-xl text-[10.5px] font-semibold border flex items-center gap-1.5 transition-all ${
+                          cashIncomeSourceId === s.id
+                            ? 'bg-[#8CC7AE]/25 border-[#8CC7AE] text-[#8CC7AE]'
+                            : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#C4D0D2] hover:bg-[#283538]'
+                        }`}
+                      >
+                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: s.color || '#8CC7AE' }}></span>
+                        {s.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[10px] text-[#869699] mt-1.5 italic">
+                  💡 Giúp phân loại rõ ràng từng nguồn thu trong báo cáo và sổ cái dòng tiền.
                 </p>
               </div>
 
@@ -1057,17 +1221,18 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {showIncomeModal && (() => {
         const convertedMonthly = normalizeToMonthlyAmount(sourceAmount, sourceRecurrence);
         const isMonthly = sourceRecurrence === 'Hàng tháng';
+        const colorPalette = ['#8CC7AE', '#DEB48A', '#657D81', '#E09F3E', '#A78BFA', '#38BDF8', '#F43F5E'];
 
         return (
           <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
-            <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
+            <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-base font-bold text-[#F2F5F5] block">
-                    {editingSourceId ? 'Chỉnh sửa nguồn thu dự kiến' : 'Thiết lập nguồn thu dự kiến mới'}
+                    {editingSourceId ? 'Chỉnh sửa nguồn thu' : 'Thêm nguồn thu mới'}
                   </span>
                   <span className="text-[11px] text-[#869699]">
-                    Quy đổi dòng tiền hàng tháng để tự động chia các hũ & đối soát
+                    Phân loại nguồn thu & tự động nhận diện từ thông báo giao dịch
                   </span>
                 </div>
                 <button
@@ -1092,7 +1257,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       setSourceName(e.target.value);
                       if (sourceError) setSourceError('');
                     }}
-                    placeholder="VD: Lương chính, Tiền thuê nhà, Thưởng..."
+                    placeholder="VD: Lương chính, Thu tiền mặt công trình, Tiền thuê nhà..."
                     className={`w-full bg-[#20292B] border rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none transition-colors ${
                       sourceError && !sourceName.trim()
                         ? 'border-[#E07A7A]'
@@ -1101,7 +1266,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   />
                   {/* Gợi ý nhanh */}
                   <div className="flex items-center gap-1.5 overflow-x-auto pt-2 no-scrollbar">
-                    {['Lương chính', 'Thưởng KPI', 'Freelance / Làm thêm', 'Cho thuê nhà', 'Cổ tức / Đầu tư'].map(chip => (
+                    {['Lương chính', 'Thu tiền mặt công trình', 'Tiền thuê nhà', 'Thưởng / Hoa hồng', 'Cổ tức / Đầu tư', 'Bán hàng / Freelance'].map(chip => (
                       <button
                         key={chip}
                         type="button"
@@ -1117,63 +1282,52 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   </div>
                 </div>
 
-                {/* Số tiền (CurrencyInput với chip) */}
+                {/* Từ khóa nhận diện tự động từ thông báo ngân hàng */}
                 <div>
                   <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                    Số tiền dự kiến nhận *
+                    Từ khóa tự động nhận diện (cách nhau bởi dấu phẩy)
                   </label>
-                  <CurrencyInput
-                    value={sourceAmount}
-                    onChange={(val) => {
-                      setSourceAmount(val);
-                      if (sourceError) setSourceError('');
-                    }}
-                    autoFocus={!editingSourceId}
-                    className="text-lg font-bold"
+                  <input
+                    type="text"
+                    value={sourceKeywords}
+                    onChange={(e) => setSourceKeywords(e.target.value)}
+                    placeholder="VD: luong, salary, cty ABC, cong trinh, thue nha..."
+                    className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2.5 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]"
                   />
+                  <p className="text-[10px] text-[#869699] mt-1 italic">
+                    💡 Khi nhận thông báo cộng tiền có chứa từ khóa này, ứng dụng sẽ tự động phân loại vào nguồn thu này.
+                  </p>
                 </div>
 
-                {/* Chu kỳ nhận (Recurrence selector với auto division) */}
+                {/* Chọn màu sắc nhận diện */}
                 <div>
-                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                    Thời gian nhận / Chu kỳ *
+                  <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1.5">
+                    Màu sắc nhận diện
                   </label>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {RECURRENCE_PRESETS.map((preset) => {
-                      const isSelected = sourceRecurrence === preset.label;
+                  <div className="flex items-center gap-2">
+                    {colorPalette.map((color) => {
+                      const isSelected = sourceColor === color;
                       return (
                         <button
-                          key={preset.label}
+                          key={color}
                           type="button"
-                          onClick={() => setSourceRecurrence(preset.label)}
-                          className={`p-2 rounded-xl border text-left transition-all ${
-                            isSelected
-                              ? 'bg-[#1D2926] border-[#8CC7AE] text-[#8CC7AE]'
-                              : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#C4D0D2] hover:bg-[#253235]'
+                          onClick={() => setSourceColor(color)}
+                          className={`w-7 h-7 rounded-xl transition-all flex items-center justify-center ${
+                            isSelected ? 'ring-2 ring-[#F2F5F5] scale-110' : 'opacity-70 hover:opacity-100'
                           }`}
+                          style={{ backgroundColor: color }}
                         >
-                          <div className="text-xs font-semibold">{preset.label}</div>
-                          <div className="text-[9.5px] opacity-75">{preset.hint}</div>
+                          {isSelected && <Check size={14} className="text-[#0E1314]" />}
                         </button>
                       );
                     })}
                   </div>
-
-                  {/* Hiển thị kết quả quy đổi hàng tháng tự động */}
-                  {sourceAmount > 0 && !isMonthly && (
-                    <div className="mt-2 p-2.5 bg-[#12191B] rounded-xl border border-[#8CC7AE]/20 flex items-center justify-between text-xs">
-                      <span className="text-[#869699]">Tự động chia thành:</span>
-                      <span className="font-bold text-[#8CC7AE] num">
-                        ~{formatVND(convertedMonthly)} / tháng
-                      </span>
-                    </div>
-                  )}
                 </div>
 
-                {/* Loại nguồn thu */}
+                {/* Phân loại nguồn thu */}
                 <div>
                   <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                    Phân loại nguồn thu
+                    Phân loại dòng tiền
                   </label>
                   <div className="grid grid-cols-3 gap-1.5">
                     {[
@@ -1195,6 +1349,69 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Số tiền dự kiến (TÙY CHỌN - Không bắt buộc) */}
+                <div className="p-3 bg-[#161C1E]/70 rounded-2xl border border-[#8BA5AA]/15 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block">
+                      Số tiền dự kiến (Tùy chọn)
+                    </label>
+                    <span className="text-[10px] text-[#869699]">
+                      {sourceAmount > 0 ? 'Có dự kiến' : 'Tự do theo thực tế'}
+                    </span>
+                  </div>
+                  <CurrencyInput
+                    value={sourceAmount}
+                    onChange={(val) => {
+                      setSourceAmount(val);
+                      if (sourceError) setSourceError('');
+                    }}
+                    placeholder="0 ₫"
+                    className="text-base font-bold py-2"
+                  />
+                  <p className="text-[10px] text-[#869699] italic">
+                    Có thể để 0 ₫ nếu thu nhập không cố định hàng tháng.
+                  </p>
+
+                  {/* Chu kỳ nhận (nếu có nhập số tiền dự kiến) */}
+                  {sourceAmount > 0 && (
+                    <div className="pt-2 border-t border-[#8BA5AA]/10 space-y-1.5">
+                      <label className="text-[10.5px] font-semibold text-[#869699] uppercase tracking-wider block">
+                        Chu kỳ nhận
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {RECURRENCE_PRESETS.map((preset) => {
+                          const isSelected = sourceRecurrence === preset.label;
+                          return (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => setSourceRecurrence(preset.label)}
+                              className={`p-1.5 rounded-xl border text-left transition-all ${
+                                isSelected
+                                  ? 'bg-[#1D2926] border-[#8CC7AE] text-[#8CC7AE]'
+                                  : 'bg-[#20292B] border-[#8BA5AA]/15 text-[#C4D0D2] hover:bg-[#253235]'
+                              }`}
+                            >
+                              <div className="text-xs font-semibold">{preset.label}</div>
+                              <div className="text-[9px] opacity-75">{preset.hint}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Hiển thị kết quả quy đổi hàng tháng tự động */}
+                      {!isMonthly && (
+                        <div className="mt-1.5 p-2 bg-[#12191B] rounded-xl border border-[#8CC7AE]/20 flex items-center justify-between text-xs">
+                          <span className="text-[#869699]">Quy đổi hàng tháng:</span>
+                          <span className="font-bold text-[#8CC7AE] num">
+                            ~{formatVND(convertedMonthly)} / tháng
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Báo lỗi nếu thiếu */}

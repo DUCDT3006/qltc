@@ -13,7 +13,7 @@ export const RECURRENCE_PRESETS = [
   { value: 'Một lần', label: 'Một lần / Theo đợt', divisor: 1, hint: 'Ghi nhận trọn vẹn trong tháng này' }
 ];
 
-export function normalizeToMonthlyAmount(amount: number, recurrence?: string): number {
+export function normalizeToMonthlyAmount(amount?: number, recurrence?: string): number {
   if (!amount || amount <= 0) return 0;
   const rec = (recurrence || '').toLowerCase().trim();
   // Kiểm tra "nửa năm / 6 tháng" TRƯỚC "năm" để tránh 'nửa năm' bị khớp nhầm vào 'năm' (chia 12 thay vì chia 6)

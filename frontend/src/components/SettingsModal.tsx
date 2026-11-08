@@ -219,7 +219,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.2.7';
+  const CURRENT_VERSION = 'v1.2.8';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -227,8 +227,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.2.7',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk',
+    tagName: 'v1.2.8',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -290,15 +290,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.2.7';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk';
+      let latestTag = 'v1.2.8';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk';
       let releaseBody = '';
 
       try {
         const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
         if (res.ok) {
           const data = await res.json();
-          latestTag = data.tag_name || 'v1.2.7';
+          latestTag = data.tag_name || 'v1.2.8';
           const apkAsset = Array.isArray(data.assets)
             ? data.assets.find((a: any) => a.name.endsWith('.apk'))
             : null;
@@ -342,11 +342,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.2.7',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk',
+        tagName: 'v1.2.8',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.7. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.8. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -361,7 +361,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk');
       return;
     }
 
@@ -369,7 +369,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v1.2.7'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v1.2.8'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {

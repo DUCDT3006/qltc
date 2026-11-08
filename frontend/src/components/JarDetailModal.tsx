@@ -39,17 +39,20 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
 
   const nowVN = useMemo(() => getVietnamDate(), []);
 
-  // Lọc các giao dịch thuộc hũ này
+  // Lọc các giao dịch chi tiêu thuộc hũ này
   const jarTransactions = useMemo(() => {
     if (!jar) return [];
 
     return transactions.filter(t => {
-      // Khớp theo jarId hoặc theo suggestedJarCode
+      // 1. Chỉ các khoản chi tiêu (expense) mới thuộc hũ chi tiêu!
+      if (t.type !== 'expense') return false;
+
+      // 2. Không hiển thị các chân phụ đã ẩn
+      if (t.status === 'paired_hidden') return false;
+
+      // 3. Khớp chính xác theo jarId hoặc theo suggestedJarCode
       const isMatchJar = t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code;
       if (!isMatchJar) return false;
-
-      // Không hiển thị các chân phụ đã ẩn
-      if (t.status === 'paired_hidden') return false;
 
       if (filterPeriod === 'month') {
         return isTxnInPeriod(t.occurredAtIso || t.occurredAt, 'month', {
@@ -63,14 +66,8 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
 
   if (!isOpen || !jar) return null;
 
-  // Tính tổng chi và tổng thu (nếu có)
-  const totalExpense = jarTransactions
-    .filter(t => t.type === 'expense')
-    .reduce((s, t) => s + t.amount, 0);
-
-  const totalIncome = jarTransactions
-    .filter(t => t.type === 'income')
-    .reduce((s, t) => s + t.amount, 0);
+  // Tính tổng chi tiêu của hũ
+  const totalExpense = jarTransactions.reduce((s, t) => s + t.amount, 0);
 
   const remaining = jar.monthlyLimit - totalExpense;
   const pctUsed = jar.monthlyLimit > 0
@@ -206,7 +203,7 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
                   : 'text-[#869699] hover:text-[#D5E1E3]'
               }`}
             >
-              Tất cả ({transactions.filter(t => t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code).length})
+              Tất cả ({transactions.filter(t => t.type === 'expense' && t.status !== 'paired_hidden' && (t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code)).length})
             </button>
           </div>
 
@@ -226,23 +223,18 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
           )}
         </div>
 
-        {/* Danh sách các khoản thu chi đã ghi nhận */}
+        {/* Danh sách các khoản chi tiêu đã ghi nhận */}
         <div className="flex-1 overflow-y-auto space-y-2 pr-0.5 no-scrollbar min-h-[160px] max-h-[360px]">
           {jarTransactions.length > 0 ? (
             jarTransactions.map((txn) => {
-              const isIncome = txn.type === 'income';
               return (
                 <div
                   key={txn.id}
                   className="p-3 rounded-2xl bg-[#1C2426]/75 border border-[#8BA5AA]/12 flex items-center justify-between gap-3 hover:bg-[#20292B] transition-colors"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                        isIncome ? 'bg-[#8CC7AE]/15 text-[#8CC7AE]' : 'bg-[#E07A7A]/15 text-[#E07A7A]'
-                      }`}
-                    >
-                      {isIncome ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />}
+                    <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-[#E07A7A]/15 text-[#E07A7A]">
+                      <ArrowDownRight size={16} />
                     </div>
 
                     <div className="min-w-0">
@@ -266,12 +258,8 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
                   </div>
 
                   <div className="text-right shrink-0">
-                    <div
-                      className={`num text-xs font-bold ${
-                        isIncome ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
-                      }`}
-                    >
-                      {privacyMode ? '••••' : `${isIncome ? '+' : '−'}${formatVND(txn.amount)}`}
+                    <div className="num text-xs font-bold text-[#F2F5F5]">
+                      {privacyMode ? '••••' : `−${formatVND(txn.amount)}`}
                     </div>
                     {txn.status === 'confirmed' && (
                       <span className="text-[9.5px] text-[#8CC7AE] flex items-center justify-end gap-0.5 mt-0.5">

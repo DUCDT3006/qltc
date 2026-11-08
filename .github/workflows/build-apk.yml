@@ -34,30 +34,30 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.7.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.8.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.7.apk
+          path: qltc-v1.2.8.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.7
-          name: "QLTC v1.2.7 - Hỗ Trợ Chuyển Khoản Nội Bộ Hai Chiều Cả Thu Và Chi"
+          tag_name: v1.2.8
+          name: "QLTC v1.2.8 - Chuẩn Hóa Lịch Sử Duyệt Từng Hũ Chi Tiêu & Khử Trùng Khoản Thu/Chuyển Tiền"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.7 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.8 - Android APK
 
-            Phiên bản `v1.2.7` nâng cấp toàn diện tính năng Chuyển khoản nội bộ giữa các ví/tài khoản:
-            - **Hỗ trợ chuyển khoản nội bộ 2 chiều (Cả Thu và Chi):** Khi duyệt giao dịch tiền vào (thu nhập) hoặc tiền ra (chi tiêu), anh đều có thể chọn ghép cặp Chuyển khoản nội bộ ngay lập tức.
-            - **Nút "Chuyển nội bộ" trực quan ở cả Thẻ vuốt và Danh sách:** Dễ dàng bấm chuyển nội bộ trực tiếp từ chế độ vuốt thẻ hoặc bấm nút "Nội bộ" ở từng dòng trong danh sách.
-            - **Modal chọn ví 2 Tab thông minh:** Tab 1 phân bổ Hũ chi/Nguồn thu và Tab 2 Chuyển khoản nội bộ với đầy đủ thông tin số dư ví, chiều chuyển tiền rõ ràng (ví nguồn ➔ ví đích) và không làm sai lệch hạn mức chi tiêu các hũ.
+            Phiên bản `v1.2.8` sửa lỗi và tối ưu hóa hiển thị lịch sử duyệt cho các Hũ chi tiêu:
+            - **Chuẩn hóa lịch sử chi tiêu từng hũ:** Hũ chi tiêu chỉ ghi nhận và hiển thị các khoản chi thực tế (`expense`) thuộc đúng hũ đó; loại trừ hoàn toàn các khoản tiền vào (thu nhập) và chuyển khoản nội bộ.
+            - **Khử trùng dữ liệu DB D1:** Làm sạch các giao dịch thu nhập và chuyển khoản nội bộ cũ để không bị gán nhầm vào hũ Thiết yếu hay Tự do tài chính.
+            - **Khớp hũ chính xác tuyệt đối:** Kiểm tra chặt chẽ `jarId` và `jarCode`, đảm bảo mỗi hũ (Thiết yếu, Cho vay, Công trình...) chỉ hiển thị đúng các khoản chi đã duyệt tương ứng.
           files: |
-            qltc-v1.2.7.apk
+            qltc-v1.2.8.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

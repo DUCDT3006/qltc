@@ -152,7 +152,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.7', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.8', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -748,32 +748,41 @@ app.put('/api/transactions/:id', async (c) => {
     }
   }
 
-  // L-13: Ưu tiên jarId chính xác tuyệt đối
+  // L-13: Ưu tiên jarId chính xác tuyệt đối (chỉ áp dụng cho giao dịch Chi tiêu)
   let resolvedJarId: string | null = null;
   let resolvedJarCode: string | null = body.jarCode || null;
-  if (body.jarId) {
-    updates.push('jar_id = ?');
-    params.push(body.jarId);
-    resolvedJarId = body.jarId;
-    if (!resolvedJarCode) {
-      const j = await db.prepare('SELECT code FROM jars WHERE id = ? AND user_id = ?')
-        .bind(body.jarId, userId).first<{ code: string }>();
-      resolvedJarCode = j?.code || null;
-    }
-  } else if (body.jarCode) {
-    const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
-      .bind(userId, body.jarCode).first<{ id: string }>();
-    if (jar) {
+  if (currentTxn.type === 'expense') {
+    if (body.jarId !== undefined) {
       updates.push('jar_id = ?');
-      params.push(jar.id);
-      resolvedJarId = jar.id;
+      params.push(body.jarId || null);
+      resolvedJarId = body.jarId || null;
+      if (body.jarId && !resolvedJarCode) {
+        const j = await db.prepare('SELECT code FROM jars WHERE id = ? AND user_id = ?')
+          .bind(body.jarId, userId).first<{ code: string }>();
+        resolvedJarCode = j?.code || null;
+      }
+    } else if (body.jarCode) {
+      const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
+        .bind(userId, body.jarCode).first<{ id: string }>();
+      if (jar) {
+        updates.push('jar_id = ?');
+        params.push(jar.id);
+        resolvedJarId = jar.id;
+      }
     }
+  } else {
+    // Với giao dịch Thu nhập hoặc Chuyển nội bộ: bắt buộc jar_id = NULL
+    updates.push('jar_id = NULL');
   }
 
-  // L-08: Gắn incomeSourceId (cho phép gán NULL nếu chọn "Thu nhập khác")
-  if (body.incomeSourceId !== undefined) {
-    updates.push('income_source_id = ?');
-    params.push(body.incomeSourceId || null);
+  // L-08: Gắn incomeSourceId (chỉ áp dụng cho giao dịch Thu nhập)
+  if (currentTxn.type === 'income') {
+    if (body.incomeSourceId !== undefined) {
+      updates.push('income_source_id = ?');
+      params.push(body.incomeSourceId || null);
+    }
+  } else {
+    updates.push('income_source_id = NULL');
   }
 
   if (body.amount !== undefined) {
@@ -854,12 +863,13 @@ app.post('/api/transactions', async (c) => {
 
   const txnId = body.id || `txn_man_${Date.now()}`;
   const cleanAmount = Math.round(body.amount || 0);
-  let jarId = body.jarId || null;
+  let jarId = body.type === 'expense' ? (body.jarId || null) : null;
   if (!jarId && body.jarCode && body.type === 'expense') {
     const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
       .bind(userId, body.jarCode).first<{ id: string }>();
     jarId = jar?.id || null;
   }
+  const incomeSourceId = body.type === 'income' ? (body.incomeSourceId || null) : null;
 
   await db.prepare(`
     INSERT INTO transactions (
@@ -2241,11 +2251,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.7'
+      'User-Agent': 'QLTC-Updater/1.2.8'
     }
   });
 
@@ -2259,7 +2269,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.7.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.8.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -2268,11 +2278,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.7)
+// Thông tin phiên bản & link cập nhật (v1.2.8)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.7',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk',
+    version: '1.2.8',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.8/qltc-v1.2.8.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

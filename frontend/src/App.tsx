@@ -103,10 +103,10 @@ const mapTransaction = (t: any): Transaction => {
     amount: Math.round(Number(t.amount ?? 0)),
     description: t.description || '',
     suggestedCategory: category,
-    suggestedJarCode: t.jar_code ?? t.suggestedJarCode ?? 'NEC',
-    jarId: t.jarId ?? t.jar_id ?? undefined,
-    incomeSourceId: t.incomeSourceId ?? t.income_source_id ?? undefined,
-    incomeSourceName: t.incomeSourceName ?? t.income_source_name ?? undefined,
+    suggestedJarCode: type === 'expense' ? (t.jar_code ?? t.suggestedJarCode ?? 'NEC') : '',
+    jarId: type === 'expense' ? (t.jarId ?? t.jar_id ?? undefined) : undefined,
+    incomeSourceId: type === 'income' ? (t.incomeSourceId ?? t.income_source_id ?? undefined) : undefined,
+    incomeSourceName: type === 'income' ? (t.incomeSourceName ?? t.income_source_name ?? undefined) : undefined,
     balanceAfter: t.balanceAfter ?? t.balance_after ?? undefined,
     occurredAt: formatOccurredTime(rawIso),
     occurredAtIso: rawIso,
@@ -546,7 +546,7 @@ function AppContent() {
         ? jars.find(j => j.id === jarId) || jars.find(j => j.code === jarCode) || defaultJar
         : undefined;
 
-    const finalJarCode = txn.type === 'expense' ? (targetJar?.code || jarCode || txn.suggestedJarCode || 'NEC') : txn.suggestedJarCode;
+    const finalJarCode = txn.type === 'expense' ? (targetJar?.code || jarCode || txn.suggestedJarCode || 'NEC') : '';
     const finalJarId = txn.type === 'expense' ? (targetJar?.id || jarId) : undefined;
     const finalCategory =
       categoryName ||
@@ -600,9 +600,9 @@ function AppContent() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status: 'confirmed',
-          jarId: finalJarId,
-          jarCode: txn.type === 'expense' ? finalJarCode : undefined,
-          incomeSourceId: txn.type === 'income' ? (incomeSourceId || null) : undefined,
+          jarId: txn.type === 'expense' ? (finalJarId || null) : null,
+          jarCode: txn.type === 'expense' ? finalJarCode : null,
+          incomeSourceId: txn.type === 'income' ? (incomeSourceId || null) : null,
           categoryName: finalCategory
         })
       });

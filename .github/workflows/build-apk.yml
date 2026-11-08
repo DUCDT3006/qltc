@@ -34,31 +34,33 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.9.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.3.0.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.9.apk
+          path: qltc-v1.3.0.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.9
-          name: "QLTC v1.2.9 - Thống Kê & Lịch Sử Giao Dịch Đã Duyệt Theo Từng Nguồn Thu Thực Tế"
+          tag_name: v1.3.0
+          name: "QLTC v1.3.0 - Nâng Cấp Toàn Diện Kiến Trúc V2 (Sổ Cái Delta, Phân Bổ VND, XIRR)"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.9 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.3.0 - Android APK
 
-            Phiên bản `v1.2.9` bổ sung tính năng thống kê và xem chi tiết giao dịch đã duyệt theo từng nguồn thu:
-            - **Thống kê theo nguồn thu thực tế:** Bấm vào bất kỳ chip/thẻ nguồn thu nào (hoặc nguồn Thu ngoài dự kiến) tại tab Thu chi thực tế, Kế hoạch hoặc Dashboard để mở modal thống kê chi tiết.
-            - **Lịch sử giao dịch đã duyệt:** Xem danh sách đầy đủ tất cả các khoản thu thực tế thuộc về nguồn đó, hỗ trợ lọc theo Tháng này hoặc Tất cả.
-            - **So sánh thực tế vs dự kiến:** Tính tổng số tiền thu được, tỷ lệ hoàn thành so với mục tiêu dự kiến (nếu có), số lượng giao dịch và ngày giao dịch gần nhất.
-            - **Thao tác nhanh:** Tích hợp nút chỉnh sửa nguồn thu và nút thêm nhanh khoản thu tiền mặt gắn trực tiếp với nguồn thu đang xem.
+            Phiên bản `v1.3.0` đánh dấu hoàn tất kiến trúc nâng cấp V2 với 26 cải tiến cốt lõi:
+            - **Sổ cái Delta & Chống lặp (V2-02):** Hạch toán delta hai chiều nguyên tử, bảo đảm bất biến tổng số dư và không nhân đôi khi duyệt/undo.
+            - **Bộ phân tích thông báo V2 (V2-04):** Xử lý dấu trừ Unicode, bảo vệ ngày tháng không nhầm thành số tiền, loại bỏ hoàn toàn tin nhắn OTP.
+            - **Phân bổ VND chính xác (V2-17):** Thuật toán Largest Remainder Method phân phối từng đồng VND không sai lệch.
+            - **Bảo vệ tài sản vàng SJC (V2-18):** Tách biệt vàng trong nước SJC không bị ghi đè bởi giá PAXG quốc tế, quy đổi chỉ/lượng/gram chuẩn xác.
+            - **Đo lường hiệu quả đầu tư XIRR (V2-19):** Tích hợp công cụ tính tỷ suất sinh lời thực tế nội bộ cho các dòng tiền nạp/rút tài sản.
+            - **Chế độ riêng tư (V2-23):** Ẩn hiện số dư nhạy cảm một chạm trên toàn bộ giao diện.
           files: |
-            qltc-v1.2.9.apk
+            qltc-v1.3.0.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

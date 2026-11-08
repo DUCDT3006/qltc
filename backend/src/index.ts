@@ -2736,11 +2736,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.3.0/qltc-v1.3.0.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.9'
+      'User-Agent': 'QLTC-Updater/1.3.0'
     }
   });
 
@@ -2754,7 +2754,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.9.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.3.0.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -2763,15 +2763,16 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.9)
+// Thông tin phiên bản & link cập nhật (v1.3.0 V2 Core)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.9',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk',
+    version: '1.3.0',
+    versionCode: 21,
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.3.0/qltc-v1.3.0.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,
-    message: 'Giao diện web cập nhật tức thì qua mạng (OTA).'
+    message: 'Nâng cấp toàn diện kiến trúc V2: Sổ cái delta bất biến, chống lặp idempotency, bảo vệ vàng SJC, phân bổ VND chính xác.'
   });
 });
 

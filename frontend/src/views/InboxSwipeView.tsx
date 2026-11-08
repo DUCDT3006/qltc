@@ -20,7 +20,9 @@ import {
   CreditCard,
   CheckCheck,
   ChevronRight,
-  Layers
+  Layers,
+  ArrowDownLeft,
+  ArrowUpRight
 } from 'lucide-react';
 
 interface InboxSwipeViewProps {
@@ -79,6 +81,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
   // Giao dịch đang mở modal chọn hũ / nguồn thu
   const [pickerTxn, setPickerTxn] = useState<Transaction | null>(null);
+  const [pickerTab, setPickerTab] = useState<'category' | 'transfer'>('category');
 
   // Modal / Sheet chỉnh sửa giao dịch đã duyệt (trong tab Lịch sử)
   const [editingConfirmedTxn, setEditingConfirmedTxn] = useState<Transaction | null>(null);
@@ -591,25 +594,45 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
                           <div className="flex flex-wrap items-center gap-2 mb-4">
                             {activeTxn.type === 'income' ? (
-                              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#8CC7AE]/20 text-[#8CC7AE] border border-[#8CC7AE]/30">
-                                <DollarSign size={13} /> {activeAssignment?.categoryName || 'Thu nhập'}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPickerTab('category');
+                                  setPickerTxn(activeTxn);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#8CC7AE]/20 hover:bg-[#8CC7AE]/30 text-[#8CC7AE] border border-[#8CC7AE]/30 active:scale-95 transition-all"
+                              >
+                                <DollarSign size={13} /> {activeAssignment?.categoryName || 'Thu nhập'} ▾
+                              </button>
                             ) : (
-                              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#657D81]/25 text-[#DCE6E8] border border-[#8BA5AA]/30">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPickerTab('category');
+                                  setPickerTxn(activeTxn);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#657D81]/25 hover:bg-[#657D81]/40 text-[#DCE6E8] border border-[#8BA5AA]/30 active:scale-95 transition-all"
+                              >
                                 <span
                                   className="w-2.5 h-2.5 rounded-full"
                                   style={{ backgroundColor: activeJarObj?.color || '#657D81' }}
                                 ></span>
-                                <span>Hũ {activeJarObj?.name || 'Chi tiêu'}</span>
-                              </span>
+                                <span>Hũ {activeJarObj?.name || 'Chi tiêu'} ▾</span>
+                              </button>
                             )}
 
-                            <button
-                              onClick={() => setPickerTxn(activeTxn)}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#D5E1E3] bg-[#232E31] hover:bg-[#2C3B3F] border border-[#8BA5AA]/30 active:scale-95 transition-transform"
-                            >
-                              {activeTxn.type === 'income' ? 'Đổi nguồn thu ▾' : 'Đổi hũ chi / Chuyển nội bộ ▾'}
-                            </button>
+                            {onPairTransfer && accounts && accounts.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPickerTab('transfer');
+                                  setPickerTxn(activeTxn);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#8CC7AE] bg-[#1C2527] hover:bg-[#233134] border border-[#8CC7AE]/35 active:scale-95 transition-all shadow-sm"
+                              >
+                                <Repeat size={12} /> Chuyển nội bộ
+                              </button>
+                            )}
                           </div>
                         </>
                       )}
@@ -858,13 +881,31 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                               </div>
 
                               {txn.type !== 'transfer' && (
-                                <button
-                                  type="button"
-                                  onClick={() => setPickerTxn(txn)}
-                                  className="text-[10.5px] font-semibold text-[#8CC7AE] hover:text-[#A7DBCA] px-2 py-0.5 rounded-lg bg-[#232E31] border border-[#8BA5AA]/20 active:scale-95"
-                                >
-                                  Đổi ▾
-                                </button>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPickerTab('category');
+                                      setPickerTxn(txn);
+                                    }}
+                                    className="text-[10.5px] font-semibold text-[#D5E1E3] hover:text-white px-2 py-0.5 rounded-lg bg-[#232E31] border border-[#8BA5AA]/20 active:scale-95"
+                                  >
+                                    {txn.type === 'income' ? 'Nguồn thu ▾' : 'Hũ chi ▾'}
+                                  </button>
+                                  {onPairTransfer && accounts && accounts.length > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setPickerTab('transfer');
+                                        setPickerTxn(txn);
+                                      }}
+                                      className="text-[10.5px] font-semibold text-[#8CC7AE] hover:text-[#A7DBCA] px-2 py-0.5 rounded-lg bg-[#1C2527] border border-[#8CC7AE]/30 active:scale-95 flex items-center gap-1"
+                                      title="Ghép chuyển khoản nội bộ"
+                                    >
+                                      <Repeat size={10} /> Nội bộ
+                                    </button>
+                                  )}
+                                </div>
                               )}
                             </div>
 
@@ -1035,11 +1076,15 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
       {/* ======================= MODAL / SHEET CHỌN HŨ CHI HOẶC NGUỒN THU ======================= */}
       {pickerTxn && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
-          <div className="w-full max-w-md max-h-[82vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
+          <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-base font-bold text-[#F2F5F5] block">
-                  {pickerTxn.type === 'income' ? 'Chọn nguồn thu nhập' : 'Chọn hũ chi tiêu'}
+                  {pickerTab === 'transfer'
+                    ? 'Chuyển khoản nội bộ'
+                    : pickerTxn.type === 'income'
+                    ? 'Chọn nguồn thu nhập'
+                    : 'Chọn hũ chi tiêu'}
                 </span>
                 <span className="text-[11px] text-[#869699] truncate block max-w-xs">
                   {pickerTxn.description} ({formatVND(pickerTxn.amount)})
@@ -1053,8 +1098,116 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
               </button>
             </div>
 
-            {/* DANH SÁCH HŨ CHO KHOẢN CHI (EXPENSE) */}
-            {pickerTxn.type !== 'income' ? (
+            {/* TAB CHUYỂN ĐỔI: PHÂN BỔ (HŨ / NGUỒN THU) VS CHUYỂN NỘI BỘ */}
+            <div className="flex p-1 bg-[#121819] rounded-xl border border-[#8BA5AA]/20">
+              <button
+                type="button"
+                onClick={() => setPickerTab('category')}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  pickerTab === 'category'
+                    ? 'bg-[#232E31] text-[#F2F5F5] shadow-sm border border-[#8BA5AA]/30'
+                    : 'text-[#869699] hover:text-[#D5E1E3]'
+                }`}
+              >
+                {pickerTxn.type === 'income' ? <DollarSign size={13} /> : <Layers size={13} />}
+                {pickerTxn.type === 'income' ? 'Nguồn thu nhập' : 'Hũ chi tiêu'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPickerTab('transfer')}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  pickerTab === 'transfer'
+                    ? 'bg-[#1D2926] text-[#8CC7AE] shadow-sm border border-[#8CC7AE]/40'
+                    : 'text-[#869699] hover:text-[#D5E1E3]'
+                }`}
+              >
+                <Repeat size={13} />
+                Chuyển khoản nội bộ
+              </button>
+            </div>
+
+            {/* NỘI DUNG THEO TAB ĐANG CHỌN */}
+            {pickerTab === 'transfer' ? (
+              /* TAB 2: CHỌN TÀI KHOẢN ĐỐI ỨNG ĐỂ CHUYỂN TIỀN NỘI BỘ */
+              <div className="space-y-3">
+                {/* Hướng dẫn ngữ cảnh theo chiều Thu hay Chi */}
+                {pickerTxn.type === 'income' ? (
+                  <div className="p-3 rounded-2xl bg-[#1C2527] border border-[#8CC7AE]/30 text-xs">
+                    <div className="font-semibold text-[#8CC7AE] flex items-center gap-1.5 mb-1">
+                      <ArrowDownLeft size={14} /> Tiền vào ví: {pickerTxn.accountName} (+{formatVND(pickerTxn.amount)})
+                    </div>
+                    <div className="text-[11px] text-[#97A8AB] leading-relaxed">
+                      Anh chọn tài khoản nguồn (ví đã chuyển tiền đến đây) bên dưới để ghi nhận chuyển tiền nội bộ.
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-2xl bg-[#1C2527] border border-[#8CC7AE]/30 text-xs">
+                    <div className="font-semibold text-[#8CC7AE] flex items-center gap-1.5 mb-1">
+                      <ArrowUpRight size={14} /> Tiền ra từ ví: {pickerTxn.accountName} (-{formatVND(pickerTxn.amount)})
+                    </div>
+                    <div className="text-[11px] text-[#97A8AB] leading-relaxed">
+                      Anh chọn tài khoản đích (ví sẽ nhận số tiền này) bên dưới để chuyển khoản nội bộ (không trừ hũ).
+                    </div>
+                  </div>
+                )}
+
+                {(() => {
+                  const availableAccounts = accounts.filter(
+                    acc =>
+                      acc.id !== pickerTxn.accountId &&
+                      acc.name !== pickerTxn.accountName &&
+                      (acc.accountNumberMask && pickerTxn.accountName ? !pickerTxn.accountName.includes(acc.accountNumberMask) : true)
+                  );
+
+                  if (availableAccounts.length === 0) {
+                    return (
+                      <div className="p-4 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/20 text-center text-xs text-[#97A8AB] space-y-1">
+                        <p className="font-medium text-[#D5E1E3]">Chưa có tài khoản đối ứng</p>
+                        <p className="text-[11px] text-[#869699]">
+                          Cần ít nhất 2 tài khoản/ví khác nhau để thực hiện chuyển khoản nội bộ. Anh có thể thêm tài khoản mới trong tab Cài đặt &gt; Ví & Thẻ.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-2">
+                      {availableAccounts.map((targetAcc) => (
+                        <button
+                          key={targetAcc.id}
+                          type="button"
+                          onClick={() => {
+                            if (onPairTransfer) {
+                              onPairTransfer(pickerTxn.id, targetAcc.id);
+                            }
+                            setPickerTxn(null);
+                          }}
+                          className="w-full p-3 rounded-2xl bg-[#1C2527] hover:bg-[#233134] border border-[#8CC7AE]/30 flex items-center justify-between text-left active:scale-98 transition-all"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-xl bg-[#232E31] text-[#8CC7AE] font-bold text-xs flex items-center justify-center border border-[#8CC7AE]/25 shadow-sm">
+                              {targetAcc.bankCode || 'VÍ'}
+                            </div>
+                            <div>
+                              <div className="text-xs font-bold text-[#F2F5F5]">{targetAcc.name}</div>
+                              <div className="text-[10.5px] text-[#869699] flex items-center gap-1.5 mt-0.5">
+                                <span>{targetAcc.accountNumberMask ? `*${targetAcc.accountNumberMask}` : 'Tài khoản'}</span>
+                                <span>·</span>
+                                <span className="text-[#8CC7AE]">Số dư: {formatVND(targetAcc.balance)}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <span className="text-[11px] font-semibold text-[#8CC7AE] px-3 py-1.5 rounded-xl bg-[#8CC7AE]/15 border border-[#8CC7AE]/30 shrink-0">
+                            {pickerTxn.type === 'income' ? 'Ví chuyển đi ›' : 'Ví nhận ›'}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : pickerTxn.type !== 'income' ? (
+              /* TAB 1A: DANH SÁCH HŨ CHO KHOẢN CHI (EXPENSE) */
               <div className="space-y-2">
                 {jars.map((jar) => {
                   const currentAssignment = getTxnAssignment(pickerTxn);
@@ -1107,56 +1260,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     </button>
                   );
                 })}
-
-                {/* TÙY CHỌN ĐIỀU CHUYỂN NỘI BỘ */}
-                {onPairTransfer && accounts && accounts.length > 1 && (
-                  <div className="pt-3 border-t border-[#8BA5AA]/20 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-semibold text-[#8CC7AE] uppercase tracking-wider flex items-center gap-1">
-                        <ArrowRightLeft size={13} /> Hoặc chuyển khoản nội bộ sang:
-                      </span>
-                      <span className="text-[10px] text-[#869699]">Không trừ hũ</span>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      {accounts
-                        .filter(
-                          acc =>
-                            acc.name !== pickerTxn.accountName &&
-                            (acc.accountNumberMask ? !pickerTxn.accountName.includes(acc.accountNumberMask) : true)
-                        )
-                        .map((targetAcc) => (
-                          <button
-                            key={targetAcc.id}
-                            type="button"
-                            onClick={() => {
-                              onPairTransfer(pickerTxn.id, targetAcc.id);
-                              setPickerTxn(null);
-                            }}
-                            className="w-full p-2.5 rounded-xl bg-[#1C2527] hover:bg-[#233134] border border-[#8CC7AE]/30 flex items-center justify-between text-left active:scale-98 transition-all"
-                          >
-                            <div className="flex items-center gap-2.5">
-                              <div className="w-7 h-7 rounded-lg bg-[#232E31] text-[#8CC7AE] font-bold text-[11px] flex items-center justify-center border border-[#8CC7AE]/20">
-                                {targetAcc.bankCode || 'VÍ'}
-                              </div>
-                              <div>
-                                <div className="text-xs font-semibold text-[#F2F5F5]">{targetAcc.name}</div>
-                                <div className="text-[10px] text-[#869699]">
-                                  {targetAcc.accountNumberMask ? `*${targetAcc.accountNumberMask}` : 'Tài khoản'}
-                                </div>
-                              </div>
-                            </div>
-                            <span className="text-[11px] font-medium text-[#8CC7AE] px-2.5 py-1 rounded-lg bg-[#8CC7AE]/10 border border-[#8CC7AE]/20">
-                              Chọn làm ví nhận ›
-                            </span>
-                          </button>
-                        ))}
-                    </div>
-                  </div>
-                )}
               </div>
             ) : (
-              /* DANH SÁCH NGUỒN THU CHO KHOẢN THU (INCOME) */
+              /* TAB 1B: DANH SÁCH NGUỒN THU CHO KHOẢN THU (INCOME) */
               <div className="space-y-2">
                 {incomeSources.map((src) => {
                   const currentAssignment = getTxnAssignment(pickerTxn);

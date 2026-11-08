@@ -152,7 +152,7 @@ app.use('*', async (c, next) => {
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.6', time: new Date().toISOString() });
+  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.7', time: new Date().toISOString() });
 });
 
 // Seed data cơ bản nếu DB mới
@@ -993,7 +993,7 @@ app.post('/api/transactions/:id/unpair', async (c) => {
   });
 });
 
-// Ghép cặp thủ công 1 giao dịch chi thành chuyển khoản sang tài khoản khác (Phương án 2)
+// Ghép cặp thủ công 1 giao dịch (thu hoặc chi) thành chuyển khoản nội bộ giữa 2 tài khoản
 app.post('/api/transactions/:id/pair-transfer', async (c) => {
   const db = c.env.DB;
   const id = c.req.param('id');
@@ -1007,59 +1007,135 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
     return c.json({ success: false, message: 'Không tìm thấy giao dịch' }, 404);
   }
 
-  const targetAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
+  const selectedAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
     .bind(toAccountId, userId).first<any>();
 
-  if (!targetAcc) {
-    return c.json({ success: false, message: 'Không tìm thấy tài khoản nhận' }, 404);
+  if (!selectedAcc) {
+    return c.json({ success: false, message: 'Không tìm thấy tài khoản đã chọn' }, 404);
   }
 
+  if (toAccountId === txn.account_id) {
+    return c.json({ success: false, message: 'Tài khoản chuyển và nhận phải khác nhau' }, 400);
+  }
+
+  const currentAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
+    .bind(txn.account_id, userId).first<any>();
+
+  const isIncome = txn.type === 'income' || txn.original_type === 'income';
   const pairId = `pair_${Date.now()}`;
 
-  // Tìm xem có giao dịch nhận tiền pending trùng số tiền ở tài khoản đích chưa
-  const existingCounter = await db.prepare(`
-    SELECT id FROM transactions
-    WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL
-    ORDER BY occurred_at DESC LIMIT 1
-  `).bind(userId, toAccountId, txn.amount).first<{ id: string }>();
+  if (isIncome) {
+    // Giao dịch hiện tại là TIỀN VÀO tài khoản hiện tại (currentAcc).
+    // Người dùng chọn selectedAcc là tài khoản ĐÃ CHUYỂN TIỀN ĐI.
+    // Nguồn (tiền ra): selectedAcc. Đích (tiền vào): currentAcc.
+    const sourceAccountId = toAccountId;
+    const destAccountId = txn.account_id;
 
-  // 1. Cập nhật giao dịch nguồn thành transfer kèm to_account_id
-  await db.prepare(`
-    UPDATE transactions 
-    SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?
-    WHERE id = ? AND user_id = ?
-  `).bind(toAccountId, pairId, `Chuyển sang ${targetAcc.name}`, id, userId).run();
+    // Tìm xem ở tài khoản nguồn (selectedAcc) có giao dịch chi (expense) pending trùng số tiền không
+    const existingCounter = await db.prepare(`
+      SELECT id FROM transactions
+      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'expense' AND status = 'pending' AND transfer_pair_id IS NULL
+      ORDER BY occurred_at DESC LIMIT 1
+    `).bind(userId, sourceAccountId, txn.amount).first<{ id: string }>();
 
-  // Nếu giao dịch nguồn vốn đã ở trạng thái confirmed (khoản chi đã trừ tiền), cộng bổ sung vào tài khoản đích
-  if (txn.status === 'confirmed') {
-    await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
-      .bind(txn.amount, toAccountId, userId).run();
-  }
+    if (existingCounter) {
+      // 1. Biến existingCounter thành thẻ transfer chính hiển thị trong Hộp thư
+      await db.prepare(`
+        UPDATE transactions
+        SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?
+        WHERE id = ? AND user_id = ?
+      `).bind(destAccountId, pairId, `Chuyển sang ${currentAcc?.name || 'tài khoản nhận'}`, existingCounter.id, userId).run();
 
-  // 2. Liên kết hoặc tạo chân đối ứng ẩn (paired_hidden) để hiển thị thông tin tài khoản đích & hỗ trợ Tách lại nếu cần
-  if (existingCounter) {
-    await db.prepare(`
-      UPDATE transactions
-      SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
-      WHERE id = ? AND user_id = ?
-    `).bind(pairId, `Nhận từ đối ứng ${id}`, existingCounter.id, userId).run();
+      // 2. Chân nhận tiền txn chuyển thành paired_hidden
+      await db.prepare(`
+        UPDATE transactions
+        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
+        WHERE id = ? AND user_id = ?
+      `).bind(pairId, `Nhận từ đối ứng ${existingCounter.id}`, id, userId).run();
+    } else {
+      // Không có sẵn khoản chi đối ứng: biến txn thành giao dịch transfer từ source sang dest
+      await db.prepare(`
+        UPDATE transactions
+        SET account_id = ?, to_account_id = ?, type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?
+        WHERE id = ? AND user_id = ?
+      `).bind(sourceAccountId, destAccountId, pairId, `Chuyển từ ${selectedAcc.name} sang ${currentAcc?.name || 'tài khoản nhận'}`, id, userId).run();
+
+      // Tạo chân đối ứng ẩn ở tài khoản nhận
+      const counterTxnId = `txn_pair_${Date.now()}`;
+      await db.prepare(`
+        INSERT INTO transactions (
+          id, user_id, account_id, type, amount, occurred_at, description,
+          status, transfer_pair_id, original_type, notes
+        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
+      `).bind(
+        counterTxnId,
+        userId,
+        destAccountId,
+        txn.amount,
+        txn.occurred_at,
+        `Nhận chuyển khoản nội bộ vào ${currentAcc?.name || 'tài khoản nhận'}`,
+        pairId,
+        `Nhận từ đối ứng ${id}`
+      ).run();
+    }
+
+    // Nếu khoản thu này vốn đã confirmed (đã cộng vào destAccountId), trừ bổ sung từ tài khoản nguồn để cân đối
+    if (txn.status === 'confirmed') {
+      await db.prepare('UPDATE accounts SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(txn.amount, sourceAccountId, userId).run();
+    }
   } else {
-    const counterTxnId = `txn_pair_${Date.now()}`;
+    // Giao dịch hiện tại là TIỀN RA (expense) từ tài khoản hiện tại (currentAcc).
+    // Người dùng chọn selectedAcc là tài khoản SẼ NHẬN TIỀN.
+    // Nguồn (tiền ra): currentAcc. Đích (tiền vào): selectedAcc.
+    const sourceAccountId = txn.account_id;
+    const destAccountId = toAccountId;
+
+    // Tìm xem ở tài khoản đích có giao dịch nhận (income) pending trùng số tiền không
+    const existingCounter = await db.prepare(`
+      SELECT id FROM transactions
+      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL
+      ORDER BY occurred_at DESC LIMIT 1
+    `).bind(userId, destAccountId, txn.amount).first<{ id: string }>();
+
+    // 1. Cập nhật giao dịch nguồn thành transfer kèm to_account_id
     await db.prepare(`
-      INSERT INTO transactions (
-        id, user_id, account_id, type, amount, occurred_at, description,
-        status, transfer_pair_id, original_type, notes
-      ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
-    `).bind(
-      counterTxnId,
-      userId,
-      toAccountId,
-      txn.amount,
-      txn.occurred_at,
-      `Nhận chuyển khoản nội bộ vào ${targetAcc.name}`,
-      pairId,
-      `Nhận từ đối ứng ${id}`
-    ).run();
+      UPDATE transactions 
+      SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?
+      WHERE id = ? AND user_id = ?
+    `).bind(destAccountId, pairId, `Chuyển sang ${selectedAcc.name}`, id, userId).run();
+
+    // Nếu giao dịch nguồn vốn đã confirmed, cộng bổ sung vào tài khoản đích
+    if (txn.status === 'confirmed') {
+      await db.prepare('UPDATE accounts SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .bind(txn.amount, destAccountId, userId).run();
+    }
+
+    // 2. Chân đối ứng
+    if (existingCounter) {
+      await db.prepare(`
+        UPDATE transactions
+        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?
+        WHERE id = ? AND user_id = ?
+      `).bind(pairId, `Nhận từ đối ứng ${id}`, existingCounter.id, userId).run();
+    } else {
+      const counterTxnId = `txn_pair_${Date.now()}`;
+      await db.prepare(`
+        INSERT INTO transactions (
+          id, user_id, account_id, type, amount, occurred_at, description,
+          status, transfer_pair_id, original_type, notes
+        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?)
+      `).bind(
+        counterTxnId,
+        userId,
+        destAccountId,
+        txn.amount,
+        txn.occurred_at,
+        `Nhận chuyển khoản nội bộ vào ${selectedAcc.name}`,
+        pairId,
+        `Nhận từ đối ứng ${id}`
+      ).run();
+    }
   }
 
   return c.json({ success: true, message: 'Đã tạo chuyển khoản nội bộ thành công' });
@@ -2165,11 +2241,11 @@ app.post('/api/reset', async (c) => {
 
 // Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
 app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.6/qltc-v1.2.6.apk';
+  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk';
   const response = await fetch(apkUrl, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'QLTC-Updater/1.2.6'
+      'User-Agent': 'QLTC-Updater/1.2.7'
     }
   });
 
@@ -2183,7 +2259,7 @@ app.get('/api/download-apk', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.2.6.apk"',
+      'Content-Disposition': 'attachment; filename="qltc-v1.2.7.apk"',
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
@@ -2192,11 +2268,11 @@ app.get('/api/download-apk', async (c) => {
   });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.2.6)
+// Thông tin phiên bản & link cập nhật (v1.2.7)
 app.get('/api/version', (c) => {
   return c.json({
-    version: '1.2.6',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.6/qltc-v1.2.6.apk',
+    version: '1.2.7',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.7/qltc-v1.2.7.apk',
     directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
     otaUpdated: true,

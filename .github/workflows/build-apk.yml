@@ -34,31 +34,30 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.6.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.2.7.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.2.6.apk
+          path: qltc-v1.2.7.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.2.6
-          name: "QLTC v1.2.6 - Quản Lý Nguồn Thu Linh Hoạt, Tự Động Nhận Diện Từ Khóa & Phân Loại Thu Tiền Mặt"
+          tag_name: v1.2.7
+          name: "QLTC v1.2.7 - Hỗ Trợ Chuyển Khoản Nội Bộ Hai Chiều Cả Thu Và Chi"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.6 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.2.7 - Android APK
 
-            Phiên bản `v1.2.6` tối ưu hóa toàn diện tính năng Quản lý Nguồn thu & Phân loại dòng tiền:
-            - **Thêm nguồn thu không bắt buộc số tiền dự kiến:** Tạo danh mục nguồn thu theo thực tế (Lương, Thu tiền mặt công trình, Tiền thuê nhà, Thưởng/Hoa hồng, Cổ tức...) mà không cần nhập số tiền dự kiến cố định.
-            - **Tự động nhận diện từ khóa ngân hàng:** Thiết lập từ khóa nhận diện cho từng nguồn thu (ví dụ: `luong, cty, cong trinh, thue nha...`). Khi thông báo cộng tiền gửi về, hệ thống tự động nhận diện và gán đúng nguồn thu.
-            - **Thêm khoản thu tiền mặt (thực tế) trực quan:** Chọn nguồn thu để phân loại khoản thu tiền mặt bằng thẻ chip 1 chạm hoặc dropdown danh mục, cộng tiền ngay vào ví đã chọn.
-            - **Hiển thị nguồn thu đồng bộ ở cả 2 Tab:** Xem rõ ràng tiến độ thực thu của từng nguồn ở cả Tab Kế hoạch và Tab Thu chi thực tế, chạm vào là chỉnh sửa tên, từ khóa hoặc xóa ngay lập tức.
+            Phiên bản `v1.2.7` nâng cấp toàn diện tính năng Chuyển khoản nội bộ giữa các ví/tài khoản:
+            - **Hỗ trợ chuyển khoản nội bộ 2 chiều (Cả Thu và Chi):** Khi duyệt giao dịch tiền vào (thu nhập) hoặc tiền ra (chi tiêu), anh đều có thể chọn ghép cặp Chuyển khoản nội bộ ngay lập tức.
+            - **Nút "Chuyển nội bộ" trực quan ở cả Thẻ vuốt và Danh sách:** Dễ dàng bấm chuyển nội bộ trực tiếp từ chế độ vuốt thẻ hoặc bấm nút "Nội bộ" ở từng dòng trong danh sách.
+            - **Modal chọn ví 2 Tab thông minh:** Tab 1 phân bổ Hũ chi/Nguồn thu và Tab 2 Chuyển khoản nội bộ với đầy đủ thông tin số dư ví, chiều chuyển tiền rõ ràng (ví nguồn ➔ ví đích) và không làm sai lệch hạn mức chi tiêu các hũ.
           files: |
-            qltc-v1.2.6.apk
+            qltc-v1.2.7.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

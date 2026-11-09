@@ -847,18 +847,18 @@ app.get('/api/health', (c) =>
 
 app.get('/api/version', (c) => {
   return c.json({
-    versionCode: 22,
-    versionName: '2.0.0',
-    version: '2.0.0',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
+    versionCode: 23,
+    versionName: '2.0.1',
+    version: '2.0.1',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk',
     downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     changelog:
-      'Bản cập nhật V2.0.0:\n- Bảo mật xác thực Owner & Device Pairing\n- Sổ cái nguyên tử (Atomic Ledger Batch) & Idempotency\n- Khớp tài khoản thông minh & Chống mất thông báo Android\n- Lưu trữ phiên bản kế hoạch theo kỳ & XIRR đầu tư chuẩn xác'
+      'Bản vá nóng V2.0.1:\n- Sửa lỗi không mở được ứng dụng Android (bảo vệ khởi chạy an toàn)\n- Khôi phục WebViewClient tương thích cao mọi dòng máy\n- Đảm bảo hàng đợi thông báo chạy nền ổn định'
   });
 });
 
 app.get('/api/download-apk', (c) => {
-  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk', 302);
+  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk', 302);
 });
 
 // ============================================================================

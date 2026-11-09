@@ -293,17 +293,25 @@ class BankNotificationListener : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
-        outboxDb = NotificationOutboxDb(applicationContext)
-        outboxDb.migrateLegacyQueue(applicationContext)
-        OutboxSyncScheduler.ensurePeriodic(applicationContext)
-        OutboxSyncScheduler.scheduleNext(applicationContext, outboxDb)
+        try {
+            outboxDb = NotificationOutboxDb(applicationContext)
+            outboxDb.migrateLegacyQueue(applicationContext)
+            OutboxSyncScheduler.ensurePeriodic(applicationContext)
+            OutboxSyncScheduler.scheduleNext(applicationContext, outboxDb)
+        } catch (t: Throwable) {
+            Log.e(TAG, "BankNotificationListener init warning", t)
+        }
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putLong("last_listener_connected_at", System.currentTimeMillis()).apply()
-        OutboxSyncScheduler.scheduleNow(applicationContext)
+        try {
+            val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putLong("last_listener_connected_at", System.currentTimeMillis()).apply()
+            OutboxSyncScheduler.scheduleNow(applicationContext)
+        } catch (t: Throwable) {
+            Log.e(TAG, "BankNotificationListener onListenerConnected warning", t)
+        }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {

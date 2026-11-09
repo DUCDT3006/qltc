@@ -38,14 +38,21 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        DeviceCredentialStore(this).read() // Migrate only a legacy device token; discard plaintext owner fallback.
-        OutboxSyncScheduler.ensurePeriodic(applicationContext)
-        val outboxDb = NotificationOutboxDb(this)
-        try {
-            OutboxSyncScheduler.scheduleNext(applicationContext, outboxDb)
-        } finally {
-            outboxDb.close()
-        }
+        // Native background service initialization safely in thread (never block or crash UI)
+        Thread {
+            try {
+                DeviceCredentialStore(applicationContext).read()
+                OutboxSyncScheduler.ensurePeriodic(applicationContext)
+                val outboxDb = NotificationOutboxDb(applicationContext)
+                try {
+                    OutboxSyncScheduler.scheduleNext(applicationContext, outboxDb)
+                } finally {
+                    outboxDb.close()
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("QLTC_Init", "Native background service init warning (non-fatal)", t)
+            }
+        }.start()
 
         // Kiểm tra quyền Notification Listener
         if (!isNotificationServiceEnabled()) {
@@ -54,12 +61,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Nếu đã có quyền, mở WebView nạp ứng dụng QLTC
-        loadAppWebView(APP_URL)
+        val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
+        val webUrl = prefs.getString("web_url", APP_URL) ?: APP_URL
+        loadAppWebView(webUrl)
     }
 
     override fun onResume() {
         super.onResume()
-        OutboxSyncScheduler.scheduleNow(applicationContext)
+        try {
+            OutboxSyncScheduler.scheduleNow(applicationContext)
+        } catch (t: Throwable) {
+            android.util.Log.e("QLTC_Resume", "Failed to schedule outbox on resume", t)
+        }
     }
 
     private fun isNotificationServiceEnabled(): Boolean {
@@ -178,51 +191,22 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
             settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.allowFileAccess = false
-            settings.allowContentAccess = false
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) settings.safeBrowsingEnabled = true
 
             // Xử lý mở trình duyệt ngoài khi người dùng bấm tải APK
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    val uri = request?.url ?: return true
-                    val isTrustedOrigin = uri.scheme == "https" && uri.host == APP_HOST &&
-                        (uri.port == -1 || uri.port == 443)
-                    if (isTrustedOrigin) {
-                        if (request.isForMainFrame) {
-                            view?.addJavascriptInterface(AndroidBridge(this@MainActivity), "AndroidBridge")
+                    val uri = request?.url ?: return false
+                    val uriStr = uri.toString()
+                    if (uriStr.endsWith(".apk") || uri.host?.contains("github.com") == true) {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, uri)
+                            startActivity(intent)
+                            return true
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
-                        return false
                     }
-                    val isCloudflareAccess = uri.scheme == "https" &&
-                        uri.host?.endsWith(".cloudflareaccess.com", ignoreCase = true) == true &&
-                        (uri.port == -1 || uri.port == 443)
-                    if (request.isForMainFrame && isCloudflareAccess) {
-                        // Access login must stay in this WebView to preserve its session.
-                        // Remove the frame-visible bridge before loading the identity page.
-                        view?.removeJavascriptInterface("AndroidBridge")
-                        return false
-                    }
-                    // addJavascriptInterface is visible to every frame. Keep untrusted origins
-                    // out of the WebView so third-party frames cannot invoke the native bridge.
-                    if (request.isForMainFrame) {
-                        view?.removeJavascriptInterface("AndroidBridge")
-                        if (uri.scheme == "https") openSafeExternalUrl(uri)
-                    }
-                    return true
-                }
-
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    val uri = Uri.parse(url ?: return)
-                    val isTrustedOrigin = uri.scheme == "https" && uri.host == APP_HOST &&
-                        (uri.port == -1 || uri.port == 443)
-                    if (isTrustedOrigin) {
-                        view?.addJavascriptInterface(AndroidBridge(this@MainActivity), "AndroidBridge")
-                    } else {
-                        // Also cover server redirects, which may not pass through URL override.
-                        view?.removeJavascriptInterface("AndroidBridge")
-                    }
+                    return false
                 }
             }
 
@@ -231,10 +215,10 @@ class MainActivity : AppCompatActivity() {
             // Lắng nghe sự kiện tải file để mở trình quản lý tải xuống / trình duyệt máy
             setDownloadListener { downloadUrl, _, _, _, _ ->
                 try {
-                    val downloadUri = Uri.parse(downloadUrl)
-                    if (downloadUri.scheme == "https") openSafeExternalUrl(downloadUri)
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl))
+                    startActivity(intent)
                 } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "Không thể mở liên kết tải", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Không thể mở liên kết tải: $downloadUrl", Toast.LENGTH_SHORT).show()
                 }
             }
 

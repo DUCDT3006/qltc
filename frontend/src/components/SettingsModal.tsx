@@ -222,7 +222,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v2.0.0';
+  const CURRENT_VERSION = 'v2.0.1';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -230,8 +230,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v2.0.0',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
+    tagName: 'v2.0.1',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -293,8 +293,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v2.0.0';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk';
+      let latestTag = 'v2.0.1';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk';
       let releaseBody = '';
 
       // 1. Ưu tiên đọc từ Backend API (nguồn chuẩn xác nhất của phiên bản máy chủ)
@@ -302,7 +302,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         const bRes = await fetch(`${API_BASE}/version`);
         if (bRes.ok) {
           const bData = await bRes.json();
-          const verStr = String(bData.versionName || bData.version || '2.0.0').trim();
+          const verStr = String(bData.versionName || bData.version || '2.0.1').trim();
           latestTag = verStr.startsWith('v') ? verStr : `v${verStr}`;
           apkUrl = bData.latestApkUrl || bData.downloadUrl || apkUrl;
           if (bData.changelog) releaseBody = bData.changelog;
@@ -351,11 +351,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v2.0.0',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
+        tagName: 'v2.0.1',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v2.0.0. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v2.0.1. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -370,7 +370,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk');
       return;
     }
 
@@ -1123,7 +1123,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="flex items-center justify-between text-xs font-bold text-[#F2F5F5]">
                 <span className="flex items-center gap-2 text-[#8CC7AE]">
                   <RefreshCw size={14} className="animate-spin text-[#8CC7AE]" />
-                  Đang tải gói cập nhật {latestRelease?.tagName || 'v2.0.0'}...
+                  Đang tải gói cập nhật {latestRelease?.tagName || 'v2.0.1'}...
                 </span>
                 <span className="font-mono text-sm font-bold text-[#8CC7AE]">{downloadPercent}%</span>
               </div>
@@ -1158,7 +1158,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <div>
                   <div className="text-xs font-bold text-[#F2F5F5]">
-                    Đã tải hoàn tất 100% ({latestRelease?.tagName || 'v2.0.0'})!
+                    Đã tải hoàn tất 100% ({latestRelease?.tagName || 'v2.0.1'})!
                   </div>
                   <div className="text-[10.5px] text-[#869699]">
                     Kích thước: {(downloadTotalBytes / (1024 * 1024)).toFixed(1)} MB · Sẵn sàng nâng cấp
@@ -1169,7 +1169,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {downloadBlobUrl && (
                 <a
                   href={downloadBlobUrl}
-                  download={`qltc-${latestRelease?.tagName || 'v2.0.0'}.apk`}
+                  download={`qltc-${latestRelease?.tagName || 'v2.0.1'}.apk`}
                   className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-2 shadow active:scale-95 transition-transform"
                 >
                   <Download size={15} /> 1. Bấm vào đây để Cài Đặt File APK

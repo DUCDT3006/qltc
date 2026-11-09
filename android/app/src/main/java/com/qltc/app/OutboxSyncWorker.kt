@@ -26,44 +26,55 @@ internal object OutboxSyncScheduler {
     private val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
     fun ensurePeriodic(context: Context) {
-        val request = PeriodicWorkRequestBuilder<OutboxSyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            PERIODIC_WORK, ExistingPeriodicWorkPolicy.KEEP, request
-        )
+        try {
+            val request = PeriodicWorkRequestBuilder<OutboxSyncWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(constraints)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .build()
+            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                PERIODIC_WORK, ExistingPeriodicWorkPolicy.KEEP, request
+            )
+        } catch (t: Throwable) {
+            Log.e("QLTC_Sync", "WorkManager ensurePeriodic warning", t)
+        }
     }
 
     fun scheduleNow(context: Context) {
-        val request = OneTimeWorkRequestBuilder<OutboxSyncWorker>()
-            .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        // Append if a sync is active, so an event arriving at the end of a batch gets another pass.
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            WAKE_WORK, ExistingWorkPolicy.APPEND_OR_REPLACE, request
-        )
+        try {
+            val request = OneTimeWorkRequestBuilder<OutboxSyncWorker>()
+                .setConstraints(constraints)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WAKE_WORK, ExistingWorkPolicy.REPLACE, request
+            )
+        } catch (t: Throwable) {
+            Log.e("QLTC_Sync", "WorkManager scheduleNow warning", t)
+        }
     }
 
     fun scheduleNext(context: Context, db: NotificationOutboxDb) {
-        val nextAt = db.nextPendingAt()
-        val manager = WorkManager.getInstance(context)
-        if (nextAt == null) {
-            manager.cancelUniqueWork(RETRY_WORK)
-            return
+        try {
+            val nextAt = db.nextPendingAt()
+            val manager = WorkManager.getInstance(context)
+            if (nextAt == null) {
+                manager.cancelUniqueWork(RETRY_WORK)
+                return
+            }
+            val delay = max(0L, nextAt - System.currentTimeMillis())
+            val request = OneTimeWorkRequestBuilder<OutboxSyncWorker>()
+                .setConstraints(constraints)
+                .setInitialDelay(delay, TimeUnit.MILLISECONDS)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .build()
+            manager.enqueueUniqueWork(RETRY_WORK, ExistingWorkPolicy.REPLACE, request)
+        } catch (t: Throwable) {
+            Log.e("QLTC_Sync", "WorkManager scheduleNext warning", t)
         }
-        val delay = max(0L, nextAt - System.currentTimeMillis())
-        val request = OneTimeWorkRequestBuilder<OutboxSyncWorker>()
-            .setConstraints(constraints)
-            .setInitialDelay(delay, TimeUnit.MILLISECONDS)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        manager.enqueueUniqueWork(RETRY_WORK, ExistingWorkPolicy.REPLACE, request)
     }
 }
 
-internal class OutboxSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+class OutboxSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = synchronized(SYNC_LOCK) {
         val db = NotificationOutboxDb(applicationContext)
         val prefs = applicationContext.getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)

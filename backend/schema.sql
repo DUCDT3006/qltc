@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   needs_account_review INTEGER DEFAULT 0,
   source TEXT DEFAULT 'manual', -- 'notification', 'sms', 'manual', 'import', 'system'
   description TEXT,
+  note TEXT,
   counterparty TEXT,
   raw_notification_id TEXT,
   dedupe_hash TEXT UNIQUE, -- Chống trùng lặp giao dịch tự động

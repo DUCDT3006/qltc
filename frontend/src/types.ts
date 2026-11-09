@@ -106,6 +106,7 @@ export interface Transaction {
   type: 'income' | 'expense' | 'transfer';
   amount: number;
   description: string;
+  note?: string;
   rawQuote?: string;
   suggestedCategory: string;
   suggestedJarCode: string;

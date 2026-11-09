@@ -141,6 +141,7 @@ const mapTransaction = (t: any): Transaction => {
     originalType: t.originalType ?? t.original_type ?? undefined,
     amount: Math.round(Number(t.amount ?? 0)),
     description: t.description || '',
+    note: typeof t.note === 'string' ? t.note : undefined,
     suggestedCategory: category,
     suggestedJarCode: type === 'expense' ? (t.jar_code ?? t.suggestedJarCode ?? 'NEC') : '',
     jarId: type === 'expense' ? (t.jarId ?? t.jar_id ?? undefined) : undefined,
@@ -761,7 +762,8 @@ function AppContent() {
     categoryName?: string,
     jarId?: string,
     incomeSourceId?: string,
-    accountIdOverride?: string
+    accountIdOverride?: string,
+    note?: string
   ) => {
     const txn = pendingTransactions.find(t => t.id === id);
     if (!txn) return;
@@ -796,6 +798,7 @@ function AppContent() {
             operationId: opIdConfirm,
             status: 'confirmed',
             accountId: effectiveAccountId,
+            note,
             jarId: txn.type === 'expense' ? (finalJarId || null) : null,
             jarCode: txn.type === 'expense' ? finalJarCode : null,
             incomeSourceId: txn.type === 'income' ? (incomeSourceId || null) : null,
@@ -823,6 +826,7 @@ function AppContent() {
 
         const confirmedTxn: Transaction = {
           ...txWithAccount,
+          note: (note === undefined ? txn.note : note)?.trim() || undefined,
           suggestedJarCode: finalJarCode,
           jarId: finalJarId,
           incomeSourceId: txn.type === 'income' ? incomeSourceId : undefined,
@@ -860,7 +864,7 @@ function AppContent() {
                 )));
               }
               setConfirmedTransactions(prev => prev.filter(t => t.id !== id));
-              setPendingTransactions(prev => [txn, ...prev]);
+              setPendingTransactions(prev => [{ ...txn, note: confirmedTxn.note }, ...prev]);
             } catch {
               error('Lỗi kết nối khi hoàn tác giao dịch');
             }
@@ -927,6 +931,7 @@ function AppContent() {
       jarCode?: string;
       category?: string;
       description?: string;
+      note?: string;
       incomeSourceId?: string | null;
       amount?: number;
       accountId?: string;
@@ -944,6 +949,7 @@ function AppContent() {
           body: JSON.stringify({
             operationId: generateOperationId('tx_edit'),
             description: updates.description,
+            note: updates.note,
             jarId: updates.jarId,
             jarCode: updates.jarCode,
             categoryName: updates.category,
@@ -988,6 +994,7 @@ function AppContent() {
                 suggestedJarCode: updates.jarCode ?? t.suggestedJarCode,
                 suggestedCategory: updates.category ?? t.suggestedCategory,
                 description: updates.description ?? t.description,
+                note: updates.note === undefined ? t.note : updates.note.trim() || undefined,
                 incomeSourceId: updates.incomeSourceId !== undefined ? (updates.incomeSourceId || undefined) : t.incomeSourceId
               };
             }

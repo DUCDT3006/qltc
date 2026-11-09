@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Transaction, Jar, IncomeSource, BankAccount } from '../types';
 import { formatPrivacyVND, formatPrivacyText } from '../utils/financeMath';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { TransactionNoteField } from '../components/TransactionNoteField';
 import { useManagedOverlay } from '../utils/overlayManager';
 import {
   Check,
@@ -30,7 +31,7 @@ interface InboxSwipeViewProps {
   pendingTransactions: Transaction[];
   privacyMode?: boolean;
   confirmedTransactions: Transaction[];
-  onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string, incomeSourceId?: string) => void;
+  onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string, incomeSourceId?: string, accountId?: string, note?: string) => void;
   onReject: (id: string) => void;
   onDeleteConfirmed?: (id: string) => void;
   onUpdateConfirmed?: (
@@ -40,6 +41,7 @@ interface InboxSwipeViewProps {
       jarCode?: string;
       category?: string;
       description?: string;
+      note?: string;
       incomeSourceId?: string | null;
       amount?: number;
       accountId?: string;
@@ -77,6 +79,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   const [pendingViewMode, setPendingViewMode] = useState<'card' | 'list'>('card');
   const [pendingFilter, setPendingFilter] = useState<'all' | 'expense' | 'income' | 'transfer'>('all');
   const [pendingSearch, setPendingSearch] = useState('');
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
 
   // Lịch sử filter & search
   const [searchQuery, setSearchQuery] = useState('');
@@ -99,6 +102,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   // Modal / Sheet chỉnh sửa giao dịch đã duyệt (trong tab Lịch sử)
   const [editingConfirmedTxn, setEditingConfirmedTxn] = useState<Transaction | null>(null);
   const [editConfirmedDesc, setEditConfirmedDesc] = useState('');
+  const [editConfirmedNote, setEditConfirmedNote] = useState('');
   const [editConfirmedJarId, setEditConfirmedJarId] = useState('');
   const [editConfirmedIncomeSourceId, setEditConfirmedIncomeSourceId] = useState('');
   const [editConfirmedAmount, setEditConfirmedAmount] = useState<number>(0);
@@ -217,6 +221,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   }, [activeTxn?.id]);
 
   const handleTouchStart = (e: React.TouchEvent) => {
+    if ((e.target as HTMLElement).closest('input, textarea, button, select, a')) return;
     setTouchStartX(e.touches[0].clientX);
     setIsDragging(true);
   };
@@ -246,18 +251,21 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   // Duyệt một giao dịch bất kỳ
   const handleConfirmSingle = (txn: Transaction) => {
     const assignment = getTxnAssignment(txn);
+    const note = noteDrafts[txn.id];
     if (txn.type === 'income') {
       onConfirm(
         txn.id,
         undefined,
         assignment.categoryName || 'Thu ngoài dự kiến',
         undefined,
-        assignment.incomeSourceId || undefined
+        assignment.incomeSourceId || undefined,
+        undefined,
+        note
       );
     } else if (txn.type === 'transfer') {
       onConfirm(txn.id);
     } else {
-      onConfirm(txn.id, assignment.jarCode, assignment.categoryName, assignment.jarId);
+      onConfirm(txn.id, assignment.jarCode, assignment.categoryName, assignment.jarId, undefined, undefined, note);
     }
   };
 
@@ -277,13 +285,14 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
       const q = pendingSearch.toLowerCase();
       return (
         t.description.toLowerCase().includes(q) ||
+        (noteDrafts[t.id] ?? t.note ?? '').toLowerCase().includes(q) ||
         (t.suggestedCategory || '').toLowerCase().includes(q) ||
         t.bankCode.toLowerCase().includes(q) ||
         t.accountName.toLowerCase().includes(q) ||
         String(t.amount).includes(q)
       );
     });
-  }, [pendingTransactions, pendingFilter, pendingSearch]);
+  }, [pendingTransactions, pendingFilter, pendingSearch, noteDrafts]);
 
   // V2-25: Duyệt hàng loạt chỉ áp dụng cho danh sách đang lọc (filteredPending) và bỏ qua các giao dịch mơ hồ cần chọn tài khoản
   const handleConfirmAll = () => {
@@ -317,6 +326,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
       const q = searchQuery.toLowerCase();
       return (
         t.description.toLowerCase().includes(q) ||
+        (t.note || '').toLowerCase().includes(q) ||
         (t.suggestedCategory || '').toLowerCase().includes(q) ||
         t.bankCode.toLowerCase().includes(q)
       );
@@ -662,6 +672,8 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                         </>
                       )}
 
+                      {activeTxn.type !== 'transfer' && <TransactionNoteField key={activeTxn.id} id={`pending-note-${activeTxn.id}`} value={noteDrafts[activeTxn.id] ?? activeTxn.note ?? ''} onChange={value => setNoteDrafts(prev => ({ ...prev, [activeTxn.id]: value }))} />}
+
                       {/* Nút Bỏ qua / Xác nhận */}
                       <div className="flex items-center justify-between pt-3 border-t border-[#8BA5AA]/15">
                         <button
@@ -934,6 +946,8 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                               )}
                             </div>
 
+                            {txn.type !== 'transfer' && <TransactionNoteField id={`list-note-${txn.id}`} value={noteDrafts[txn.id] ?? txn.note ?? ''} onChange={value => setNoteDrafts(prev => ({ ...prev, [txn.id]: value }))} />}
+
                             {/* Dòng 4: Cụm nút hành động trên mỗi giao dịch */}
                             <div className="flex items-center justify-between pt-1 gap-2 border-t border-[#8BA5AA]/10">
                               <button
@@ -1051,6 +1065,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     onClick={() => {
                       setEditingConfirmedTxn(txn);
                       setEditConfirmedDesc(txn.description);
+                      setEditConfirmedNote(txn.note || '');
                       setEditConfirmedJarId(txn.jarId || jarObj?.id || '');
                       setEditConfirmedIncomeSourceId(txn.incomeSourceId || '');
                       setEditConfirmedAmount(txn.amount);
@@ -1067,6 +1082,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       <div className="text-xs font-semibold text-[#F2F5F5] truncate">
                         {txn.description}
                       </div>
+                      {txn.note && <p className="mt-1 text-xs text-[#BFD0D3] whitespace-pre-wrap break-words line-clamp-2">Ghi chú: {formatPrivacyText(txn.note, privacyMode)}</p>}
                       <div className="text-[11px] text-[#869699] flex items-center gap-1.5 mt-0.5">
                         {txn.type === 'expense' && jarObj && (
                           <span className="text-[#D5E1E3] font-medium">Hũ {jarObj.name}</span>
@@ -1453,7 +1469,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
             {/* Sửa nội dung ghi chú */}
             <div>
               <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
-                Ghi chú nội dung
+                Nội dung giao dịch
               </label>
               <input
                 type="text"
@@ -1462,6 +1478,8 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]/50"
               />
             </div>
+
+            <TransactionNoteField id="confirmed-transaction-note" value={editConfirmedNote} onChange={setEditConfirmedNote} collapsible={false} />
 
             {/* Đổi hũ chi tiêu (nếu là expense) */}
             {editingConfirmedTxn.type === 'expense' && (
@@ -1535,11 +1553,13 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 type="button"
                 onClick={() => {
                   if (onUpdateConfirmed && editingConfirmedTxn) {
-                    const updatedOccurredAt = editConfirmedDate
+                    const originalDate = editingConfirmedTxn.occurredAtIso?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+                    const updatedOccurredAt = editConfirmedDate && editConfirmedDate !== originalDate
                       ? new Date(`${editConfirmedDate}T12:00:00+07:00`).toISOString()
-                      : editingConfirmedTxn.occurredAtIso;
+                      : undefined;
                     const commonUpdates = {
                       description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                      note: editConfirmedNote.trim(),
                       amount: editConfirmedAmount > 0 ? editConfirmedAmount : editingConfirmedTxn.amount,
                       accountId: editConfirmedAccountId || editingConfirmedTxn.accountId,
                       occurredAt: updatedOccurredAt

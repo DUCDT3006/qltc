@@ -61,6 +61,10 @@ const BUNDLED_DEFAULTS = {
   ]
 };
 
+function isValidTransactionNote(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim().length <= 500);
+}
+
 export async function getMutationReceipt(
   db: D1Database,
   operationId: string | undefined,
@@ -453,6 +457,7 @@ export async function ensureDatabaseSchema(db: D1Database) {
           needs_account_review INTEGER DEFAULT 0,
           source TEXT DEFAULT 'manual',
           description TEXT,
+          note TEXT,
           counterparty TEXT,
           raw_notification_id TEXT,
           dedupe_hash TEXT UNIQUE,
@@ -630,6 +635,7 @@ export async function ensureDatabaseSchema(db: D1Database) {
       'ALTER TABLE transactions ADD COLUMN revision INTEGER DEFAULT 1',
       'ALTER TABLE transactions ADD COLUMN deleted_at DATETIME',
       'ALTER TABLE transactions ADD COLUMN updated_at DATETIME',
+      'ALTER TABLE transactions ADD COLUMN note TEXT',
       'ALTER TABLE income_sources ADD COLUMN icon TEXT DEFAULT "payments"',
       'ALTER TABLE income_sources ADD COLUMN color TEXT DEFAULT "#10B981"',
       'ALTER TABLE income_sources ADD COLUMN one_time_date TEXT',
@@ -1744,6 +1750,8 @@ app.post('/api/transactions', async (c) => {
 
   try {
     const body = await c.req.json();
+    if (!isValidTransactionNote(body.note)) return c.json({ error: 'Ghi chú phải là văn bản, tối đa 500 ký tự', code: 'INVALID_TRANSACTION_NOTE' }, 400);
+    const note = typeof body.note === 'string' ? body.note.trim() || null : null;
     const operationId =
       body.operationId ||
       c.req.header('X-Operation-Id') ||
@@ -1820,10 +1828,10 @@ app.post('/api/transactions', async (c) => {
         .prepare(
           `INSERT INTO transactions (
             id, user_id, occurred_at, time_source, type, amount, account_id, to_account_id,
-            jar_id, income_source_id, status, source, description,
+            jar_id, income_source_id, status, source, description, note,
             original_type, original_account_id, original_jar_id, original_income_source_id, original_description, original_status,
             revision
-          ) VALUES (?, ?, ?, 'user_input', ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, 1)`
+          ) VALUES (?, ?, ?, 'user_input', ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, 1)`
         )
         .bind(
           txId,
@@ -1837,6 +1845,7 @@ app.post('/api/transactions', async (c) => {
           incomeSourceId,
           status,
           description,
+          note,
           type,
           accountId,
           jarId,
@@ -1906,6 +1915,7 @@ app.put('/api/transactions/:id', async (c) => {
 
   try {
     const body = await c.req.json();
+    if (!isValidTransactionNote(body.note)) return c.json({ error: 'Ghi chú phải là văn bản, tối đa 500 ký tự', code: 'INVALID_TRANSACTION_NOTE' }, 400);
     const operationId =
       body.operationId ||
       c.req.header('X-Operation-Id') ||
@@ -1977,6 +1987,7 @@ app.put('/api/transactions/:id', async (c) => {
     const newIncomeSourceId =
       newType === 'income' ? (body.incomeSourceId !== undefined ? body.incomeSourceId : oldTx.income_source_id) : null;
     const newDescription = body.description !== undefined ? body.description : oldTx.description;
+    const newNote = body.note === undefined ? oldTx.note ?? null : typeof body.note === 'string' ? body.note.trim() || null : null;
     const newOccurredAt = body.occurredAt !== undefined ? new Date(body.occurredAt).toISOString() : oldTx.occurred_at;
 
     // If user explicitly assigns an accountId during review/edit, clear needs_account_review
@@ -2043,7 +2054,7 @@ app.put('/api/transactions/:id', async (c) => {
         .prepare(
           `UPDATE transactions
            SET status = ?, type = ?, amount = ?, account_id = ?, to_account_id = ?,
-               jar_id = ?, income_source_id = ?, description = ?, occurred_at = ?,
+               jar_id = ?, income_source_id = ?, description = ?, note = ?, occurred_at = ?,
                needs_account_review = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ?`
         )
@@ -2056,6 +2067,7 @@ app.put('/api/transactions/:id', async (c) => {
           newJarId,
           newIncomeSourceId,
           newDescription,
+          newNote,
           newOccurredAt,
           needsAccountReview,
           nextRevision,
@@ -2105,6 +2117,7 @@ app.put('/api/transactions/:id', async (c) => {
       id: txId,
       operationId,
       status: newStatus,
+      note: newNote,
       revision: nextRevision,
       deltasByAccount,
       serverTimestamp: new Date().toISOString()
@@ -5073,6 +5086,9 @@ app.post('/api/backup/restore', async (c) => {
     }
 
     const hasRawNotifications = Array.isArray(data.raw_notifications);
+    for (const transaction of Array.isArray(data.transactions) ? data.transactions : []) {
+      if (!isValidTransactionNote(transaction?.note)) return c.json({ error: 'Ghi chú giao dịch trong bản sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
     if (!hasRawNotifications) {
       // Legacy v2 backups did not contain notification rows. Preserve compatibility without restoring orphan refs.
       for (const tx of Array.isArray(data.transactions) ? data.transactions : []) tx.raw_notification_id = null;
@@ -5354,10 +5370,10 @@ app.post('/api/backup/restore', async (c) => {
             `INSERT INTO transactions (
               id, user_id, occurred_at, time_source, type, amount, currency, account_id, to_account_id,
               jar_id, income_source_id, planned_expense_id, status, needs_account_review, source,
-              description, counterparty, raw_notification_id, dedupe_hash, transfer_pair_id,
+              description, note, counterparty, raw_notification_id, dedupe_hash, transfer_pair_id,
               suggested_pair_id, is_synthetic, original_type, original_account_id, original_jar_id,
               original_income_source_id, original_description, original_status, history_hidden, revision, deleted_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
             tx.id,
@@ -5376,6 +5392,7 @@ app.post('/api/backup/restore', async (c) => {
             tx.needs_account_review ? 1 : 0,
             tx.source || 'manual',
             tx.description || null,
+            typeof tx.note === 'string' ? tx.note.trim() || null : null,
             tx.counterparty || null,
             tx.raw_notification_id || null,
             tx.dedupe_hash || null,

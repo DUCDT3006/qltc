@@ -8,6 +8,7 @@
     "build": "node scripts/build.js",
     "build:vite": "tsc -b && vite build",
     "test:startup": "npm run build && node --test tests/startup.test.mjs",
+    "test:notes": "npm run build && node --test tests/transaction_notes.test.mjs",
     "test": "npx tsx --test tests/v2_frontend.test.ts",
     "lint": "oxlint",
     "preview": "vite preview"

@@ -8,6 +8,9 @@ export default defineConfig({
     react(),
     tailwindcss()
   ],
+  build: {
+    target: 'chrome80'
+  },
   server: {
     port: 3000,
     host: true

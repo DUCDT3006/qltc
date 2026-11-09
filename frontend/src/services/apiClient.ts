@@ -109,6 +109,69 @@ export class ApiRequestError extends Error {
   }
 }
 
+export type AuthSessionCheck = 'signedIn' | 'signedOut' | 'unavailable';
+
+/** Check the cookie-backed session without treating server/network failures as sign-out. */
+export async function checkAuthSession(
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal
+): Promise<AuthSessionCheck> {
+  const response = await fetchImpl(`${API_BASE}/auth/session`, {
+    credentials: 'same-origin',
+    redirect: 'error',
+    signal
+  });
+  if (response.ok) return 'signedIn';
+  if (response.status === 401 || response.status === 403) return 'signedOut';
+  return 'unavailable';
+}
+
+export type TimedAuthSessionCheck = AuthSessionCheck | 'timeout';
+
+/** Start a bounded session check; its timer and request are both cancelled on cleanup. */
+export function checkAuthSessionWithTimeout(
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 10000
+): { promise: Promise<TimedAuthSessionCheck>; cancel: () => void } {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  let settled = false;
+  let resolveResult!: (result: TimedAuthSessionCheck) => void;
+
+  const promise = new Promise<TimedAuthSessionCheck>(resolve => {
+    resolveResult = resolve;
+  }).finally(() => clearTimeout(timer));
+
+  timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    controller.abort();
+    resolveResult('timeout');
+  }, timeoutMs);
+
+  checkAuthSession(fetchImpl, controller.signal).then(result => {
+    if (settled) return;
+    settled = true;
+    resolveResult(result);
+  }).catch(() => {
+    if (settled) return;
+    settled = true;
+    resolveResult('unavailable');
+  });
+
+  return {
+    promise,
+    cancel: () => {
+      if (!settled) {
+        settled = true;
+        controller.abort();
+        resolveResult('unavailable');
+      }
+      clearTimeout(timer);
+    }
+  };
+}
+
 /**
  * Wrapper that keeps API requests same-origin so browser cookies are sent first-party.
  */

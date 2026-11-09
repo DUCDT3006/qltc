@@ -35,8 +35,9 @@ import {
   getDraftOutbox,
   removeDraftFromOutbox,
   replayDraftOutbox,
-  fetchAllTransactions
-  ,apiRequestJson
+  fetchAllTransactions,
+  apiRequestJson,
+  checkAuthSessionWithTimeout
 } from './services/apiClient';
 
 // Cài đặt interceptor tự động đính kèm Authorization / X-Operation-Id cho toàn bộ /api/* (V2-01, V2-07)
@@ -181,7 +182,8 @@ function AppContent() {
   const [quickAddIncomeSourceId, setQuickAddIncomeSourceId] = useState<string | undefined>();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isResetOpen, setIsResetOpen] = useState(false);
-  const [authState, setAuthState] = useState<'checking' | 'signedOut' | 'signedIn'>('checking');
+  const [authState, setAuthState] = useState<'checking' | 'signedOut' | 'signedIn' | 'unavailable'>('checking');
+  const [authCheckAttempt, setAuthCheckAttempt] = useState(0);
   const [ownerTokenInput, setOwnerTokenInput] = useState('');
   const [authError, setAuthError] = useState('');
   const [privacyMode, setPrivacyMode] = useState<boolean>(() => {
@@ -494,10 +496,28 @@ function AppContent() {
   }, [error]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/auth/session`)
-      .then(res => setAuthState(res.ok ? 'signedIn' : 'signedOut'))
-      .catch(() => setAuthState('signedOut'));
-  }, []);
+    let active = true;
+    const authCheck = checkAuthSessionWithTimeout(fetch, 10000);
+    setAuthState('checking');
+    setAuthError('');
+
+    authCheck.promise.then(result => {
+      if (active) {
+        const unavailable = result === 'unavailable' || result === 'timeout';
+        setAuthState(unavailable ? 'unavailable' : result);
+        if (result === 'timeout') {
+          setAuthError('Máy chủ phản hồi quá lâu. Dữ liệu đã lưu trên thiết bị vẫn được giữ nguyên. Hãy thử kết nối lại.');
+        } else if (result === 'unavailable') {
+          setAuthError('Máy chủ đang tạm thời không khả dụng. Dữ liệu đã lưu trên thiết bị vẫn được giữ nguyên. Hãy thử lại khi có kết nối.');
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      authCheck.cancel();
+    };
+  }, [authCheckAttempt]);
 
   // Fetch the public fund catalog independently so a slow/unavailable quote feed
   // cannot block accounts, transactions, or other canonical app data.
@@ -1613,8 +1633,11 @@ function AppContent() {
     <main className="min-h-screen bg-[#0E1314] text-[#F2F5F5] flex items-center justify-center p-5">
       <form onSubmit={signIn} className="w-full max-w-sm rounded-3xl bg-[#161C1E] border border-[#8BA5AA]/20 p-6 space-y-4">
         <h1 className="text-xl font-bold">QLTC cá nhân</h1>
-        {authState === 'checking' ? <p>Đang kiểm tra phiên truy cập…</p> : <>
-          <p className="text-sm text-[#BFD0D3]">Nhập mã chủ tài khoản đã cấu hình trên máy chủ để đồng bộ dữ liệu. Phiên đăng nhập kết thúc khi đóng hoặc tải lại trang.</p>
+        {authState === 'checking' ? <p role="status">Đang kiểm tra phiên truy cập…</p> : authState === 'unavailable' ? <>
+          {authError && <p role="alert" className="text-sm text-[#F2C879]">{authError}</p>}
+          <button type="button" onClick={() => setAuthCheckAttempt(attempt => attempt + 1)} className="w-full rounded-xl p-3 bg-[#8CC7AE] text-[#0E1314] font-bold">Thử kết nối lại</button>
+        </> : <>
+          <p className="text-sm text-[#BFD0D3]">Nhập mã chủ tài khoản đã cấu hình trên máy chủ để đồng bộ dữ liệu. Phiên đăng nhập được lưu bằng cookie trên thiết bị này.</p>
           <label className="block text-sm">Mã truy cập
             <input type="password" autoComplete="off" value={ownerTokenInput} onChange={e => setOwnerTokenInput(e.target.value)} className="mt-2 w-full rounded-xl p-3 bg-[#20292B] border border-[#8BA5AA]/30" />
           </label>

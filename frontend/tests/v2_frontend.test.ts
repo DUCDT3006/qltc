@@ -11,6 +11,8 @@ import { calculateXIRR } from '../src/utils/xirr';
 import { isTxnInPeriod, periodBoundsUtc } from '../src/utils/dateUtils';
 import {
   API_BASE,
+  checkAuthSession,
+  checkAuthSessionWithTimeout,
   getAuthToken,
   getDraftOutbox,
   fetchAllTransactions,
@@ -30,6 +32,40 @@ import { applyResetScope } from '../src/utils/resetState';
 import { fetchFmarketFunds, parseFmarketFundsResponse } from '../src/utils/fmarketFunds';
 import { addInvestmentCashflow, deleteInvestmentCashflow, getInvestmentCashflows, parseInvestmentCashflowsResponse, setInvestmentHistoryCompleteFrom } from '../src/utils/investmentCashflows';
 import frontendWorker from '../src/worker';
+
+describe('Auth session startup check', () => {
+  it('distinguishes signed-out responses from temporary server failures', async () => {
+    assert.strictEqual(await checkAuthSession(async () => new Response(null, { status: 200 })), 'signedIn');
+    assert.strictEqual(await checkAuthSession(async () => new Response(null, { status: 401 })), 'signedOut');
+    assert.strictEqual(await checkAuthSession(async () => new Response(null, { status: 403 })), 'signedOut');
+    assert.strictEqual(await checkAuthSession(async () => new Response(null, { status: 503 })), 'unavailable');
+  });
+
+  it('passes the abort signal to the injectable fetch and leaves network errors visible to the caller', async () => {
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const state = await checkAuthSession(async (_input, init) => {
+      observedSignal = init?.signal as AbortSignal;
+      return new Response(null, { status: 200 });
+    }, controller.signal);
+    assert.strictEqual(state, 'signedIn');
+    assert.strictEqual(observedSignal, controller.signal);
+    await assert.rejects(() => checkAuthSession(async () => { throw new Error('offline'); }), /offline/);
+  });
+
+  it('clears its timeout after a fast response so it cannot abort the completed request later', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const check = checkAuthSessionWithTimeout(async (_input, init) => {
+      observedSignal = init?.signal as AbortSignal;
+      return new Response(null, { status: 200 });
+    }, 20);
+
+    assert.strictEqual(await check.promise, 'signedIn');
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.strictEqual(observedSignal?.aborted, false);
+    check.cancel();
+  });
+});
 
 describe('Fmarket fund catalog', () => {
   it('parses the production endpoint shape and only exposes a fresh verified NAV as selectable', () => {
@@ -200,6 +236,14 @@ describe('V2-01 / V2-07: API origin allowlist and durable operation retry', () =
     assert.strictEqual(seen?.url, request.url);
     const unavailable = await frontendWorker.fetch(request, { ASSETS: { fetch: async () => new Response('assets') } });
     assert.strictEqual(unavailable.status, 503);
+  });
+
+  it('serves the app shell with frame and object embedding disabled', async () => {
+    const response = await frontendWorker.fetch(new Request('https://qltc-app.dtd-store.workers.dev/'), {
+      ASSETS: { fetch: async () => new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } }) }
+    });
+    assert.strictEqual(response.headers.get('Content-Security-Policy'), "frame-src 'none'; object-src 'none'");
+    assert.match(response.headers.get('Cache-Control') || '', /no-store/);
   });
 
   it('never reads or persists owner credentials and removes any legacy localStorage copy', () => {

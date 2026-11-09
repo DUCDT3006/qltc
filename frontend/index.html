@@ -18,19 +18,58 @@
   </head>
   <body class="bg-[#0E1314] text-[#F2F5F5] antialiased selection:bg-[#657D81]/30">
     <div id="root">
-      <div style="display:flex;height:100vh;flex-direction:column;align-items:center;justify-content:center;background-color:#0E1314;color:#BFD0D3;font-family:system-ui,-apple-system,sans-serif;gap:12px;">
+      <div data-qltc-startup style="display:flex;height:100vh;flex-direction:column;align-items:center;justify-content:center;background-color:#0E1314;color:#BFD0D3;font-family:system-ui,-apple-system,sans-serif;gap:12px;">
         <div style="width:32px;height:32px;border:3px solid #232E31;border-top-color:#8CC7AE;border-radius:50%;animation:spin 1s linear infinite;"></div>
         <div style="font-size:13px;letter-spacing:0.5px;">Đang nạp ứng dụng QLTC...</div>
       </div>
       <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>
     <script>
-      window.addEventListener('error', function(e) {
-        var root = document.getElementById('root');
-        if (root && (!root.children.length || root.innerHTML.indexOf('Đang nạp') !== -1)) {
-          root.innerHTML = '<div style="display:flex;height:100vh;flex-direction:column;align-items:center;justify-content:center;background-color:#0E1314;color:#F2F5F5;font-family:sans-serif;padding:20px;text-align:center;"><p style="color:#E06D6D;font-weight:bold;margin-bottom:8px;">Không thể tải giao diện</p><p style="color:#869699;font-size:12px;margin-bottom:16px;">' + (e.message || 'Lỗi nạp script') + '</p><button onclick="location.reload()" style="padding:10px 20px;border-radius:12px;background:#8CC7AE;color:#0E1314;font-weight:bold;border:none;">Tải lại trang</button></div>';
+      (function () {
+        var ready = false;
+        var timer;
+        function showFailure() {
+          if (ready) return;
+          var root = document.getElementById('root');
+          if (!root || !root.querySelector('[data-qltc-startup]')) return;
+          clearTimeout(timer);
+          var box = document.createElement('div');
+          box.style.cssText = 'display:flex;min-height:100vh;box-sizing:border-box;flex-direction:column;align-items:center;justify-content:center;background:#0E1314;color:#F2F5F5;font-family:system-ui,-apple-system,sans-serif;padding:24px;text-align:center;gap:16px';
+          var title = document.createElement('strong');
+          title.style.cssText = 'color:#E99191;font-size:18px';
+          title.textContent = 'Không thể tải ứng dụng QLTC';
+          var help = document.createElement('p');
+          help.style.cssText = 'max-width:320px;color:#BFD0D3;font-size:14px;line-height:1.5;margin:0';
+          help.textContent = 'Hãy kiểm tra kết nối mạng rồi thử lại. Nếu vẫn gặp lỗi, hãy cập nhật ứng dụng.';
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.style.cssText = 'padding:12px 20px;border-radius:12px;background:#8CC7AE;color:#0E1314;font-weight:700;border:0';
+          button.textContent = 'Thử tải lại';
+          button.addEventListener('click', function () { location.reload(); });
+          box.appendChild(title);
+          box.appendChild(help);
+          box.appendChild(button);
+          root.textContent = '';
+          root.appendChild(box);
         }
-      });
+        window.addEventListener('qltc-startup-ready', function () {
+          ready = true;
+          clearTimeout(timer);
+        });
+        window.addEventListener('qltc-startup-failed', showFailure);
+        window.addEventListener('error', function (event) {
+          var target = event.target;
+          if (target && target !== window) {
+            var tag = target.tagName;
+            var resource = target.src || target.href || '';
+            if ((tag === 'SCRIPT' || tag === 'LINK') && resource.indexOf('/assets/') !== -1) showFailure();
+          } else {
+            showFailure();
+          }
+        }, true);
+        window.addEventListener('unhandledrejection', showFailure);
+        timer = setTimeout(showFailure, 12000);
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
     <script>

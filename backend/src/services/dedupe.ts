@@ -1,25 +1,33 @@
-// Tạo hash chống trùng giao dịch ngân hàng
-export async function generateDedupeHash(
-  bankCode: string,
-  accountMask: string,
-  amount: number,
-  type: string,
-  occurredAt: string,
-  description: string,
-  balanceAfter?: number
-): Promise<string> {
-  // Làm tròn thời gian đến mức 5 phút để tránh lệch mili-giây giữa các nguồn
-  const dateObj = new Date(occurredAt);
-  const roundedMinutes = Math.floor(dateObj.getMinutes() / 5) * 5;
-  const timeKey = `${dateObj.getFullYear()}-${dateObj.getMonth() + 1}-${dateObj.getDate()} ${dateObj.getHours()}:${roundedMinutes}`;
+import { ParsedTransaction } from '../types';
 
-  const balKey = balanceAfter ? `_BAL${balanceAfter}` : '';
-  const rawKey = `${bankCode.toUpperCase()}_${accountMask}_${amount}_${type}_${timeKey}${balKey}_${description.slice(0, 30).trim().toUpperCase()}`;
+/**
+ * Generates a unique SHA-256 hash for a parsed transaction to prevent duplicates.
+ * Includes userId, bankCode, accountNumberMask, type, amount, balanceAfter (even when 0!),
+ * externalRef (when available), or 5-minute time bucket + normalized description.
+ */
+export async function generateDedupeHash(userId: string, parsed: ParsedTransaction): Promise<string> {
+  const dateObj = new Date(parsed.occurredAt);
+  const timeBucket = isNaN(dateObj.getTime())
+    ? parsed.occurredAt
+    : Math.floor(dateObj.getTime() / (1000 * 60 * 5));
 
-  // Sử dụng Web Crypto API (chuẩn tương thích Cloudflare Workers)
-  const encoder = new TextEncoder();
-  const data = encoder.encode(rawKey);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const cleanDesc = parsed.description
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .slice(0, 40);
+
+  const balancePart =
+    parsed.balanceAfter !== undefined && parsed.balanceAfter !== null
+      ? `_BAL${parsed.balanceAfter}`
+      : '';
+  const refPart = parsed.externalRef ? `_REF${parsed.externalRef.toUpperCase()}` : '';
+
+  const rawString = `${userId}_${parsed.bankCode || 'UNK'}_${parsed.accountNumberMask || '0000'}_${parsed.type}_${parsed.amount}_${timeBucket}${balancePart}${refPart}_${cleanDesc}`;
+
+  const msgBuffer = new TextEncoder().encode(rawString);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+
+  return hashHex;
 }

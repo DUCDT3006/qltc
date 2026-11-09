@@ -11,15 +11,17 @@ import {
   ShieldAlert
 } from 'lucide-react';
 import { BankAccount, Holding } from '../types';
-import { formatVND } from '../mockData';
+import { formatPrivacyVND, formatPrivacyText } from '../utils/financeMath';
 
-const API_BASE = 'https://qltc-backend.dtd-store.workers.dev/api';
+import { API_BASE } from '../services/apiClient';
+import { useManagedOverlay } from '../utils/overlayManager';
 
 interface ResetModalProps {
   isOpen: boolean;
   onClose: () => void;
   accounts: BankAccount[];
   holdings: Holding[];
+  privacyMode: boolean;
   onRefreshAll: () => Promise<void>;
   onDirectReset: (scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'all') => Promise<void>;
 }
@@ -29,6 +31,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   onClose,
   accounts,
   holdings,
+  privacyMode,
   onRefreshAll,
   onDirectReset
 }) => {
@@ -55,6 +58,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   const [newAvgCost, setNewAvgCost] = useState('');
   const [newPrice, setNewPrice] = useState('');
 
+  const dialogProps = useManagedOverlay(isOpen, onClose, 'Thiết lập lại tài chính');
   if (!isOpen) return null;
 
   // Thực hiện Reset sau khi người dùng bấm xác nhận trong In-app dialog
@@ -159,7 +163,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -399,7 +403,7 @@ export const ResetModal: React.FC<ResetModalProps> = ({
                     <div className="flex items-center gap-2">
                       {editingAccId !== acc.id && (
                         <div className="text-right">
-                          <div className="text-xs font-bold text-[#8CC7AE] num">{formatVND(acc.balance)}</div>
+                          <div className="text-xs font-bold text-[#8CC7AE] num">{formatPrivacyVND(acc.balance, privacyMode)}</div>
                           <button
                             onClick={() => {
                               setEditingAccId(acc.id);
@@ -540,12 +544,12 @@ export const ResetModal: React.FC<ResetModalProps> = ({
                         </span>
                       </div>
                       <div className="text-[10px] text-[#869699]">
-                        {h.quantity} x {formatVND(h.currentPrice)}
+                        {formatPrivacyText(h.quantity, privacyMode)} x {formatPrivacyVND(h.currentPrice, privacyMode)}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-[#8CC7AE] num">
-                        {formatVND(h.quantity * h.currentPrice)}
+                        {formatPrivacyVND(h.quantity * h.currentPrice, privacyMode)}
                       </span>
                       <button
                         onClick={() => handleDeleteHolding(h.symbol)}

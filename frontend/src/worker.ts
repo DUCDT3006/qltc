@@ -1,6 +1,17 @@
+type FrontendWorkerEnv = {
+  ASSETS: { fetch: (req: Request | string) => Promise<Response> };
+  BACKEND?: { fetch: (request: Request) => Promise<Response> };
+};
+
 export default {
-  async fetch(request: Request, env: { ASSETS: { fetch: (req: Request | string) => Promise<Response> } }): Promise<Response> {
+  async fetch(request: Request, env: FrontendWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+
+    // Keep browser API traffic same-origin so the HttpOnly session cookie is first-party.
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      if (!env.BACKEND) return Response.json({ error: 'Backend service binding is not configured', code: 'BACKEND_UNAVAILABLE' }, { status: 503 });
+      return env.BACKEND.fetch(request);
+    }
 
     // Đường dẫn rút gọn tải file APK trực tiếp
     if (url.pathname === '/apk' || url.pathname === '/download') {

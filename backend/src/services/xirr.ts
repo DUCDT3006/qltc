@@ -6,6 +6,8 @@ export interface CashFlow {
   date: string | Date; // ISO string hoặc Date
 }
 
+export type CashFlowItem = CashFlow;
+
 export function calculateXirr(cashFlows: CashFlow[], guess = 0.1): number | null {
   if (!cashFlows || cashFlows.length < 2) return null;
 

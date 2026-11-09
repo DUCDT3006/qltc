@@ -1,6 +1,39 @@
 // QLTC V2 Data Contracts & Types
 // Theo đặc tả tối ưu V2.md
 
+export type UserRole = 'owner' | 'device';
+
+export interface AuthPrincipal {
+  userId: string;
+  role: UserRole;
+  deviceId?: string;
+}
+
+export type Bindings = {
+  DB: D1Database;
+  AI?: any;
+  KV?: KVNamespace;
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  OWNER_EMAIL?: string;
+  OWNER_API_TOKEN?: string;
+  FRONTEND_ORIGIN?: string;
+};
+
+export interface ParsedTransaction {
+  type: 'income' | 'expense';
+  amount: number;
+  accountNumberMask?: string;
+  bankCode: string;
+  occurredAt: string;
+  timeSource?: 'override' | 'notification_text' | 'server_received' | 'notification';
+  description: string;
+  balanceAfter?: number;
+  externalRef?: string;
+  parseStatus?: 'parsed' | 'ambiguous';
+  reasonCode?: string;
+}
+
 export type PeriodMode = 'month' | 'quarter' | 'year' | 'custom' | 'all';
 
 export interface PeriodContext {

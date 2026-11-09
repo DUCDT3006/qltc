@@ -1,2819 +1,5667 @@
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { parseBankNotification } from './services/parser';
-import { categorizeTransaction } from './services/rules';
-import { generateDedupeHash } from './services/dedupe';
+import { Bindings, AuthPrincipal, PlanVersion } from './types';
 import {
-  TxnState,
-  getTxnContribution,
+  parseBankNotification,
+  isOtpNotification,
+  redactOtp,
+  canonicalizeOccurredAt,
+  normalizeNotificationText
+} from './services/parser';
+import { generateDedupeHash } from './services/dedupe';
+import { categorizeTransaction } from './services/rules';
+import {
   calculateBalanceDelta,
-  hashPayload,
   allocateVndLargestRemainder,
-  calculateBudgetExpected
+  validateAllocationWeights,
+  isValidVndAmount,
+  hashPayload,
+  LedgerTxState
 } from './services/ledger';
+import {
+  resolveAuthPrincipal,
+  isAuthorizedRole,
+  sha256Hex,
+  generateRandomToken,
+  generatePairCode,
+  OWNER_SESSION_COOKIE,
+  OWNER_SESSION_TTL_SECONDS,
+  hasOwnerSessionCookie,
+  isAllowedSessionMutationOrigin,
+  readOwnerSessionCookie
+} from './services/auth';
+import { matchAccountForNotification, AccountCandidate } from './services/accountMatcher';
+import { calculateXIRR } from './services/xirr';
 
-export interface Env {
-  DB: D1Database;
-  KV: KVNamespace;
-}
+export const app = new Hono<{
+  Bindings: Bindings;
+  Variables: { principal: AuthPrincipal };
+}>();
 
-const app = new Hono<{ Bindings: Env }>();
+const BUNDLED_DEFAULTS = {
+  jars: [
+    { id: 'jar_nec', name: 'Chi tiêu thiết yếu', icon: 'home', color: '#3B82F6', target_percent: 0.55, sort_order: 1 },
+    { id: 'jar_ltss', name: 'Tiết kiệm dài hạn', icon: 'savings', color: '#10B981', target_percent: 0.10, sort_order: 2 },
+    { id: 'jar_edu', name: 'Giáo dục & Phát triển', icon: 'school', color: '#8B5CF6', target_percent: 0.10, sort_order: 3 },
+    { id: 'jar_play', name: 'Hưởng thụ', icon: 'Attractions', color: '#F59E0B', target_percent: 0.10, sort_order: 4 },
+    { id: 'jar_ffa', name: 'Tự do tài chính', icon: 'trending_up', color: '#EC4899', target_percent: 0.10, sort_order: 5 },
+    { id: 'jar_give', name: 'Cho đi', icon: 'volunteer_activism', color: '#EF4444', target_percent: 0.05, sort_order: 6 }
+  ],
+  accounts: [
+    { id: 'acc_vcb', name: 'Vietcombank', type: 'bank', balance: 45000000, mask: '8899' },
+    { id: 'acc_tcb', name: 'Techcombank', type: 'bank', balance: 12500000, mask: '1234' },
+    { id: 'acc_momo', name: 'Ví MoMo', type: 'ewallet', balance: 2300000, mask: '9999' },
+    { id: 'acc_cash', name: 'Tiền mặt', type: 'cash', balance: 1500000, mask: null }
+  ],
+  rules: [
+    { id: 'rule_grab', field: 'description', type: 'contains', pattern: 'GRAB', action: 'assign_jar', target: 'jar_nec' },
+    { id: 'rule_highlands', field: 'description', type: 'contains', pattern: 'HIGHLANDS', action: 'assign_jar', target: 'jar_play' },
+    { id: 'rule_salary', field: 'description', type: 'contains', pattern: 'LUONG', action: 'assign_income', target: 'inc_salary' }
+  ]
+};
 
-// Helper idempotency receipt (V2-02, AT2-04, AT2-05)
-async function processMutationReceipt(
+export async function getMutationReceipt(
   db: D1Database,
-  userId: string,
   operationId: string | undefined,
-  payload: any
-): Promise<{ operationId: string; cachedAck?: any; conflict?: boolean; payloadHash: string }> {
-  const opId = operationId || `op_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  const pHash = await hashPayload(payload);
-
-  if (operationId) {
-    const existing = await db.prepare('SELECT payload_hash, ack_json FROM mutation_receipts WHERE user_id = ? AND operation_id = ?')
-      .bind(userId, operationId).first<{ payload_hash: string; ack_json: string }>();
-    if (existing) {
-      if (existing.payload_hash === pHash) {
-        try {
-          return { operationId: opId, cachedAck: JSON.parse(existing.ack_json), payloadHash: pHash };
-        } catch {
-          return { operationId: opId, cachedAck: { success: true }, payloadHash: pHash };
-        }
-      } else {
-        return { operationId: opId, conflict: true, payloadHash: pHash };
-      }
+  userId: string,
+  endpoint: string,
+  payload: unknown
+): Promise<{ conflict?: boolean; cachedResponse?: any; statusCode?: number; payloadHash?: string }> {
+  if (!operationId) return {};
+  const payloadHash = await hashPayload(payload);
+  const primaryDb = ((db as any).withSession?.('first-primary') || db) as D1Database;
+  const existing = await primaryDb
+    .prepare('SELECT endpoint, payload_hash, status_code, response_json FROM mutation_receipts WHERE operation_id = ? AND user_id = ?')
+    .bind(operationId, userId)
+    .first<any>();
+  if (existing) {
+    if (existing.endpoint !== endpoint || existing.payload_hash !== payloadHash) {
+      return { conflict: true, payloadHash };
     }
+    return {
+      cachedResponse: JSON.parse(existing.response_json),
+      statusCode: existing.status_code,
+      payloadHash
+    };
   }
-
-  return { operationId: opId, payloadHash: pHash };
+  return { payloadHash };
 }
 
-async function saveMutationReceipt(
+export function buildMutationReceiptStatement(
   db: D1Database,
+  operationId: string | undefined,
   userId: string,
-  operationId: string,
-  payloadHash: string,
-  ack: any
-) {
-  try {
-    await db.prepare(`
-      INSERT INTO mutation_receipts (user_id, operation_id, payload_hash, ack_json)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(user_id, operation_id) DO UPDATE SET ack_json = excluded.ack_json
-    `).bind(userId, operationId, payloadHash, JSON.stringify(ack)).run();
-  } catch (e) {
-    console.warn('Failed to save receipt:', e);
-  }
+  endpoint: string,
+  payloadHash: string | undefined,
+  statusCode: number,
+  responseBody: any
+): D1PreparedStatement | null {
+  if (!operationId || !payloadHash) return null;
+  return db
+    .prepare(
+      `INSERT INTO mutation_receipts (operation_id, user_id, endpoint, payload_hash, status_code, response_json)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .bind(operationId, userId, endpoint, payloadHash, statusCode, JSON.stringify(responseBody));
 }
 
-// Helper hạch toán delta sổ cái bất biến (V2-02)
-async function applyLedgerDelta(
+/**
+ * Builds atomic SQL statements for a single account balance change + ledger posting.
+ * Must be executed inside db.batch() junto with the transaction mutation.
+ */
+export function buildLedgerDeltaStatements(
   db: D1Database,
   userId: string,
-  operationId: string,
   accountId: string,
-  transactionId: string | undefined,
-  deltaVnd: number
-) {
-  if (deltaVnd === 0) return;
-  await db.prepare(`
-    UPDATE accounts 
-    SET balance = balance + ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP 
-    WHERE id = ? AND user_id = ?
-  `).bind(deltaVnd, accountId, userId).run();
-
-  const postingId = `post_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  await db.prepare(`
-    INSERT INTO ledger_postings (id, user_id, operation_id, account_id, transaction_id, delta_vnd)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(postingId, userId, operationId, accountId, transactionId || null, deltaVnd).run();
+  deltaVnd: number,
+  reason: string,
+  operationId: string,
+  transactionId: string | null = null
+): D1PreparedStatement[] {
+  if (!accountId || deltaVnd === 0) return [];
+  const postingId = `post_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return [
+    db
+      .prepare('UPDATE accounts SET balance = balance + ?, revision = COALESCE(revision, 1) + 1 WHERE id = ? AND user_id = ?')
+      .bind(deltaVnd, accountId, userId),
+    db
+      .prepare(
+        `INSERT INTO ledger_postings (id, user_id, account_id, transaction_id, operation_id, delta_vnd, reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(postingId, userId, accountId, transactionId, operationId, deltaVnd, reason)
+  ];
 }
 
-// Enable CORS for web and mobile clients
-app.use('*', cors({
-  origin: '*',
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Hàm sinh mã code hũ duy nhất từ tên tiếng Việt (ví dụ "Chi tiêu công trình" -> "CTCT", "Chi tiêu gia đình" -> "CTGD")
-export function generateUniqueCodeFromName(name: string, existingCodes: string[]): string {
-  const clean = (name || 'JAR').normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/gi, 'd')
-    .toUpperCase()
-    .trim();
-
-  const words = clean.split(/\s+/).filter(w => w.length > 0);
-  let base = words.map(w => w[0]).join('').slice(0, 5);
-  if (!base || base.length < 2) {
-    base = clean.replace(/[^A-Z0-9]/g, '').slice(0, 4) || 'JAR';
-  }
-
-  let finalCode = base;
-  let counter = 2;
-  const existingSet = new Set(existingCodes.map(c => (c || '').toUpperCase()));
-  while (existingSet.has(finalCode)) {
-    finalCode = `${base}${counter}`;
-    counter++;
-  }
-  return finalCode;
+/**
+ * Builds an atomic precondition assertion statement for db.batch().
+ * If the SQL scalar condition evaluates to 0, CHECK (ok = 1) fails and rolls back the entire batch!
+ */
+export function buildBatchAssertion(db: D1Database, selectOneIfValidSql: string, binds: any[]): D1PreparedStatement {
+  return db
+    .prepare(`INSERT INTO mutation_assertions (ok) SELECT CASE WHEN (${selectOneIfValidSql}) THEN 1 ELSE 0 END`)
+    .bind(...binds);
 }
 
-let schemaInitialized = false;
-async function ensureDatabaseSchema(db: D1Database) {
-  if (schemaInitialized) return;
+/**
+ * Helper to record a plan_versions snapshot whenever an income_source, planned_expense, or jar is created or updated.
+ */
+export async function buildPlanVersionStatements(
+  db: D1Database,
+  userId: string,
+  entityType: 'income_source' | 'planned_expense' | 'jar',
+  entityId: string,
+  effectiveMonth: string,
+  payload: Record<string, any>
+): Promise<D1PreparedStatement[]> {
+  const stmts: D1PreparedStatement[] = [];
+  // Close any open version starting before effectiveMonth
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE plan_versions
+         SET effective_to_month_exclusive = ?
+         WHERE user_id = ? AND entity_type = ? AND entity_id = ?
+           AND effective_to_month_exclusive IS NULL
+           AND effective_from_month < ?`
+      )
+      .bind(effectiveMonth, userId, entityType, entityId, effectiveMonth)
+  );
+  // Delete any version that started on or after effectiveMonth to replace cleanly
+  stmts.push(
+    db
+      .prepare(
+        `DELETE FROM plan_versions
+         WHERE user_id = ? AND entity_type = ? AND entity_id = ?
+           AND effective_from_month >= ?`
+      )
+      .bind(userId, entityType, entityId, effectiveMonth)
+  );
+  const versionId = `pv_${entityType}_${entityId}_${effectiveMonth}_${Math.random().toString(36).slice(2, 7)}`;
+  stmts.push(
+    db
+      .prepare(
+        `INSERT INTO plan_versions (id, user_id, entity_type, entity_id, effective_from_month, effective_to_month_exclusive, payload_json)
+         VALUES (?, ?, ?, ?, ?, NULL, ?)`
+      )
+      .bind(versionId, userId, entityType, entityId, effectiveMonth, JSON.stringify(payload))
+  );
+  return stmts;
+}
+
+export function getCurrentVnMonth(dateInput?: string | Date): string {
+  const d = dateInput ? new Date(dateInput) : new Date();
+  const vnTime = new Date(d.getTime() + 7 * 3600 * 1000);
+  const yyyy = vnTime.getUTCFullYear();
+  const mm = String(vnTime.getUTCMonth() + 1).padStart(2, '0');
+  return `${yyyy}-${mm}`;
+}
+
+function isValidIsoCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function getCreatedVnMonth(createdAt: unknown): string | null {
+  if (typeof createdAt !== 'string' || !createdAt.trim()) return null;
+  const createdDate = new Date(createdAt);
+  if (!Number.isFinite(createdDate.getTime())) return null;
+  return getCurrentVnMonth(createdDate);
+}
+
+function historicalSeedMonth(createdAt: unknown, effectiveMonth: string): string | null {
+  const createdMonth = getCreatedVnMonth(createdAt);
+  if (!createdMonth) return null;
+  return createdMonth < effectiveMonth ? createdMonth : null;
+}
+
+function encodeTransactionCursor(payload: { v: 1; occurredAt: string; id: string; revision: number; filterHash: string }): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function decodeTransactionCursor(value: string): { occurredAt: string; id: string; revision: number; filterHash: string } | null {
   try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS income_sources (
+    const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64 + '='.repeat((4 - base64.length % 4) % 4));
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const decoded = JSON.parse(new TextDecoder().decode(bytes));
+    if (decoded?.v !== 1 || typeof decoded.occurredAt !== 'string' || typeof decoded.id !== 'string' ||
+        !Number.isSafeInteger(decoded.revision) || typeof decoded.filterHash !== 'string') return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+let isSchemaEnsured = false;
+let lastEnsuredDb: D1Database | null = null;
+
+export function resetSchemaEnsureCache() {
+  isSchemaEnsured = false;
+  lastEnsuredDb = null;
+}
+
+export async function ensureDatabaseSchema(db: D1Database) {
+  if (isSchemaEnsured && lastEnsuredDb === db) return;
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          name TEXT,
+          phone TEXT,
+          avatar TEXT,
+          password_hash TEXT,
+          history_hidden_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS devices (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          device_name TEXT NOT NULL,
+          token_hash TEXT UNIQUE NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          scopes TEXT NOT NULL DEFAULT 'notifications:ingest',
+          last_seen_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          revoked_at DATETIME
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS device_pair_codes (
+          code TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          device_name TEXT NOT NULL DEFAULT 'Android Device',
+          expires_at DATETIME NOT NULL,
+          used_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db.prepare(
+      `CREATE TABLE IF NOT EXISTS web_sessions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        kind TEXT NOT NULL DEFAULT 'fixed',
-        recurrence TEXT DEFAULT 'Hàng tháng',
-        expected_amount INTEGER DEFAULT 0,
-        color TEXT DEFAULT '#8CC7AE',
-        keywords TEXT,
-        is_active INTEGER NOT NULL DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `).run();
+        token_hash TEXT UNIQUE NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TEXT
+      )`
+    ).run();
 
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS planned_expenses (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        jar_code TEXT NOT NULL DEFAULT 'NEC',
-        expected_amount INTEGER NOT NULL DEFAULT 0,
-        recurrence TEXT DEFAULT 'Hàng tháng',
-        note TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS mutation_assertions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ok INTEGER NOT NULL CHECK (ok = 1)
+        )`
       )
-    `).run();
+      .run();
 
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS rules (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        pattern TEXT NOT NULL,
-        category_name TEXT NOT NULL,
-        jar_code TEXT NOT NULL,
-        jar_id TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS accounts (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          currency TEXT DEFAULT 'VND',
+          balance INTEGER DEFAULT 0,
+          account_number_mask TEXT,
+          account_number TEXT,
+          bank_code TEXT,
+          bank_name TEXT,
+          account_holder TEXT,
+          branch TEXT,
+          aliases_json TEXT,
+          include_in_net_worth INTEGER DEFAULT 1,
+          is_active INTEGER DEFAULT 1,
+          archived_at DATETIME,
+          revision INTEGER NOT NULL DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
       )
-    `).run();
+      .run();
 
-    // Bảng V2: Mutation receipts (chống lặp và bảo đảm tính nguyên tử - V2-02)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS mutation_receipts (
-        user_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        payload_hash TEXT NOT NULL,
-        ack_json TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (user_id, operation_id)
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS jars (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          icon TEXT,
+          color TEXT,
+          target_percent REAL DEFAULT 0,
+          monthly_limit INTEGER DEFAULT 0,
+          rollover_enabled BOOLEAN DEFAULT 0,
+          is_active INTEGER DEFAULT 1,
+          revision INTEGER NOT NULL DEFAULT 1,
+          sort_order INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
       )
-    `).run();
+      .run();
 
-    // Bảng V2: Sổ cái hạch toán delta bất biến (V2-02)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS ledger_postings (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        account_id TEXT NOT NULL,
-        transaction_id TEXT,
-        delta_vnd INTEGER NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS income_sources (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          expected_amount INTEGER DEFAULT 0,
+          cadence TEXT DEFAULT 'monthly',
+          one_time_date TEXT,
+          expected_day INTEGER,
+          account_id TEXT,
+          icon TEXT DEFAULT 'payments',
+          color TEXT DEFAULT '#10B981',
+          is_active INTEGER DEFAULT 1,
+          revision INTEGER NOT NULL DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
       )
-    `).run();
+      .run();
 
-    // Bảng V2: Mốc số dư cơ sở cutover tài khoản (V2-02)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS ledger_baselines (
-        user_id TEXT NOT NULL,
-        account_id TEXT NOT NULL,
-        baseline_balance INTEGER NOT NULL DEFAULT 0,
-        cutover_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (user_id, account_id)
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS planned_expenses (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          expected_amount INTEGER DEFAULT 0,
+          cadence TEXT DEFAULT 'monthly',
+          one_time_date TEXT,
+          due_day INTEGER,
+          jar_id TEXT,
+          account_id TEXT,
+          is_active INTEGER DEFAULT 1,
+          revision INTEGER NOT NULL DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
       )
-    `).run();
+      .run();
 
-    // Bảng V2: Phiên bản kế hoạch tài chính (V2-16)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS plan_versions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        owner_id TEXT NOT NULL,
-        amount_vnd INTEGER NOT NULL,
-        cadence TEXT NOT NULL,
-        effective_from_month TEXT NOT NULL,
-        effective_to_month_exclusive TEXT,
-        one_time_date TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS plan_versions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          effective_from_month TEXT NOT NULL,
+          effective_to_month_exclusive TEXT,
+          payload_json TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
       )
-    `).run();
+      .run();
 
-    // Bảng V2: Quản lý thiết bị Android và xác thực (V2-01)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS devices (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        device_name TEXT NOT NULL,
-        token_hash TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        revoked_at DATETIME
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS raw_notifications (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          device_id TEXT,
+          event_id TEXT,
+          app_package TEXT NOT NULL,
+          title TEXT,
+          text TEXT NOT NULL,
+          received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          original_time_value TEXT,
+          time_source TEXT DEFAULT 'notification',
+          parse_status TEXT DEFAULT 'pending',
+          parse_error TEXT,
+          raw_json TEXT
+        )`
       )
-    `).run();
+      .run();
 
-    const cols = [
-      { t: 'users', c: 'phone', type: 'TEXT' },
-      { t: 'users', c: 'avatar', type: 'TEXT' },
-      { t: 'transactions', c: 'to_account_id', type: 'TEXT' },
-      { t: 'transactions', c: 'balance_after', type: 'INTEGER' },
-      { t: 'transactions', c: 'original_type', type: 'TEXT' },
-      { t: 'transactions', c: 'income_source_id', type: 'TEXT' },
-      { t: 'transactions', c: 'revision', type: 'INTEGER DEFAULT 1' },
-      { t: 'transactions', c: 'deleted_at', type: 'DATETIME' },
-      { t: 'transactions', c: 'history_hidden_at', type: 'DATETIME' },
-      { t: 'transactions', c: 'is_synthetic', type: 'INTEGER DEFAULT 0' },
-      { t: 'transactions', c: 'time_source', type: 'TEXT' },
-      { t: 'jars', c: 'is_default', type: 'INTEGER DEFAULT 0' },
-      { t: 'jars', c: 'is_active', type: 'INTEGER DEFAULT 1' },
-      { t: 'holdings', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
-      { t: 'assets', c: 'auto_sync', type: 'INTEGER DEFAULT 1' },
-      { t: 'income_sources', c: 'color', type: "TEXT DEFAULT '#657D81'" },
-      { t: 'income_sources', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
-      { t: 'income_sources', c: 'keywords', type: 'TEXT' },
-      { t: 'planned_expenses', c: 'recurrence', type: "TEXT DEFAULT 'Hàng tháng'" },
-      { t: 'planned_expenses', c: 'note', type: 'TEXT' },
-      { t: 'plan_versions', c: 'revision', type: 'INTEGER DEFAULT 1' },
-      { t: 'rules', c: 'category_name', type: "TEXT DEFAULT 'Chi tiêu'" },
-      { t: 'rules', c: 'jar_code', type: "TEXT DEFAULT 'NEC'" },
-      { t: 'rules', c: 'jar_id', type: 'TEXT' },
-      { t: 'rules', c: 'created_at', type: 'DATETIME' },
-      { t: 'accounts', c: 'account_number', type: 'TEXT' },
-      { t: 'accounts', c: 'account_holder', type: 'TEXT' },
-      { t: 'accounts', c: 'branch', type: 'TEXT' },
-      { t: 'accounts', c: 'bank_bin', type: 'TEXT' },
-      { t: 'accounts', c: 'revision', type: 'INTEGER DEFAULT 1' },
-      { t: 'accounts', c: 'archived_at', type: 'DATETIME' },
-      { t: 'accounts', c: 'reconciliation_status', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'device_id', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'event_id', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'original_time_value', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'parser_version', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'parse_status', type: 'TEXT' },
-      { t: 'raw_notifications', c: 'reason_code', type: 'TEXT' }
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS transactions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          occurred_at DATETIME NOT NULL,
+          time_source TEXT DEFAULT 'user_input',
+          type TEXT NOT NULL,
+          amount INTEGER NOT NULL,
+          currency TEXT DEFAULT 'VND',
+          account_id TEXT NOT NULL,
+          to_account_id TEXT,
+          jar_id TEXT,
+          income_source_id TEXT,
+          planned_expense_id TEXT,
+          status TEXT DEFAULT 'pending',
+          needs_account_review INTEGER DEFAULT 0,
+          source TEXT DEFAULT 'manual',
+          description TEXT,
+          counterparty TEXT,
+          raw_notification_id TEXT,
+          dedupe_hash TEXT UNIQUE,
+          transfer_pair_id TEXT,
+          suggested_pair_id TEXT,
+          is_synthetic INTEGER DEFAULT 0,
+          original_type TEXT,
+          original_account_id TEXT,
+          original_jar_id TEXT,
+          original_income_source_id TEXT,
+          original_description TEXT,
+          original_status TEXT,
+          history_hidden INTEGER NOT NULL DEFAULT 0,
+          revision INTEGER NOT NULL DEFAULT 1,
+          deleted_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS ledger_baselines (
+          account_id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          baseline_amount_vnd INTEGER NOT NULL DEFAULT 0,
+          baseline_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          note TEXT
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS ledger_postings (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          transaction_id TEXT,
+          operation_id TEXT NOT NULL,
+          delta_vnd INTEGER NOT NULL,
+          reason TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS mutation_receipts (
+          operation_id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          endpoint TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          status_code INTEGER NOT NULL,
+          response_json TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS rules (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          priority INTEGER DEFAULT 1,
+          match_field TEXT NOT NULL,
+          match_type TEXT NOT NULL,
+          pattern TEXT NOT NULL,
+          action_type TEXT NOT NULL,
+          target_id TEXT,
+          confidence REAL DEFAULT 1.0,
+          is_active BOOLEAN DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS assets (
+          id TEXT PRIMARY KEY,
+          symbol TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          asset_class TEXT NOT NULL,
+          unit TEXT NOT NULL,
+          quote_unit TEXT,
+          provider TEXT,
+          currency TEXT DEFAULT 'VND',
+          current_price REAL DEFAULT 0,
+          price_as_of DATETIME,
+          sync_status TEXT DEFAULT 'ok',
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS holdings (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          account_id TEXT,
+          quantity REAL NOT NULL DEFAULT 0,
+          holding_unit TEXT,
+          avg_cost REAL NOT NULL DEFAULT 0,
+          note TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS investment_transactions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          account_id TEXT,
+          type TEXT NOT NULL,
+          occurred_at DATETIME NOT NULL,
+          quantity REAL NOT NULL,
+          unit_price REAL NOT NULL,
+          fee INTEGER DEFAULT 0,
+          tax INTEGER DEFAULT 0,
+          total_amount_vnd INTEGER NOT NULL,
+          linked_transaction_id TEXT,
+          operation_id TEXT UNIQUE,
+          note TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`
+      )
+      .run();
+
+    await db.prepare(`CREATE TABLE IF NOT EXISTS investment_cashflows (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('contribution', 'withdrawal')),
+      amount_vnd INTEGER NOT NULL CHECK (amount_vnd > 0),
+      occurred_at TEXT NOT NULL,
+      note TEXT,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_investment_cashflows_user_date
+      ON investment_cashflows(user_id, occurred_at)`).run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS investment_cashflow_settings (
+      user_id TEXT PRIMARY KEY,
+      complete_from TEXT NOT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`).run();
+
+    const alterColumns = [
+      'ALTER TABLE transactions ADD COLUMN transfer_pair_id TEXT',
+      'ALTER TABLE transactions ADD COLUMN suggested_pair_id TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_type TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_account_id TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_jar_id TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_income_source_id TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_description TEXT',
+      'ALTER TABLE transactions ADD COLUMN original_status TEXT',
+      'ALTER TABLE transactions ADD COLUMN history_hidden INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE transactions ADD COLUMN needs_account_review INTEGER DEFAULT 0',
+      'ALTER TABLE transactions ADD COLUMN time_source TEXT DEFAULT "user_input"',
+      'ALTER TABLE transactions ADD COLUMN is_synthetic INTEGER DEFAULT 0',
+      'ALTER TABLE transactions ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE transactions ADD COLUMN deleted_at DATETIME',
+      'ALTER TABLE transactions ADD COLUMN updated_at DATETIME',
+      'ALTER TABLE income_sources ADD COLUMN icon TEXT DEFAULT "payments"',
+      'ALTER TABLE income_sources ADD COLUMN color TEXT DEFAULT "#10B981"',
+      'ALTER TABLE income_sources ADD COLUMN one_time_date TEXT',
+      'ALTER TABLE income_sources ADD COLUMN is_active INTEGER DEFAULT 1',
+      'ALTER TABLE income_sources ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE planned_expenses ADD COLUMN one_time_date TEXT',
+      'ALTER TABLE planned_expenses ADD COLUMN is_active INTEGER DEFAULT 1',
+      'ALTER TABLE planned_expenses ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE jars ADD COLUMN is_active INTEGER DEFAULT 1',
+      'ALTER TABLE jars ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE accounts ADD COLUMN account_number TEXT',
+      'ALTER TABLE accounts ADD COLUMN bank_code TEXT',
+      'ALTER TABLE accounts ADD COLUMN bank_name TEXT',
+      'ALTER TABLE accounts ADD COLUMN account_holder TEXT',
+      'ALTER TABLE accounts ADD COLUMN branch TEXT',
+      'ALTER TABLE accounts ADD COLUMN aliases_json TEXT',
+      'ALTER TABLE accounts ADD COLUMN include_in_net_worth INTEGER DEFAULT 1',
+      'ALTER TABLE accounts ADD COLUMN is_active INTEGER DEFAULT 1',
+      'ALTER TABLE accounts ADD COLUMN archived_at DATETIME',
+      'ALTER TABLE accounts ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE raw_notifications ADD COLUMN device_id TEXT',
+      'ALTER TABLE raw_notifications ADD COLUMN event_id TEXT',
+      'ALTER TABLE raw_notifications ADD COLUMN original_time_value TEXT',
+      'ALTER TABLE raw_notifications ADD COLUMN time_source TEXT DEFAULT "notification"',
+      'ALTER TABLE assets ADD COLUMN quote_unit TEXT',
+      'ALTER TABLE assets ADD COLUMN provider TEXT',
+      'ALTER TABLE assets ADD COLUMN price_as_of DATETIME',
+      'ALTER TABLE assets ADD COLUMN sync_status TEXT DEFAULT "ok"',
+      'ALTER TABLE holdings ADD COLUMN account_id TEXT',
+      'ALTER TABLE holdings ADD COLUMN holding_unit TEXT',
+      'ALTER TABLE holdings ADD COLUMN revision INTEGER DEFAULT 1',
+      'ALTER TABLE users ADD COLUMN history_hidden_at DATETIME',
+      'ALTER TABLE users ADD COLUMN phone TEXT',
+      'ALTER TABLE users ADD COLUMN avatar TEXT'
     ];
 
-    for (const col of cols) {
+    for (const sql of alterColumns) {
       try {
-        await db.prepare(`ALTER TABLE ${col.t} ADD COLUMN ${col.c} ${col.type}`).run();
-      } catch {
-        // Cột đã tồn tại
+        await db.prepare(sql).run();
+      } catch (error: any) {
+        if (!/duplicate column name/i.test(String(error?.message || error))) throw error;
       }
     }
 
-    // Tự động khử trùng các hũ đang bị trùng mã code (ví dụ nhiều hũ code = 'CHI')
-    const { results: dupJars } = await db.prepare(
-      "SELECT id, name, code, sort_order FROM jars WHERE user_id = 'user_default' ORDER BY sort_order ASC, id ASC"
-    ).all<{ id: string; name: string; code: string; sort_order: number }>();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`).run();
+    const historyMigration = await db.prepare("SELECT id FROM schema_migrations WHERE id = 'legacy_history_hidden_cutover_v1'").first<any>();
+    if (!historyMigration) {
+      await db.batch([
+        db.prepare(`UPDATE transactions SET history_hidden = 1
+          WHERE history_hidden = 0 AND user_id IN (SELECT id FROM users WHERE history_hidden_at IS NOT NULL)
+            AND datetime(created_at) <= (SELECT datetime(history_hidden_at) FROM users WHERE users.id = transactions.user_id)`),
+        db.prepare("INSERT INTO schema_migrations (id) VALUES ('legacy_history_hidden_cutover_v1')")
+      ]);
+    }
 
-    if (dupJars && dupJars.length > 0) {
-      const seen = new Set<string>();
-      for (const j of dupJars) {
-        if (seen.has(j.code)) {
-          const newCode = generateUniqueCodeFromName(j.name, Array.from(seen));
-          await db.prepare('UPDATE jars SET code = ? WHERE id = ?').bind(newCode, j.id).run();
-          seen.add(newCode);
-        } else {
-          seen.add(j.code);
+    // Create unique indexes safely
+    const indexSqls = [
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_notifications_event ON raw_notifications(user_id, device_id, event_id) WHERE event_id IS NOT NULL',
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_raw_notif_primary ON transactions(raw_notification_id) WHERE raw_notification_id IS NOT NULL AND is_synthetic = 0',
+      'CREATE INDEX IF NOT EXISTS idx_ledger_postings_account ON ledger_postings(user_id, account_id, created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_plan_versions_lookup ON plan_versions(user_id, entity_type, effective_from_month)'
+    ];
+    for (const sql of indexSqls) {
+      await db.prepare(sql).run();
+    }
+
+    // Seed default user if none exists
+    await db
+      .prepare('INSERT OR IGNORE INTO users (id, email, name) VALUES (?, ?, ?)')
+      .bind('user_default', 'admin@qltc.local', 'Chủ tài khoản')
+      .run();
+
+    await db.prepare(`CREATE TABLE IF NOT EXISTS user_data_revisions (
+      user_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 0,
+      plan_revision INTEGER NOT NULL DEFAULT 0
+    )`).run();
+    try {
+      await db.prepare('ALTER TABLE user_data_revisions ADD COLUMN plan_revision INTEGER NOT NULL DEFAULT 0').run();
+    } catch (error: any) {
+      if (!/duplicate column name/i.test(String(error?.message || error))) throw error;
+    }
+    const revisionTriggers = [
+      ...['transactions', 'accounts', 'jars', 'income_sources', 'raw_notifications'].flatMap((table) => {
+        const bump = (userExpr: string) => `INSERT INTO user_data_revisions (user_id, revision) VALUES (${userExpr}, 1)
+          ON CONFLICT(user_id) DO UPDATE SET revision = revision + 1;`;
+        return [
+          `CREATE TRIGGER IF NOT EXISTS trg_revision_${table}_insert AFTER INSERT ON ${table} BEGIN ${bump('NEW.user_id')} END`,
+          `CREATE TRIGGER IF NOT EXISTS trg_revision_${table}_update AFTER UPDATE ON ${table} BEGIN ${bump('NEW.user_id')} END`,
+          `CREATE TRIGGER IF NOT EXISTS trg_revision_${table}_delete AFTER DELETE ON ${table} BEGIN ${bump('OLD.user_id')} END`
+        ];
+      }),
+      `CREATE TRIGGER IF NOT EXISTS trg_revision_users_update AFTER UPDATE ON users BEGIN
+        INSERT INTO user_data_revisions (user_id, revision) VALUES (NEW.id, 1)
+        ON CONFLICT(user_id) DO UPDATE SET revision = revision + 1;
+      END`
+    ];
+    for (const sql of revisionTriggers) await db.prepare(sql).run();
+    const planRevisionMigration = await db.prepare("SELECT id FROM schema_migrations WHERE id = 'plan_revision_triggers_v1'").first<any>();
+    if (!planRevisionMigration) {
+      for (const table of ['planned_expenses', 'plan_versions']) {
+        for (const action of ['insert', 'update', 'delete']) {
+          await db.prepare(`DROP TRIGGER IF EXISTS trg_revision_${table}_${action}`).run();
         }
+        const planBump = (userExpr: string) => `INSERT INTO user_data_revisions (user_id, revision, plan_revision) VALUES (${userExpr}, 1, 1)
+          ON CONFLICT(user_id) DO UPDATE SET revision = revision + 1, plan_revision = plan_revision + 1;`;
+        await db.prepare(`CREATE TRIGGER trg_revision_${table}_insert AFTER INSERT ON ${table} BEGIN ${planBump('NEW.user_id')} END`).run();
+        await db.prepare(`CREATE TRIGGER trg_revision_${table}_update AFTER UPDATE ON ${table} BEGIN ${planBump('NEW.user_id')} END`).run();
+        await db.prepare(`CREATE TRIGGER trg_revision_${table}_delete AFTER DELETE ON ${table} BEGIN ${planBump('OLD.user_id')} END`).run();
       }
+      await db.prepare("INSERT INTO schema_migrations (id) VALUES ('plan_revision_triggers_v1')").run();
     }
 
-    schemaInitialized = true;
-  } catch (err) {
-    console.error('Lỗi khởi tạo schema DB:', err);
+    isSchemaEnsured = true;
+    lastEnsuredDb = db;
+  } catch (error) {
+    isSchemaEnsured = false;
+    lastEnsuredDb = null;
+    throw error;
   }
 }
 
+// Browser origins are a deployment allowlist; native clients do not send Origin.
 app.use('*', async (c, next) => {
+  const origin = c.req.header('Origin');
+  const configuredOrigins = String((c.env as any)?.ALLOWED_ORIGINS || '')
+    .split(',').map((value) => value.trim()).filter(Boolean);
+  const allowedOrigins = new Set([
+    'https://qltc-app.dtd-store.workers.dev',
+    'https://qltc-canhan.pages.dev',
+    String((c.env as any)?.FRONTEND_ORIGIN || '').trim(),
+    ...configuredOrigins
+  ].filter(Boolean));
+  if (origin && !allowedOrigins.has(origin)) {
+    return c.json({ error: 'Origin không được cho phép', code: 'ORIGIN_FORBIDDEN' }, 403);
+  }
+  if (origin) {
+    c.header('Access-Control-Allow-Origin', origin);
+    c.header('Vary', 'Origin');
+    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-Device-Token, X-Owner-Token, X-Operation-Id, Cf-Access-Authenticated-User-Email, Cf-Access-Jwt-Assertion'
+    );
+  }
+  if (c.req.method === 'OPTIONS') {
+    return c.newResponse(null, 204);
+  }
   if (c.env?.DB) {
-    await ensureDatabaseSchema(c.env.DB);
+    try {
+      await ensureDatabaseSchema(c.env.DB);
+    } catch (error) {
+      console.error('Database schema ensure failed:', error);
+      return c.json({ error: 'Database schema is unavailable', code: 'SCHEMA_UNAVAILABLE' }, 503);
+    }
   }
   await next();
 });
 
-// Health check
-app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', service: 'QLTC Backend', version: '1.2.9', time: new Date().toISOString() });
+// V2-01 Strict Authentication & Role Authorization Middleware
+const PUBLIC_PATHS = new Set([
+  '/',
+  '/api/health',
+  '/api/version',
+  '/api/download-apk',
+  '/api/auth/pair-exchange',
+  '/api/auth/login'
+]);
+
+app.use('/api/*', async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (PUBLIC_PATHS.has(path)) {
+    return next();
+  }
+
+  const sessionCookiePresent = hasOwnerSessionCookie(c);
+  if (sessionCookiePresent && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !isAllowedSessionMutationOrigin(c)) {
+    return c.json({ error: 'Nguồn yêu cầu không hợp lệ', code: 'CSRF_ORIGIN_REJECTED' }, 403);
+  }
+
+  const principal = await resolveAuthPrincipal(c);
+  if (!principal) {
+    return c.json(
+      {
+        error: 'Unauthorized: Vui lòng đăng nhập hoặc cung cấp token xác thực hợp lệ.',
+        code: 'UNAUTHORIZED'
+      },
+      401
+    );
+  }
+
+  // Device role is strictly restricted to notification ingest
+  const isDeviceIngestRoute = path === '/api/notifications/ingest' && c.req.method === 'POST';
+  if (principal.role === 'device' && !isDeviceIngestRoute) {
+    return c.json(
+      {
+        error: 'Forbidden: Thiết bị chỉ có quyền gửi thông báo (notifications:ingest), không có quyền truy cập dữ liệu tài chính hoặc quản trị.',
+        code: 'FORBIDDEN'
+      },
+      403
+    );
+  }
+
+  c.set('principal', principal);
+  await next();
 });
 
-// Seed data cơ bản nếu DB mới
-app.post('/api/seed', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
+// Health & Public Endpoints
+app.get('/', (c) => c.text('QLTC Ca Nhan API is running!'));
 
-  // 1. Tạo user
-  await db.prepare('INSERT OR IGNORE INTO users (id, email, name) VALUES (?, ?, ?)')
-    .bind(userId, 'duc@qltc.local', 'Anh Đức')
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    version: '2.0.0',
+    timestamp: new Date().toISOString()
+  })
+);
+
+app.get('/api/version', (c) => {
+  return c.json({
+    versionCode: 22,
+    versionName: '2.0.0',
+    version: '2.0.0',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
+    downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
+    changelog:
+      'Bản cập nhật V2.0.0:\n- Bảo mật xác thực Owner & Device Pairing\n- Sổ cái nguyên tử (Atomic Ledger Batch) & Idempotency\n- Khớp tài khoản thông minh & Chống mất thông báo Android\n- Lưu trữ phiên bản kế hoạch theo kỳ & XIRR đầu tư chuẩn xác'
+  });
+});
+
+app.get('/api/download-apk', (c) => {
+  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk', 302);
+});
+
+// ============================================================================
+// AUTH & DEVICE PAIRING ENDPOINTS (V2-01)
+// ============================================================================
+
+app.post('/api/auth/login', async (c) => {
+  if (!isAllowedSessionMutationOrigin(c)) {
+    return c.json({ error: 'Nguồn yêu cầu không hợp lệ', code: 'CSRF_ORIGIN_REJECTED' }, 403);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const configuredToken = c.env.OWNER_API_TOKEN;
+  if (!configuredToken) {
+    return c.json({ error: 'OWNER_API_TOKEN chưa được cấu hình', code: 'AUTH_NOT_CONFIGURED' }, 503);
+  }
+  const passwordOrToken = body.token || body.password || '';
+  if (passwordOrToken && passwordOrToken === configuredToken) {
+    const sessionToken = generateRandomToken('qltc_web_');
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + OWNER_SESSION_TTL_SECONDS * 1000).toISOString();
+    const sessionId = `web_${crypto.randomUUID()}`;
+    await c.env.DB.prepare(
+      `INSERT INTO web_sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`
+    ).bind(sessionId, 'user_default', await sha256Hex(sessionToken), expiresAt).run();
+    const response = c.json({
+      success: true,
+      role: 'owner',
+      userId: 'user_default',
+      expiresAt
+    });
+    response.headers.append('Set-Cookie', `${OWNER_SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/api; Max-Age=${OWNER_SESSION_TTL_SECONDS}; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; Secure; SameSite=Strict`);
+    response.headers.set('Cache-Control', 'no-store');
+    return response;
+  }
+  return c.json({ error: 'Thông tin xác thực không hợp lệ', code: 'UNAUTHORIZED' }, 401);
+});
+
+app.get('/api/auth/session', async (c) => {
+  const principal = c.get('principal');
+  return c.json({
+    authenticated: true,
+    userId: principal.userId,
+    role: principal.role,
+    deviceId: principal.deviceId || null
+  });
+});
+
+app.post('/api/auth/logout', async (c) => {
+  const sessionToken = readOwnerSessionCookie(c as any);
+  if (sessionToken) {
+    await c.env.DB.prepare('UPDATE web_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+      .bind(new Date().toISOString(), await sha256Hex(sessionToken)).run();
+  }
+  const response = c.json({ success: true });
+  response.headers.append('Set-Cookie', `${OWNER_SESSION_COOKIE}=; Path=/api; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict`);
+  response.headers.set('Cache-Control', 'no-store');
+  return response;
+});
+
+app.post('/api/devices/pair-code', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const body = await c.req.json().catch(() => ({}));
+  const deviceName = (body.deviceName || 'Android Listener').trim();
+  const code = generatePairCode();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  await db
+    .prepare(
+      `INSERT INTO device_pair_codes (code, user_id, device_name, expires_at)
+       VALUES (?, ?, ?, ?)`
+    )
+    .bind(code, principal.userId, deviceName, expiresAt)
     .run();
 
-  // 2. Tạo 6 hũ mặc định
-  const defaultJars = [
-    { code: 'NEC', name: 'Thiết yếu', pct: 0.55, limit: 25000000, color: '#657D81', order: 1 },
-    { code: 'FFA', name: 'Tự do tài chính', pct: 0.10, limit: 4500000, color: '#8CC7AE', order: 2 },
-    { code: 'LTSS', name: 'Tiết kiệm dài hạn', pct: 0.10, limit: 4500000, color: '#95B0B4', order: 3 },
-    { code: 'EDU', name: 'Giáo dục', pct: 0.10, limit: 4500000, color: '#7A9599', order: 4 },
-    { code: 'PLAY', name: 'Hưởng thụ', pct: 0.10, limit: 4500000, color: '#D4A373', order: 5 },
-    { code: 'GIVE', name: 'Cho đi', pct: 0.05, limit: 2300000, color: '#B0C0C3', order: 6 },
-  ];
-
-  for (const j of defaultJars) {
-    await db.prepare(`
-      INSERT OR IGNORE INTO jars (id, user_id, code, name, target_percent, monthly_limit, color, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(`jar_${j.code.toLowerCase()}`, userId, j.code, j.name, j.pct, j.limit, j.color, j.order).run();
-  }
-
-  // 3. Tạo các tài khoản mẫu
-  const sampleAccounts = [
-    { id: 'acc_vcb', name: 'Vietcombank', type: 'bank', bank_code: 'VCB', mask: '0071', balance: 14520000 },
-    { id: 'acc_tcb', name: 'Techcombank', type: 'bank', bank_code: 'TCB', mask: '1902', balance: 5200000 },
-    { id: 'acc_mb', name: 'MB Bank', type: 'bank', bank_code: 'MB', mask: '0340', balance: 35000000 },
-    { id: 'acc_cash', name: 'Tiền mặt ví', type: 'cash', bank_code: null, mask: null, balance: 1800000 },
-    { id: 'acc_tcbs', name: 'TCBS Chứng khoán', type: 'securities', bank_code: 'TCBS', mask: '8812', balance: 185000000 },
-  ];
-
-  for (const a of sampleAccounts) {
-    await db.prepare(`
-      INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(a.id, userId, a.name, a.type, a.bank_code, a.mask, a.balance).run();
-  }
-
-  // 4. Tạo tài sản đầu tư mẫu
-  const sampleAssets = [
-    { symbol: 'HPG', name: 'Tập đoàn Hòa Phát', cls: 'stock', price: 27350 },
-    { symbol: 'FPT', name: 'Tập đoàn FPT', cls: 'stock', price: 128400 },
-    { symbol: 'VCBF-BCF', name: 'Quỹ Cổ phiếu VCBF', cls: 'fund', price: 49820 },
-    { symbol: 'BTC', name: 'Bitcoin', cls: 'crypto', price: 2542000000 },
-    { symbol: 'SJC', name: 'Vàng nhẫn 9999 SJC (chỉ)', cls: 'gold', price: 8900000 },
-  ];
-
-  for (const ast of sampleAssets) {
-    await db.prepare(`
-      INSERT OR REPLACE INTO assets (id, symbol, name, asset_class, current_price, price_updated_at)
-      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `).bind(`ast_${ast.symbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`, ast.symbol, ast.name, ast.cls, ast.price).run();
-  }
-
-  return c.json({ success: true, message: 'Đã khởi tạo dữ liệu mẫu thành công.' });
+  return c.json({
+    success: true,
+    code,
+    deviceName,
+    expiresAt
+  });
 });
 
-// Ingest thông báo từ Android
-app.post('/api/notifications/ingest', async (c) => {
+app.post('/api/auth/pair-exchange', async (c) => {
   const db = c.env.DB;
-  const body = await c.req.json<{
-    packageName: string;
-    title: string;
-    text: string;
-    userId?: string;
-    occurredAt?: string;
-  }>();
+  const body = await c.req.json().catch(() => ({}));
+  const code = String(body.code || '').trim();
+  const deviceName = String(body.deviceName || '').trim();
 
-  const userId = body.userId || 'user_default';
-  const notifId = `notif_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-  // 1. Lưu log thông báo gốc (để debug và huấn luyện parser)
-  await db.prepare(`
-    INSERT INTO raw_notifications (id, user_id, package_name, title, raw_body, received_at)
-    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `).bind(notifId, userId, body.packageName || 'unknown', body.title || '', body.text || '').run();
-
-  // 2. Parse nội dung (truyền occurredAt từ client nếu có)
-  const parsed = parseBankNotification(body.packageName, body.title, body.text, body.occurredAt);
-  if (!parsed) {
-    await db.prepare('UPDATE raw_notifications SET is_parsed = 0, parse_error = ? WHERE id = ?')
-      .bind('Không khớp mẫu ngân hàng', notifId).run();
-    return c.json({ success: false, message: 'Không thể parse thông báo' }, 400);
+  if (!code) {
+    return c.json({ error: 'Thiếu mã ghép nối (code)', code: 'INVALID_PAIR_CODE' }, 400);
   }
 
-  // 3. Chống trùng (đưa thêm balanceAfter để không chặn nhầm 2 GD liên tiếp cùng số tiền)
-  const dedupeHash = await generateDedupeHash(
-    parsed.bankCode,
-    parsed.accountMask,
-    parsed.amount,
-    parsed.type,
-    parsed.occurredAt,
-    parsed.description,
-    parsed.balanceAfter
-  );
+  const pairRecord = await db
+    .prepare('SELECT code, user_id, device_name, expires_at, used_at FROM device_pair_codes WHERE code = ? LIMIT 1')
+    .bind(code)
+    .first<{ code: string; user_id: string; device_name: string; expires_at: string; used_at: string | null }>();
 
-  const existing = await db.prepare('SELECT id FROM transactions WHERE dedupe_hash = ?')
-    .bind(dedupeHash).first();
+  if (!pairRecord) {
+    return c.json({ error: 'Mã ghép nối không tồn tại', code: 'INVALID_PAIR_CODE' }, 401);
+  }
+  if (pairRecord.used_at) {
+    return c.json({ error: 'Mã ghép nối đã được sử dụng', code: 'PAIR_CODE_ALREADY_USED' }, 401);
+  }
+  if (new Date(pairRecord.expires_at).getTime() < Date.now()) {
+    return c.json({ error: 'Mã ghép nối đã hết hạn', code: 'PAIR_CODE_EXPIRED' }, 401);
+  }
 
+  const rawDeviceToken = generateRandomToken('qltc_dev_');
+  const tokenHash = await sha256Hex(rawDeviceToken);
+  const deviceId = body.deviceId ? String(body.deviceId).trim() : `dev_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const finalDeviceName = deviceName || pairRecord.device_name || 'Android Listener';
+  const nowIso = new Date().toISOString();
+
+  await db.batch([
+    db
+      .prepare('UPDATE device_pair_codes SET used_at = ? WHERE code = ? AND used_at IS NULL')
+      .bind(nowIso, code),
+    db
+      .prepare(
+        `INSERT OR REPLACE INTO devices (id, user_id, device_name, token_hash, status, scopes, last_seen_at, created_at, revoked_at)
+         VALUES (?, ?, ?, ?, 'active', 'notifications:ingest', ?, ?, NULL)`
+      )
+      .bind(deviceId, pairRecord.user_id, finalDeviceName, tokenHash, nowIso, nowIso)
+  ]);
+
+  return c.json({
+    success: true,
+    deviceId,
+    deviceName: finalDeviceName,
+    deviceToken: rawDeviceToken,
+    scopes: ['notifications:ingest']
+  });
+});
+
+app.get('/api/devices', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const { results } = await db
+    .prepare(
+      `SELECT id, device_name, status, scopes, last_seen_at, created_at, revoked_at
+       FROM devices
+       WHERE user_id = ?
+       ORDER BY created_at DESC`
+    )
+    .bind(principal.userId)
+    .all<any>();
+
+  // Also fetch latest notification received_at for listener health status (V2-26)
+  const latestNotif = await db
+    .prepare(
+      `SELECT received_at, parse_status FROM raw_notifications WHERE user_id = ? ORDER BY received_at DESC LIMIT 1`
+    )
+    .bind(principal.userId)
+    .first<any>();
+
+  return c.json({
+    devices: results || [],
+    lastNotificationAt: latestNotif?.received_at || null,
+    lastParseStatus: latestNotif?.parse_status || null
+  });
+});
+
+app.post('/api/devices/:id/revoke', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const deviceId = c.req.param('id');
+  const nowIso = new Date().toISOString();
+
+  await db
+    .prepare(`UPDATE devices SET status = 'revoked', revoked_at = ? WHERE id = ? AND user_id = ?`)
+    .bind(nowIso, deviceId, principal.userId)
+    .run();
+
+  return c.json({ success: true, deviceId, status: 'revoked', revokedAt: nowIso });
+});
+
+// ============================================================================
+// NOTIFICATION INGEST & REPROCESS ENDPOINTS (V2-03, V2-04, V2-05, V2-06, V2-10)
+// ============================================================================
+
+async function ensureUnassignedAccount(db: D1Database, userId: string): Promise<string> {
+  const placeholderId = 'acc_unassigned';
+  const existing = await db.prepare('SELECT id, user_id, type, balance, is_active, include_in_net_worth FROM accounts WHERE id = ? LIMIT 1')
+    .bind(placeholderId).first<any>();
   if (existing) {
-    return c.json({ success: true, duplicate: true, message: 'Giao dịch đã được ghi nhận trước đó', txnId: existing.id });
+    if (existing.user_id !== userId || existing.type !== 'unassigned' || Number(existing.balance) !== 0 ||
+        Number(existing.is_active) !== 0 || Number(existing.include_in_net_worth) !== 0) {
+      throw new Error('Unassigned placeholder ID is occupied by an incompatible account');
+    }
+    return placeholderId;
+  }
+  await db.batch([
+    db.prepare(`INSERT INTO accounts (id, user_id, name, type, balance, include_in_net_worth, is_active, revision)
+      VALUES (?, ?, ?, 'unassigned', 0, 0, 0, 1)`).bind(placeholderId, userId, 'Chưa xác định tài khoản'),
+    db.prepare(`INSERT INTO ledger_baselines (account_id, user_id, baseline_amount_vnd, note)
+      VALUES (?, ?, 0, 'Unassigned placeholder')`).bind(placeholderId, userId)
+  ]);
+  return placeholderId;
+}
+
+async function processNotificationToTransaction(
+  db: D1Database,
+  userId: string,
+  rawId: string,
+  appPackage: string,
+  title: string,
+  text: string,
+  occurredAtOverride?: string | number | null
+): Promise<{
+  status: 'created' | 'duplicate' | 'ignored_otp' | 'unparsed' | 'invalid_time';
+  transactionId?: string;
+  parseStatus: string;
+  needsAccountReview?: boolean;
+  suggestedPairId?: string | null;
+  reasonCode?: string;
+}> {
+  if (isOtpNotification(title, text)) {
+    await db
+      .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
+      .bind('ignored_otp', 'OTP/Verification message ignored', rawId)
+      .run();
+    return { status: 'ignored_otp', parseStatus: 'ignored_otp' };
   }
 
-  // 4. Tìm tài khoản khớp số đuôi hoặc mã ngân hàng
-  let account = await db.prepare(`
-    SELECT id, balance, name, bank_code, account_number_mask FROM accounts
-    WHERE user_id = ? AND (bank_code = ? OR account_number_mask = ?) AND is_active = 1
-    LIMIT 1
-  `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string; balance: number; name: string; bank_code: string | null; account_number_mask: string | null }>();
+  // Validate override timestamp format before parsing (V2-05 / AT2-11)
+  if (occurredAtOverride !== undefined && occurredAtOverride !== null && occurredAtOverride !== '') {
+    const timeCheck = canonicalizeOccurredAt(occurredAtOverride, null);
+    if (timeCheck.invalidOverride) {
+      await db
+        .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
+        .bind('failed', 'INVALID_TIME_FORMAT', rawId)
+        .run();
+      return { status: 'invalid_time', parseStatus: 'failed', reasonCode: 'INVALID_TIME_FORMAT' };
+    }
+  }
 
-  // Nếu chưa tìm thấy theo bank_code hoặc mask, tìm kiếm thông minh theo tên tài khoản người dùng đã tạo (tránh tạo tài khoản trùng)
-  if (!account) {
-    const cleanBank = (parsed.bankCode || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const { results: existingAccounts } = await db.prepare(`
-      SELECT id, balance, name, bank_code, account_number_mask FROM accounts
-      WHERE user_id = ? AND is_active = 1
-    `).bind(userId).all<{ id: string; balance: number; name: string; bank_code: string | null; account_number_mask: string | null }>();
+  // Check if primary transaction already exists for this raw_notification_id (idempotent reprocess)
+  const existingForRaw = await db
+    .prepare(
+      'SELECT id, status, needs_account_review, suggested_pair_id FROM transactions WHERE raw_notification_id = ? AND is_synthetic = 0 AND deleted_at IS NULL LIMIT 1'
+    )
+    .bind(rawId)
+    .first<any>();
+  if (existingForRaw) {
+    return {
+      status: 'duplicate',
+      transactionId: existingForRaw.id,
+      parseStatus: 'parsed',
+      needsAccountReview: Boolean(existingForRaw.needs_account_review),
+      suggestedPairId: existingForRaw.suggested_pair_id || null
+    };
+  }
 
-    for (const a of (existingAccounts || [])) {
-      const cleanName = (a.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const isMatch =
-        cleanName.includes(cleanBank) ||
-        cleanBank.includes(cleanName) ||
-        (cleanBank.startsWith('hd') && cleanName.startsWith('hd')) ||
-        (cleanBank.startsWith('tcb') && cleanName.includes('tech')) ||
-        (cleanBank.startsWith('tp') && cleanName.startsWith('tp')) ||
-        (cleanBank.startsWith('mb') && cleanName.startsWith('mb')) ||
-        (cleanBank.startsWith('vcb') && cleanName.includes('vietcom'));
+  const parsed = parseBankNotification(appPackage, title, text, occurredAtOverride ?? undefined);
+  if (!parsed) {
+    await db
+      .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
+      .bind('ignored', 'Could not extract amount/type', rawId)
+      .run();
+    return { status: 'unparsed', parseStatus: 'ignored' };
+  }
 
-      if (isMatch) {
-        account = a;
-        // Tự động bổ sung bank_code và số đuôi cho tài khoản hiện có của người dùng
-        await db.prepare('UPDATE accounts SET bank_code = ?, account_number_mask = COALESCE(account_number_mask, ?) WHERE id = ?')
-          .bind(parsed.bankCode, parsed.accountMask, a.id).run();
+  // Generate Dedupe Hash
+  const dedupeHash = await generateDedupeHash(userId, parsed);
+  const existingByHash = await db
+    .prepare('SELECT id, needs_account_review, suggested_pair_id FROM transactions WHERE dedupe_hash = ? AND deleted_at IS NULL LIMIT 1')
+    .bind(dedupeHash)
+    .first<any>();
+  if (existingByHash) {
+    await db
+      .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
+      .bind('ignored', 'Duplicate transaction hash', rawId)
+      .run();
+    return {
+      status: 'duplicate',
+      transactionId: existingByHash.id,
+      parseStatus: 'ignored',
+      needsAccountReview: Boolean(existingByHash.needs_account_review),
+      suggestedPairId: existingByHash.suggested_pair_id || null
+    };
+  }
+
+  // V2-03: Strict Account Matching via matchAccountForNotification
+  const { results: accRows } = await db
+    .prepare(
+      `SELECT id, name, type, bank_code, bank_name, account_number, account_number_mask, aliases_json, is_active
+       FROM accounts
+       WHERE user_id = ?`
+    )
+    .bind(userId)
+    .all<AccountCandidate>();
+
+  const matchResult = matchAccountForNotification(accRows || [], parsed, title, text);
+  let accountId = matchResult.accountId;
+  let needsAccountReview = matchResult.needsAccountReview || parsed.parseStatus === 'ambiguous';
+
+  if (!accountId) {
+    // A real, inactive zero-balance row satisfies the schema FK without representing user money.
+    accountId = await ensureUnassignedAccount(db, userId);
+    needsAccountReview = true;
+  }
+
+  // Apply Categorization Rules
+  const { results: dbRules } = await db
+    .prepare('SELECT * FROM rules WHERE user_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY priority DESC, created_at DESC')
+    .bind(userId)
+    .all<any>();
+
+  let finalType: string = parsed.type;
+  let jarId: string | null = null;
+  let incomeSourceId: string | null = null;
+  let toAccountId: string | null = null;
+
+  const upperDesc = normalizeNotificationText(parsed.description).toUpperCase();
+  for (const r of dbRules || []) {
+    const pat = normalizeNotificationText(r.pattern || '').toUpperCase();
+    if (!pat) continue;
+    if (upperDesc.includes(pat)) {
+      if (r.action_type === 'assign_jar' || r.target_id?.startsWith('jar_')) {
+        jarId = r.target_id || r.jar_id || null;
+        break;
+      } else if (r.action_type === 'assign_income' || r.target_id?.startsWith('inc_')) {
+        incomeSourceId = r.target_id || null;
+        break;
+      } else if (r.action_type === 'mark_transfer' && r.target_id) {
+        toAccountId = r.target_id;
+        break;
+      } else if (r.jar_id || r.jar_code) {
+        jarId = r.jar_id || `jar_${String(r.jar_code).toLowerCase()}`;
         break;
       }
     }
   }
 
-  let accountId: string;
-  if (account) {
-    accountId = account.id;
-    // L-01: KHÔNG sửa accounts.balance khi giao dịch đang ở trạng thái pending!
-    // Số dư chỉ được cập nhật khi người dùng bấm Duyệt (confirmed).
-  } else {
-    // Chỉ tự tạo tài khoản mới nếu thực sự chưa có tài khoản nào của ngân hàng này
-    accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
-    const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
-    const initialBal = parsed.balanceAfter && parsed.balanceAfter > 0
-      ? (parsed.type === 'expense' ? parsed.balanceAfter + parsed.amount : Math.max(0, parsed.balanceAfter - parsed.amount))
-      : 0;
-    await db.prepare(`
-      INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
-      VALUES (?, ?, ?, 'bank', ?, ?, ?)
-    `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, initialBal).run();
+  if (!jarId && finalType === 'expense') {
+    const cat = categorizeTransaction(parsed.description, 'expense');
+    if (cat && cat.jarCode && cat.confidence >= 0.8) {
+      const matchedJar = await db
+        .prepare('SELECT id FROM jars WHERE user_id = ? AND (LOWER(id) = ? OR UPPER(name) LIKE ?) LIMIT 1')
+        .bind(userId, `jar_${cat.jarCode.toLowerCase()}`, `%${cat.jarCode.toUpperCase()}%`)
+        .first<{ id: string }>();
+      if (matchedJar) {
+        jarId = matchedJar.id;
+      }
+    }
   }
 
-  // 5. Tự động phân loại danh mục & hũ (L-13 & L-09: load user-learned rules an toàn)
-  let userRules: { pattern: string; categoryName: string; jarCode: string }[] = [];
-  try {
-    const rulesRes = await db.prepare(
-      'SELECT pattern, category_name as categoryName, jar_code as jarCode FROM rules WHERE user_id = ? AND pattern IS NOT NULL'
-    ).bind(userId).all<{ pattern: string; categoryName: string; jarCode: string }>();
-    userRules = (rulesRes.results || []).filter(r => r.pattern && r.jarCode);
-  } catch {
-    userRules = [];
-  }
-
-  const cat = categorizeTransaction(parsed.description, parsed.type, userRules);
-
-  // L-13: Lấy jar_id từ jarCode, hoặc ưu tiên hũ mặc định (is_default = 1), hoặc hũ đầu tiên của user
-  let jar = parsed.type === 'expense'
-    ? await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?').bind(userId, cat.jarCode).first<{ id: string }>()
-    : null;
-
-  if (parsed.type === 'expense' && !jar && cat.confidence < 0.6) {
-    jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND is_default = 1')
-      .bind(userId).first<{ id: string }>();
-  }
-
-  if (parsed.type === 'expense' && !jar) {
-    jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? ORDER BY sort_order ASC LIMIT 1')
-      .bind(userId).first<{ id: string }>();
-  }
-
-  const jarId = parsed.type === 'expense' ? (jar ? jar.id : 'jar_nec') : null;
-
-  // Tự động nhận diện nguồn thu cho giao dịch cộng tiền (income) dựa trên tên nguồn thu hoặc từ khóa keywords
-  let incomeSourceId: string | null = null;
-  let incomeCategoryName: string = cat.categoryName;
-
-  if (parsed.type === 'income') {
-    try {
-      await ensurePlanningTables(db);
-      const { results: userIncomeSources } = await db.prepare(
-        'SELECT id, name, keywords FROM income_sources WHERE user_id = ? AND is_active = 1'
-      ).bind(userId).all<{ id: string; name: string; keywords: string | null }>();
-
-      if (userIncomeSources && userIncomeSources.length > 0) {
-        const cleanDesc = (parsed.description || '').toLowerCase();
-        const normalizeStr = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-        const normDesc = normalizeStr(cleanDesc);
-
-        for (const s of userIncomeSources) {
-          const normName = normalizeStr(s.name || '');
-          const kwList = (s.keywords || '')
-            .split(',')
-            .map(k => normalizeStr(k.trim()))
-            .filter(Boolean);
-
-          const matchName = normName.length >= 3 && normDesc.includes(normName);
-          const matchKw = kwList.some(kw => kw.length >= 2 && normDesc.includes(kw));
-
-          if (matchName || matchKw) {
-            incomeSourceId = s.id;
-            incomeCategoryName = s.name;
+  // Smart matching against Income Sources / Planned Expenses if rules didn't match
+  const normDesc = normalizeNotificationText(parsed.description).toLowerCase();
+  if (finalType === 'income' && !incomeSourceId) {
+    const { results: sources } = await db
+      .prepare('SELECT id, name FROM income_sources WHERE user_id = ? AND COALESCE(is_active, 1) = 1')
+      .bind(userId)
+      .all<{ id: string; name: string }>();
+    if (sources) {
+      for (const s of sources) {
+        const kw = normalizeNotificationText(s.name).toLowerCase();
+        if (kw.length >= 3 && normDesc.includes(kw)) {
+          incomeSourceId = s.id;
+          break;
+        }
+      }
+    }
+  } else if (finalType === 'expense' && !jarId) {
+    const { results: plans } = await db
+      .prepare('SELECT id, name, jar_id FROM planned_expenses WHERE user_id = ? AND COALESCE(is_active, 1) = 1')
+      .bind(userId)
+      .all<{ id: string; name: string; jar_id: string }>();
+    if (plans) {
+      for (const p of plans) {
+        const kw = normalizeNotificationText(p.name).toLowerCase();
+        if (kw.length >= 3 && normDesc.includes(kw) && p.jar_id) {
+          jarId = p.jar_id;
+          break;
+        }
+      }
+    }
+    if (!jarId) {
+      const { results: jarsList } = await db
+        .prepare('SELECT id, name FROM jars WHERE user_id = ? AND COALESCE(is_active, 1) = 1')
+        .bind(userId)
+        .all<{ id: string; name: string }>();
+      if (jarsList) {
+        for (const j of jarsList) {
+          const kw = normalizeNotificationText(j.name).toLowerCase();
+          if (kw.length >= 3 && normDesc.includes(kw)) {
+            jarId = j.id;
             break;
           }
         }
       }
-    } catch (err) {
-      console.error('Lỗi nhận diện nguồn thu tự động:', err);
     }
   }
 
-  // 6. Tạo giao dịch ở trạng thái "Chờ duyệt" (pending) kèm balance_after và original_type
-  const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  await db.prepare(`
-    INSERT INTO transactions (
-      id, user_id, account_id, type, amount, occurred_at, description,
-      jar_id, income_source_id, dedupe_hash, status, raw_notification_id, balance_after, original_type, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).bind(
-    txnId,
-    userId,
-    accountId,
-    parsed.type,
-    parsed.amount,
-    parsed.occurredAt,
-    parsed.description,
-    jarId,
-    incomeSourceId,
-    dedupeHash,
-    notifId,
-    parsed.balanceAfter || null,
-    parsed.type,
-    parsed.type === 'income' ? incomeCategoryName : cat.categoryName
-  ).run();
+  // V2-10: Weak Transfer Detection -> Only suggest (`suggested_pair_id`), NEVER auto-convert or hide!
+  let suggestedPairId: string | null = null;
+  if ((finalType === 'income' || finalType === 'expense') && !needsAccountReview) {
+    const oppositeType = finalType === 'income' ? 'expense' : 'income';
+    const candidate = await db
+      .prepare(
+        `SELECT id, account_id, description
+         FROM transactions
+         WHERE user_id = ?
+           AND amount = ?
+           AND type = ?
+           AND account_id != ?
+           AND status IN ('pending', 'confirmed')
+           AND transfer_pair_id IS NULL
+           AND deleted_at IS NULL
+           AND ABS(strftime('%s', occurred_at) - strftime('%s', ?)) <= 7200
+         ORDER BY occurred_at DESC
+         LIMIT 1`
+      )
+      .bind(userId, parsed.amount, oppositeType, accountId, parsed.occurredAt)
+      .first<{ id: string; account_id: string; description: string }>();
 
-  // Đánh dấu đã parse thành công và ghi mã ngân hàng
-  await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ? WHERE id = ?')
-    .bind(parsed.bankCode, notifId).run();
-
-  // 7. TỰ ĐỘNG GHÉP CẶP CHUYỂN TIỀN NỘI BỘ (Phương án 1 & 3 - L-07: Cửa sổ thời gian <= 120 phút)
-  let isAutoPaired = false;
-  let pairId: string | null = null;
-  const counterType = parsed.type === 'expense' ? 'income' : 'expense';
-
-  // Tìm giao dịch pending đối ứng: Cùng số tiền, khác tài khoản, ngược loại income/expense, trong vòng 120 phút
-  const candidate = await db.prepare(`
-    SELECT t.id, t.account_id, t.description, t.occurred_at, a.bank_code, a.name as account_name
-    FROM transactions t
-    JOIN accounts a ON t.account_id = a.id
-    WHERE t.user_id = ?
-      AND t.status = 'pending'
-      AND t.transfer_pair_id IS NULL
-      AND t.amount = ?
-      AND t.account_id != ?
-      AND t.type = ?
-      AND ABS(julianday(t.occurred_at) - julianday(?)) * 1440 <= 120
-    ORDER BY t.occurred_at DESC
-    LIMIT 1
-  `).bind(userId, parsed.amount, accountId, counterType, parsed.occurredAt).first<{
-    id: string;
-    account_id: string;
-    description: string;
-    occurred_at: string;
-    bank_code: string;
-    account_name: string;
-  }>();
-
-  if (candidate) {
-    pairId = `pair_${Date.now()}`;
-    const isCurrentExpense = parsed.type === 'expense';
-    const primaryId = isCurrentExpense ? txnId : candidate.id;
-    const secondaryId = isCurrentExpense ? candidate.id : txnId;
-    const receiverAccountId = isCurrentExpense ? candidate.account_id : accountId;
-    const senderBank = isCurrentExpense ? parsed.bankCode : candidate.bank_code;
-    const receiverBank = isCurrentExpense ? candidate.bank_code : parsed.bankCode;
-    const pairNote = `[Tự động ghép cặp] ${senderBank} ➔ ${receiverBank}`;
-
-    // Chân trừ tiền (expense) làm bản ghi transfer chính (hiển thị 1 thẻ duy nhất trong Hộp thư, trừ nguồn -> cộng đích)
-    await db.prepare(`
-      UPDATE transactions 
-      SET type = 'transfer', transfer_pair_id = ?, to_account_id = ?, jar_id = NULL, status = 'pending', notes = ?
-      WHERE id = ?
-    `).bind(pairId, receiverAccountId, pairNote, primaryId).run();
-
-    // Chân cộng tiền (income) được ẩn đi để không hiện trùng 2 thẻ trong Hộp thư / Lịch sử (có thể khôi phục khi bấm Tách)
-    await db.prepare(`
-      UPDATE transactions 
-      SET type = 'transfer', transfer_pair_id = ?, to_account_id = NULL, jar_id = NULL, status = 'paired_hidden', notes = ?
-      WHERE id = ?
-    `).bind(pairId, pairNote, secondaryId).run();
-
-    isAutoPaired = true;
+    if (candidate) {
+      suggestedPairId = candidate.id;
+    }
   }
 
-  return c.json({
-    success: true,
-    duplicate: false,
-    autoPaired: isAutoPaired,
-    transferPairId: pairId,
-    transaction: {
-      id: txnId,
-      amount: parsed.amount,
-      type: isAutoPaired ? 'transfer' : parsed.type,
-      description: parsed.description,
-      bankCode: parsed.bankCode,
-      suggestedCategory: isAutoPaired ? 'Chuyển khoản nội bộ' : cat.categoryName,
-      jarCode: cat.jarCode,
-      confidence: cat.confidence
-    }
-  });
-});
+  const txId = `tx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const finalParseStatus = parsed.parseStatus === 'ambiguous' ? 'ambiguous' : 'parsed';
 
-// Xem nhật ký các thông báo Android gần đây (dùng để kiểm tra và debug trên app)
-app.get('/api/notifications/recent', async (c) => {
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO transactions (
+          id, user_id, occurred_at, time_source, type, amount, account_id, to_account_id,
+          jar_id, income_source_id, status, needs_account_review, source, description,
+          raw_notification_id, dedupe_hash, suggested_pair_id,
+          original_type, original_account_id, original_jar_id, original_income_source_id, original_description, original_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 'notification', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+      )
+      .bind(
+        txId,
+        userId,
+        parsed.occurredAt,
+        parsed.timeSource || 'notification',
+        finalType,
+        parsed.amount,
+        accountId,
+        toAccountId,
+        jarId,
+        incomeSourceId,
+        needsAccountReview ? 1 : 0,
+        parsed.description,
+        rawId,
+        dedupeHash,
+        suggestedPairId,
+        finalType,
+        accountId,
+        jarId,
+        incomeSourceId,
+        parsed.description
+      ),
+    db
+      .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
+      .bind(finalParseStatus, parsed.reasonCode || matchResult.reasonCode || null, rawId)
+  ];
+
+  if (suggestedPairId) {
+    stmts.push(
+      db
+        .prepare('UPDATE transactions SET suggested_pair_id = ? WHERE id = ? AND user_id = ? AND suggested_pair_id IS NULL')
+        .bind(txId, suggestedPairId, userId)
+    );
+  }
+
+  await db.batch(stmts);
+
+  return {
+    status: 'created',
+    transactionId: txId,
+    parseStatus: finalParseStatus,
+    needsAccountReview,
+    suggestedPairId,
+    reasonCode: parsed.reasonCode || matchResult.reasonCode
+  };
+}
+
+app.post('/api/notifications/ingest', async (c) => {
   const db = c.env.DB;
-  const limit = parseInt(c.req.query('limit') || '30', 10);
-  const { results } = await db.prepare(`
-    SELECT id, package_name, title, raw_body, bank_code, is_parsed, parse_error, received_at
-    FROM raw_notifications
-    ORDER BY received_at DESC
-    LIMIT ?
-  `).bind(limit).all();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const deviceId = principal.deviceId || 'owner_manual';
 
-  return c.json({ notifications: results });
+  try {
+    const body = await c.req.json();
+    const appPackage = String(body.packageName || body.app_package || 'unknown').trim();
+    const rawTitle = String(body.title || '');
+    const rawText = String(body.text || body.bigText || '');
+    const eventId = body.eventId || body.event_id ? String(body.eventId || body.event_id).trim() : null;
+    const occurredAtOverride = body.occurredAt ?? body.timestamp ?? body.postTime ?? null;
+
+    if (!rawText.trim()) {
+      return c.json({ error: 'Nội dung thông báo trống', code: 'EMPTY_NOTIFICATION' }, 400);
+    }
+
+    // Update device last_seen_at if ingested by an Android device
+    if (principal.deviceId) {
+      await db
+        .prepare('UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(principal.deviceId)
+        .run();
+    }
+
+    // V2-04: Reject/Redact OTP BEFORE storing in raw_notifications!
+    if (isOtpNotification(rawTitle, rawText)) {
+      return c.json({
+        status: 'ignored_otp',
+        reason: 'OTP or verification notification skipped before storage'
+      });
+    }
+
+    // Validate time override early (V2-05 / AT2-11)
+    if (occurredAtOverride !== null && occurredAtOverride !== undefined && occurredAtOverride !== '') {
+      const check = canonicalizeOccurredAt(occurredAtOverride, null);
+      if (check.invalidOverride) {
+        return c.json(
+          {
+            error: 'Định dạng thời gian không hợp lệ (cần ISO-8601 có múi giờ hoặc epoch milliseconds)',
+            code: 'INVALID_TIME_FORMAT'
+          },
+          400
+        );
+      }
+    }
+
+    // Check eventId idempotency (V2-06 / AT2-13)
+    if (eventId) {
+      const existingRaw = await db
+        .prepare(
+          'SELECT id, parse_status FROM raw_notifications WHERE user_id = ? AND device_id = ? AND event_id = ? LIMIT 1'
+        )
+        .bind(userId, deviceId, eventId)
+        .first<{ id: string; parse_status: string }>();
+
+      if (existingRaw) {
+        const existingTx = await db
+          .prepare('SELECT id, needs_account_review, suggested_pair_id FROM transactions WHERE raw_notification_id = ? AND is_synthetic = 0 LIMIT 1')
+          .bind(existingRaw.id)
+          .first<any>();
+        return c.json({
+          status: 'duplicate_event',
+          rawNotificationId: existingRaw.id,
+          transactionId: existingTx?.id || null,
+          parseStatus: existingRaw.parse_status
+        });
+      }
+    }
+
+    const sanitizedTitle = redactOtp(rawTitle);
+    const sanitizedText = redactOtp(rawText);
+    const sanitizedPayload = {
+      ...body,
+      title: sanitizedTitle,
+      text: sanitizedText,
+      bigText: body.bigText ? redactOtp(String(body.bigText)) : undefined
+    };
+
+    const rawId = `raw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const canonicalTime = canonicalizeOccurredAt(occurredAtOverride, null);
+
+    await db
+      .prepare(
+        `INSERT INTO raw_notifications (
+          id, user_id, device_id, event_id, app_package, title, text,
+          original_time_value, time_source, parse_status, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+      )
+      .bind(
+        rawId,
+        userId,
+        deviceId,
+        eventId,
+        appPackage,
+        sanitizedTitle,
+        sanitizedText,
+        occurredAtOverride !== null && occurredAtOverride !== undefined ? String(occurredAtOverride) : canonicalTime.occurredAt,
+        canonicalTime.timeSource,
+        JSON.stringify(sanitizedPayload)
+      )
+      .run();
+
+    const result = await processNotificationToTransaction(
+      db,
+      userId,
+      rawId,
+      appPackage,
+      sanitizedTitle,
+      sanitizedText,
+      occurredAtOverride
+    );
+
+    return c.json({
+      ...result,
+      rawNotificationId: rawId
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message, code: 'INGEST_ERROR' }, 500);
+  }
 });
 
-// Xử lý lại (reprocess) các thông báo chưa parse được trong quá khứ
 app.post('/api/notifications/reprocess', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
+  const principal = c.get('principal');
+  const userId = principal.userId;
 
-  const { results } = await db.prepare(`
-    SELECT id, package_name, title, raw_body FROM raw_notifications
-    WHERE is_parsed = 0
-    ORDER BY received_at ASC
-  `).all<{ id: string; package_name: string; title: string; raw_body: string }>();
+  try {
+    const { results: rawNotifs } = await db
+      .prepare(
+        `SELECT id, user_id, app_package, title, text, original_time_value, received_at, raw_json
+         FROM raw_notifications
+         WHERE user_id = ? AND parse_status IN ('pending', 'ignored', 'failed', 'ambiguous')
+         ORDER BY received_at ASC`
+      )
+      .bind(userId)
+      .all<any>();
 
-  let parsedCount = 0;
-  const createdTxns: any[] = [];
+    if (!rawNotifs || rawNotifs.length === 0) {
+      return c.json({ status: 'ok', message: 'Không có thông báo nào cần xử lý lại', count: 0 });
+    }
 
-  for (const notif of results) {
-    const parsed = parseBankNotification(notif.package_name, notif.title, notif.raw_body);
-    if (parsed) {
-      const dedupeHash = await generateDedupeHash(
-        parsed.bankCode,
-        parsed.accountMask,
-        parsed.amount,
-        parsed.type,
-        parsed.occurredAt,
-        parsed.description
-      );
-
-      const existing = await db.prepare('SELECT id FROM transactions WHERE dedupe_hash = ?')
-        .bind(dedupeHash).first();
-
-      if (!existing) {
-        // Tìm hoặc tạo tài khoản
-        let account = await db.prepare(`
-          SELECT id FROM accounts
-          WHERE user_id = ? AND (bank_code = ? OR account_number_mask = ?)
-          LIMIT 1
-        `).bind(userId, parsed.bankCode, parsed.accountMask).first<{ id: string }>();
-
-        let accountId: string;
-        if (account) {
-          accountId = account.id;
-        } else {
-          accountId = `acc_${parsed.bankCode.toLowerCase()}_${parsed.accountMask}`;
-          const accountName = `${parsed.bankCode} · *${parsed.accountMask}`;
-          await db.prepare(`
-            INSERT OR IGNORE INTO accounts (id, user_id, name, type, bank_code, account_number_mask, balance)
-            VALUES (?, ?, ?, 'bank', ?, ?, ?)
-          `).bind(accountId, userId, accountName, parsed.bankCode, parsed.accountMask, parsed.balanceAfter || 0).run();
+    let recoveredCount = 0;
+    for (const notif of rawNotifs) {
+      let timeOverride: string | number | null = notif.original_time_value || notif.received_at || null;
+      if (!timeOverride && notif.raw_json) {
+        try {
+          const parsedRaw = JSON.parse(notif.raw_json);
+          timeOverride = parsedRaw.occurredAt || parsedRaw.timestamp || parsedRaw.postTime || null;
+        } catch {
+          // Ignore malformed JSON
         }
-
-        const cat = categorizeTransaction(parsed.description, parsed.type);
-        const jar = parsed.type === 'expense'
-          ? await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?').bind(userId, cat.jarCode).first<{ id: string }>()
-          : null;
-        const jarId = parsed.type === 'expense' ? (jar ? jar.id : 'jar_nec') : null;
-
-        let incomeSourceId: string | null = null;
-        let incomeCategoryName: string = cat.categoryName;
-
-        if (parsed.type === 'income') {
-          try {
-            await ensurePlanningTables(db);
-            const { results: userIncomeSources } = await db.prepare(
-              'SELECT id, name, keywords FROM income_sources WHERE user_id = ? AND is_active = 1'
-            ).bind(userId).all<{ id: string; name: string; keywords: string | null }>();
-
-            if (userIncomeSources && userIncomeSources.length > 0) {
-              const cleanDesc = (parsed.description || '').toLowerCase();
-              const normalizeStr = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-              const normDesc = normalizeStr(cleanDesc);
-
-              for (const s of userIncomeSources) {
-                const normName = normalizeStr(s.name || '');
-                const kwList = (s.keywords || '')
-                  .split(',')
-                  .map(k => normalizeStr(k.trim()))
-                  .filter(Boolean);
-
-                const matchName = normName.length >= 3 && normDesc.includes(normName);
-                const matchKw = kwList.some(kw => kw.length >= 2 && normDesc.includes(kw));
-
-                if (matchName || matchKw) {
-                  incomeSourceId = s.id;
-                  incomeCategoryName = s.name;
-                  break;
-                }
-              }
-            }
-          } catch {}
-        }
-
-        const txnId = `txn_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        await db.prepare(`
-          INSERT INTO transactions (
-            id, user_id, account_id, type, amount, occurred_at, description,
-            jar_id, income_source_id, dedupe_hash, status, raw_notification_id, notes, original_type
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-        `).bind(
-          txnId,
-          userId,
-          accountId,
-          parsed.type,
-          parsed.amount,
-          parsed.occurredAt,
-          parsed.description,
-          jarId,
-          incomeSourceId,
-          dedupeHash,
-          notif.id,
-          parsed.type === 'income' ? incomeCategoryName : cat.categoryName,
-          parsed.type
-        ).run();
-
-        createdTxns.push({ id: txnId, bank: parsed.bankCode, amount: parsed.amount, desc: parsed.description });
       }
 
-      await db.prepare('UPDATE raw_notifications SET is_parsed = 1, bank_code = ?, parse_error = NULL WHERE id = ?')
-        .bind(parsed.bankCode, notif.id).run();
-      parsedCount++;
+      const res = await processNotificationToTransaction(
+        db,
+        notif.user_id || userId,
+        notif.id,
+        notif.app_package,
+        notif.title || '',
+        notif.text || '',
+        timeOverride
+      );
+      if (res.status === 'created') {
+        recoveredCount++;
+      }
     }
-  }
 
-  return c.json({
-    success: true,
-    reprocessed: results.length,
-    parsedCount,
-    createdTxns
-  });
+    return c.json({
+      status: 'ok',
+      message: `Đã khôi phục thành công ${recoveredCount} giao dịch`,
+      count: recoveredCount
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
 });
 
-// Lấy danh sách giao dịch (V2-14: Hỗ trợ phân trang cursor, bộ lọc và tính toán tổng)
+// ============================================================================
+// TRANSACTIONS & ATOMIC LEDGER ENDPOINTS (V2-02, V2-10, V2-20, V2-25)
+// ============================================================================
+
 app.get('/api/transactions', async (c) => {
   const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const status = c.req.query('status'); // 'pending' | 'confirmed' | 'rejected'
-  const type = c.req.query('type'); // 'income' | 'expense' | 'transfer'
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  const status = c.req.query('status');
+  const type = c.req.query('type');
   const jarId = c.req.query('jarId');
   const incomeSourceId = c.req.query('incomeSourceId');
   const accountId = c.req.query('accountId');
-  const search = (c.req.query('search') || '').trim();
-  const year = c.req.query('year');
-  const month = c.req.query('month');
-  const quarter = c.req.query('quarter');
-  const cursor = c.req.query('cursor');
-  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '500', 10), 1), 500);
-  const userId = 'user_default';
+  const startDate = c.req.query('startDate');
+  const endDate = c.req.query('endDate');
+  const q = c.req.query('q');
+  const includeHidden = c.req.query('includeHidden') === '1';
+  const limit = Math.min(Math.max(Number(c.req.query('limit') || 200), 1), 1000);
+  const offset = Math.max(Number(c.req.query('offset') || 0), 0);
+  const cursorParam = c.req.query('cursor');
+  // A request without an explicit offset starts the additive cursor flow; explicit offset remains legacy-compatible.
+  const cursorMode = cursorParam !== undefined || c.req.query('offset') === undefined;
 
-  const whereClauses: string[] = [
-    't.user_id = ?',
-    't.deleted_at IS NULL',
-    't.history_hidden_at IS NULL',
-    "t.status != 'paired_hidden'",
-    "NOT (t.transfer_pair_id IS NOT NULL AND t.original_type = 'income' AND t.to_account_id IS NOT NULL AND p.original_type = 'expense')"
-  ];
-  const params: any[] = [userId];
+  try {
+    const whereClauses: string[] = ['t.user_id = ?', 't.deleted_at IS NULL'];
+    const params: any[] = [userId];
 
-  if (status) {
-    whereClauses.push('t.status = ?');
-    params.push(status);
-  }
-  if (type) {
-    whereClauses.push('t.type = ?');
-    params.push(type);
-  }
-  if (jarId) {
-    if (jarId === 'unassigned') {
-      whereClauses.push('t.jar_id IS NULL');
+    if (!includeHidden) whereClauses.push('COALESCE(t.history_hidden, 0) = 0');
+
+    if (status) {
+      whereClauses.push('t.status = ?');
+      params.push(status);
     } else {
-      whereClauses.push('t.jar_id = ?');
-      params.push(jarId);
+      whereClauses.push("t.status != 'paired_hidden'");
     }
-  }
-  if (incomeSourceId) {
-    if (incomeSourceId === 'unassigned') {
-      whereClauses.push('t.income_source_id IS NULL');
-    } else {
-      whereClauses.push('t.income_source_id = ?');
-      params.push(incomeSourceId);
+
+    if (type) {
+      whereClauses.push('t.type = ?');
+      params.push(type);
     }
-  }
-  if (accountId) {
-    whereClauses.push('(t.account_id = ? OR t.to_account_id = ?)');
-    params.push(accountId, accountId);
-  }
-  if (search) {
-    whereClauses.push('(t.description LIKE ? OR t.notes LIKE ?)');
-    params.push(`%${search}%`, `%${search}%`);
-  }
-  if (year && month) {
-    whereClauses.push("strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = ?");
-    params.push(`${year}-${String(month).padStart(2, '0')}`);
-  } else if (year && quarter) {
-    whereClauses.push("strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ? AND ((CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3) = ?");
-    params.push(String(year), Math.max(0, parseInt(quarter, 10) - 1));
-  } else if (year) {
-    whereClauses.push("strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ?");
-    params.push(String(year));
-  }
 
-  // Count & Total amount with current filters
-  const countQuery = `
-    SELECT COUNT(*) as total_count, COALESCE(SUM(t.amount), 0) as total_amount
-    FROM transactions t
-    LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
-    WHERE ${whereClauses.join(' AND ')}
-  `;
-  const countStats = await db.prepare(countQuery).bind(...params).first<{ total_count: number; total_amount: number }>();
-
-  // If cursor provided (V2-14: Base64 an toàn không xung đột ký tự gạch dưới trong ID)
-  const queryParams = [...params];
-  const queryWhereClauses = [...whereClauses];
-  if (cursor) {
-    let cursorOccurredAt: string | null = null;
-    let cursorId: string | null = null;
-
-    if (cursor.includes('#')) {
-      const parts = cursor.split('#');
-      cursorOccurredAt = parts[0];
-      cursorId = parts.slice(1).join('#');
-    } else {
-      try {
-        const decoded = atob(cursor);
-        if (decoded.includes('#')) {
-          const parts = decoded.split('#');
-          cursorOccurredAt = parts[0];
-          cursorId = parts.slice(1).join('#');
-        }
-      } catch {
-        // Hỗ trợ định dạng cũ nếu có
-        const lastUnder = cursor.lastIndexOf('_');
-        if (lastUnder !== -1) {
-          cursorOccurredAt = cursor.substring(0, lastUnder);
-          cursorId = cursor.substring(lastUnder + 1);
-        }
+    if (jarId) {
+      if (jarId === '__unassigned__') {
+        whereClauses.push('(t.jar_id IS NULL OR t.jar_id = "")');
+      } else if (jarId === '__orphaned__') {
+        whereClauses.push('t.jar_id IS NOT NULL AND t.jar_id != "" AND j.id IS NULL');
+      } else {
+        whereClauses.push('t.jar_id = ?');
+        params.push(jarId);
       }
     }
 
-    if (cursorOccurredAt && cursorId) {
-      queryWhereClauses.push('(t.occurred_at < ? OR (t.occurred_at = ? AND t.id < ?))');
-      queryParams.push(cursorOccurredAt, cursorOccurredAt, cursorId);
+    if (incomeSourceId) {
+      if (incomeSourceId === '__unassigned__') {
+        whereClauses.push('(t.income_source_id IS NULL OR t.income_source_id = "")');
+      } else if (incomeSourceId === '__orphaned__') {
+        whereClauses.push('t.income_source_id IS NOT NULL AND t.income_source_id != "" AND inc.id IS NULL');
+      } else {
+        whereClauses.push('t.income_source_id = ?');
+        params.push(incomeSourceId);
+      }
     }
+
+    if (accountId) {
+      whereClauses.push('(t.account_id = ? OR t.to_account_id = ?)');
+      params.push(accountId, accountId);
+    }
+
+    if (startDate) {
+      whereClauses.push('t.occurred_at >= ?');
+      params.push(startDate);
+    }
+    if (endDate) {
+      whereClauses.push('t.occurred_at <= ?');
+      params.push(endDate);
+    }
+
+    if (q && q.trim()) {
+      whereClauses.push('(LOWER(t.description) LIKE ? OR CAST(t.amount AS TEXT) LIKE ?)');
+      const pat = `%${q.trim().toLowerCase()}%`;
+      params.push(pat, pat);
+    }
+
+    const whereSql = whereClauses.join(' AND ');
+    const filterHash = await hashPayload({
+      status: status || null,
+      type: type || null,
+      jarId: jarId || null,
+      incomeSourceId: incomeSourceId || null,
+      accountId: accountId || null,
+      startDate: startDate || null,
+      endDate: endDate || null,
+      q: q?.trim() || null,
+      includeHidden
+    });
+    const revisionRow = await db
+      .prepare('SELECT revision FROM user_data_revisions WHERE user_id = ?')
+      .bind(userId)
+      .first<{ revision: number }>();
+    const dataRevision = Number(revisionRow?.revision || 0);
+    let cursor: ReturnType<typeof decodeTransactionCursor> = null;
+    if (cursorMode && cursorParam) {
+      cursor = decodeTransactionCursor(cursorParam);
+      if (!cursor) return c.json({ error: 'Cursor không hợp lệ', code: 'INVALID_CURSOR' }, 400);
+      if (cursor.filterHash !== filterHash) {
+        return c.json({ error: 'Cursor không khớp với bộ lọc hiện tại', code: 'CURSOR_FILTER_MISMATCH' }, 400);
+      }
+      if (cursor.revision !== dataRevision) {
+        return c.json({ error: 'Dữ liệu đã thay đổi trong khi đang phân trang', code: 'STALE_CURSOR', dataRevision }, 409);
+      }
+    }
+
+    const countRow = await db
+      .prepare(
+        `SELECT COUNT(*) as totalCount,
+                COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as totalIncome,
+                COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as totalExpense
+         FROM transactions t
+         LEFT JOIN jars j ON t.jar_id = j.id
+         LEFT JOIN income_sources inc ON t.income_source_id = inc.id
+         WHERE ${whereSql}`
+      )
+      .bind(...params)
+      .first<any>();
+
+    const cursorWhereClauses = [...whereClauses];
+    const cursorParams = [...params];
+    if (cursor) {
+      cursorWhereClauses.push('(t.occurred_at < ? OR (t.occurred_at = ? AND t.id < ?))');
+      cursorParams.push(cursor.occurredAt, cursor.occurredAt, cursor.id);
+    }
+    const query = `
+      SELECT t.*, j.name as jar_name, j.color as jar_color, j.icon as jar_icon,
+             a.name as account_name, a2.name as to_account_name,
+             inc.name as income_source_name,
+             rn.app_package as app_package
+      FROM transactions t
+      LEFT JOIN jars j ON t.jar_id = j.id
+      LEFT JOIN accounts a ON t.account_id = a.id
+      LEFT JOIN accounts a2 ON t.to_account_id = a2.id
+      LEFT JOIN income_sources inc ON t.income_source_id = inc.id
+      LEFT JOIN raw_notifications rn ON t.raw_notification_id = rn.id
+      WHERE ${cursorWhereClauses.join(' AND ')}
+      ORDER BY t.occurred_at DESC, ${cursorMode ? 't.id' : 't.created_at'} DESC${cursorMode ? '' : ', t.id DESC'}
+      LIMIT ?${cursorMode ? '' : ' OFFSET ?'}
+    `;
+
+    const queryResult = await db.prepare(query).bind(...cursorParams, cursorMode ? limit + 1 : limit, ...(cursorMode ? [] : [offset])).all<any>();
+    const results = queryResult.results || [];
+    const pageHasMore = cursorMode ? results.length > limit : offset + results.length < Number(countRow?.totalCount || 0);
+    const pageRows = cursorMode && pageHasMore ? results.slice(0, limit) : results;
+    const latestRevisionRow = await db
+      .prepare('SELECT revision FROM user_data_revisions WHERE user_id = ?')
+      .bind(userId)
+      .first<{ revision: number }>();
+    const latestDataRevision = Number(latestRevisionRow?.revision || 0);
+    if (cursorMode && latestDataRevision !== dataRevision) {
+      return c.json({ error: 'Dữ liệu đã thay đổi trong khi đang phân trang', code: 'STALE_CURSOR', dataRevision: latestDataRevision }, 409);
+    }
+    const totalCount = Number(countRow?.totalCount || 0);
+    const lastRow = pageRows.length ? pageRows[pageRows.length - 1] : null;
+    const nextCursor = cursorMode && pageHasMore && lastRow
+      ? encodeTransactionCursor({ v: 1, occurredAt: lastRow.occurred_at, id: lastRow.id, revision: dataRevision, filterHash })
+      : cursorMode ? null : pageHasMore ? offset + limit : null;
+
+    return c.json({
+      transactions: pageRows,
+      pagination: {
+        limit,
+        offset,
+        totalCount,
+        hasMore: pageHasMore,
+        nextCursor,
+        dataRevision
+      },
+      aggregates: {
+        totalIncome: Number(countRow?.totalIncome || 0),
+        totalExpense: Number(countRow?.totalExpense || 0)
+      }
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
-
-  const selectQuery = `
-    SELECT t.*, a.name as account_name, a.bank_code, a.account_number_mask,
-           toa.name as to_account_name, toa.bank_code as to_bank_code, toa.account_number_mask as to_account_number_mask,
-           j.name as jar_name, j.color as jar_color, j.code as jar_code,
-           s.name as income_source_name,
-           r.raw_body,
-           p.id as paired_txn_id,
-           pa.name as paired_account_name,
-           pa.bank_code as paired_bank_code,
-           pa.account_number_mask as paired_account_mask,
-           p.type as paired_type
-    FROM transactions t
-    LEFT JOIN accounts a ON t.account_id = a.id
-    LEFT JOIN accounts toa ON t.to_account_id = toa.id
-    LEFT JOIN jars j ON t.jar_id = j.id
-    LEFT JOIN income_sources s ON t.income_source_id = s.id
-    LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
-    LEFT JOIN transactions p ON (t.transfer_pair_id IS NOT NULL AND p.transfer_pair_id = t.transfer_pair_id AND p.id != t.id)
-    LEFT JOIN accounts pa ON p.account_id = pa.id
-    WHERE ${queryWhereClauses.join(' AND ')}
-    ORDER BY t.occurred_at DESC, t.id DESC
-    LIMIT ?
-  `;
-  queryParams.push(limit + 1);
-
-  const { results } = await db.prepare(selectQuery).bind(...queryParams).all<any>();
-  let nextCursor: string | null = null;
-  let items = results || [];
-  if (items.length > limit) {
-    const nextItem = items[limit - 1];
-    nextCursor = btoa(`${nextItem.occurred_at}#${nextItem.id}`);
-    items = items.slice(0, limit);
-  }
-
-  const revRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
-    .bind(userId).first<{ max_rev: number }>();
-
-  return c.json({
-    items,
-    nextCursor,
-    totalCount: countStats?.total_count || 0,
-    totalAmountVnd: countStats?.total_amount || 0,
-    dataRevision: revRow?.max_rev || 1,
-    transactions: items
-  });
 });
 
-// Duyệt / Sửa / Bỏ qua / Hoàn tác giao dịch (V2-02: Idempotent & Chuẩn toán học Delta)
-app.put('/api/transactions/:id', async (c) => {
-  const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    status?: 'pending' | 'confirmed' | 'rejected';
-    jarId?: string;
-    jarCode?: string;
-    categoryId?: string;
-    categoryName?: string;
-    incomeSourceId?: string | null;
-    notes?: string;
-    amount?: number;
-    description?: string;
-    operationId?: string;
-  }>();
-
-  const clientOpId = c.req.header('X-Operation-Id') || body.operationId;
-  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
-    db, userId, clientOpId, { path: `/api/transactions/${id}`, body }
-  );
-
-  if (conflict) {
-    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
-  }
-  if (cachedAck) {
-    return c.json(cachedAck);
-  }
-
-  // 1. Đọc thông tin giao dịch hiện tại
-  const currentTxn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
-    .bind(id, userId).first<any>();
-
-  if (!currentTxn) {
-    return c.json({ success: false, message: 'Không tìm thấy giao dịch' }, 404);
-  }
-
-  const finalAmount = body.amount !== undefined ? Math.round(body.amount) : currentTxn.amount;
-  const finalStatus = body.status !== undefined ? body.status : currentTxn.status;
-
-  // 2. Tính Delta đóng góp số dư chuẩn xác theo V2-02
-  const oldState: TxnState = {
-    type: currentTxn.type,
-    amount: currentTxn.amount,
-    status: currentTxn.status,
-    sourceAccountId: currentTxn.account_id,
-    toAccountId: currentTxn.to_account_id,
-    isPairedHidden: currentTxn.status === 'paired_hidden',
-    deletedAt: currentTxn.deleted_at
-  };
-
-  const newState: TxnState = {
-    type: currentTxn.type,
-    amount: finalAmount,
-    status: finalStatus,
-    sourceAccountId: currentTxn.account_id,
-    toAccountId: currentTxn.to_account_id,
-    isPairedHidden: finalStatus === 'paired_hidden',
-    deletedAt: currentTxn.deleted_at
-  };
-
-  const deltaSrc = calculateBalanceDelta(oldState, newState, currentTxn.account_id);
-  await applyLedgerDelta(db, userId, operationId, currentTxn.account_id, id, deltaSrc);
-
-  if (currentTxn.to_account_id) {
-    const deltaDst = calculateBalanceDelta(oldState, newState, currentTxn.to_account_id);
-    await applyLedgerDelta(db, userId, operationId, currentTxn.to_account_id, id, deltaDst);
-  }
-
-  const updates: string[] = [];
-  const params: any[] = [];
-
-  // Cập nhật trạng thái
-  if (body.status) {
-    updates.push('status = ?');
-    params.push(body.status);
-
-    if (currentTxn.transfer_pair_id) {
-      const secondaryStatus = body.status === 'rejected' ? 'rejected' : 'paired_hidden';
-      await db.prepare('UPDATE transactions SET status = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE transfer_pair_id = ? AND id != ? AND user_id = ?')
-        .bind(secondaryStatus, currentTxn.transfer_pair_id, id, userId).run();
-    }
-  }
-
-  // Ưu tiên jarId chính xác tuyệt đối (chỉ áp dụng cho giao dịch Chi tiêu)
-  let resolvedJarId: string | null = null;
-  let resolvedJarCode: string | null = body.jarCode || null;
-  if (currentTxn.type === 'expense') {
-    if (body.jarId !== undefined) {
-      updates.push('jar_id = ?');
-      params.push(body.jarId || null);
-      resolvedJarId = body.jarId || null;
-      if (body.jarId && !resolvedJarCode) {
-        const j = await db.prepare('SELECT code FROM jars WHERE id = ? AND user_id = ?')
-          .bind(body.jarId, userId).first<{ code: string }>();
-        resolvedJarCode = j?.code || null;
-      }
-    } else if (body.jarCode) {
-      const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
-        .bind(userId, body.jarCode).first<{ id: string }>();
-      if (jar) {
-        updates.push('jar_id = ?');
-        params.push(jar.id);
-        resolvedJarId = jar.id;
-      }
-    }
-  } else {
-    updates.push('jar_id = NULL');
-  }
-
-  // Gắn incomeSourceId (chỉ áp dụng cho giao dịch Thu nhập)
-  if (currentTxn.type === 'income') {
-    if (body.incomeSourceId !== undefined) {
-      updates.push('income_source_id = ?');
-      params.push(body.incomeSourceId || null);
-    }
-  } else {
-    updates.push('income_source_id = NULL');
-  }
-
-  if (body.amount !== undefined) {
-    updates.push('amount = ?');
-    params.push(Math.round(body.amount));
-  }
-  if (body.description !== undefined) {
-    updates.push('description = ?');
-    params.push(body.description);
-  }
-  if (body.categoryId) {
-    updates.push('category_id = ?');
-    params.push(body.categoryId);
-  }
-  if (body.notes !== undefined) {
-    updates.push('notes = ?');
-    params.push(body.notes);
-  } else if (body.categoryName) {
-    updates.push('notes = ?');
-    params.push(body.categoryName);
-  }
-
-  // Tự học quy tắc phân loại hũ
-  if ((resolvedJarCode || resolvedJarId) && currentTxn.type === 'expense') {
-    try {
-      const descWords = (body.description || currentTxn.description || '')
-        .replace(/[^A-Za-z0-9À-ỹ\s]/g, ' ')
-        .trim()
-        .split(/\s+/)
-        .slice(0, 3)
-        .join(' ');
-      if (descWords.length >= 3) {
-        await db.prepare('DELETE FROM rules WHERE user_id = ? AND UPPER(pattern) = UPPER(?)')
-          .bind(userId, descWords).run();
-        await db.prepare(`
-          INSERT INTO rules (id, user_id, pattern, category_name, jar_code, jar_id)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).bind(
-          `rule_${Date.now()}`,
-          userId,
-          descWords,
-          body.categoryName || 'Chi tiêu',
-          resolvedJarCode || 'NEC',
-          resolvedJarId
-        ).run();
-      }
-    } catch (ruleErr) {
-      console.warn('Skip rule learning:', ruleErr);
-    }
-  }
-
-  updates.push('revision = revision + 1');
-  updates.push('updated_at = CURRENT_TIMESTAMP');
-  params.push(id);
-  params.push(userId);
-
-  await db.prepare(`UPDATE transactions SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
-
-  const ack = { success: true, message: 'Đã cập nhật giao dịch', operationId, revision: (currentTxn.revision || 1) + 1 };
-  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
-  return c.json(ack);
-});
-
-// Thêm giao dịch thủ công (V2-02, V2-46)
+// Create Manual Transaction (Atomic Batch V2-02)
 app.post('/api/transactions', async (c) => {
   const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    id?: string;
-    accountId: string;
-    toAccountId?: string;
-    type: 'income' | 'expense' | 'transfer';
-    amount: number;
-    description: string;
-    jarId?: string;
-    jarCode?: string;
-    categoryName?: string;
-    occurredAt?: string;
-    incomeSourceId?: string;
-    operationId?: string;
-  }>();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  let replayInput: { operationId: string; body: any } | undefined;
 
-  const rawAmt = Number(body.amount);
-  if (!Number.isFinite(rawAmt) || isNaN(rawAmt) || rawAmt <= 0 || rawAmt > Number.MAX_SAFE_INTEGER) {
-    return c.json({ success: false, code: 'INVALID_AMOUNT', message: 'Số tiền giao dịch không hợp lệ' }, 400);
+  try {
+    const body = await c.req.json();
+    const operationId =
+      body.operationId ||
+      c.req.header('X-Operation-Id') ||
+      `op_tx_create_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    replayInput = { operationId, body };
+
+    const receiptCheck = await getMutationReceipt(db, operationId, userId, 'POST /api/transactions', body);
+    if (receiptCheck.conflict) {
+      return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+    }
+    if (receiptCheck.cachedResponse) {
+      return c.json(receiptCheck.cachedResponse, (receiptCheck.statusCode || 200) as any);
+    }
+
+    const amount = Number(body.amount);
+    if (!isValidVndAmount(amount)) {
+      return c.json({ error: 'Số tiền không hợp lệ (cần số nguyên dương VND)', code: 'INVALID_AMOUNT' }, 400);
+    }
+
+    const type = body.type || 'expense';
+    if (!['income', 'expense', 'transfer'].includes(type)) {
+      return c.json({ error: 'Loại giao dịch không hợp lệ', code: 'INVALID_TYPE' }, 400);
+    }
+
+    const accountId = String(body.accountId || '').trim();
+    if (!accountId) {
+      return c.json({ error: 'Vui lòng chọn tài khoản hợp lệ', code: 'MISSING_ACCOUNT' }, 400);
+    }
+
+    // Verify account exists and is active for new transactions
+    const sourceAcc = await db
+      .prepare('SELECT id, is_active FROM accounts WHERE id = ? AND user_id = ? LIMIT 1')
+      .bind(accountId, userId)
+      .first<{ id: string; is_active: number }>();
+
+    if (!sourceAcc) {
+      return c.json({ error: 'Tài khoản không tồn tại', code: 'ACCOUNT_NOT_FOUND' }, 400);
+    }
+    if (sourceAcc.is_active === 0) {
+      return c.json({ error: 'Không thể tạo giao dịch mới trên tài khoản đã lưu trữ (archived)', code: 'ACCOUNT_ARCHIVED' }, 400);
+    }
+
+    const toAccountId = type === 'transfer' && body.toAccountId ? String(body.toAccountId).trim() : null;
+    if (type === 'transfer') {
+      if (!toAccountId || toAccountId === accountId) {
+        return c.json({ error: 'Giao dịch chuyển khoản nội bộ cần tài khoản đích khác tài khoản nguồn', code: 'INVALID_TRANSFER_TARGET' }, 400);
+      }
+      const destAcc = await db
+        .prepare('SELECT id, is_active FROM accounts WHERE id = ? AND user_id = ? LIMIT 1')
+        .bind(toAccountId, userId)
+        .first<{ id: string; is_active: number }>();
+      if (!destAcc || destAcc.is_active === 0) {
+        return c.json({ error: 'Tài khoản đích không tồn tại hoặc đã lưu trữ', code: 'INVALID_TRANSFER_TARGET' }, 400);
+      }
+    }
+
+    const status = body.status || 'confirmed';
+    const txId = body.id || `tx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const occurredAt = body.occurredAt ? new Date(body.occurredAt).toISOString() : new Date().toISOString();
+    const jarId = type === 'expense' ? body.jarId || null : null;
+    const incomeSourceId = type === 'income' ? body.incomeSourceId || null : null;
+    const description = body.description || 'Giao dịch thủ công';
+
+    const newState: LedgerTxState = {
+      status,
+      type,
+      amount,
+      accountId,
+      toAccountId
+    };
+
+    const stmts: D1PreparedStatement[] = [
+      db
+        .prepare(
+          `INSERT INTO transactions (
+            id, user_id, occurred_at, time_source, type, amount, account_id, to_account_id,
+            jar_id, income_source_id, status, source, description,
+            original_type, original_account_id, original_jar_id, original_income_source_id, original_description, original_status,
+            revision
+          ) VALUES (?, ?, ?, 'user_input', ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, 1)`
+        )
+        .bind(
+          txId,
+          userId,
+          occurredAt,
+          type,
+          amount,
+          accountId,
+          toAccountId,
+          jarId,
+          incomeSourceId,
+          status,
+          description,
+          type,
+          accountId,
+          jarId,
+          incomeSourceId,
+          description,
+          status
+        )
+    ];
+
+    const deltaPrimary = calculateBalanceDelta(null, newState, accountId);
+    stmts.push(...buildLedgerDeltaStatements(db, userId, accountId, deltaPrimary, 'manual_create', operationId, txId));
+
+    if (toAccountId && toAccountId !== accountId) {
+      const deltaTarget = calculateBalanceDelta(null, newState, toAccountId);
+      stmts.push(...buildLedgerDeltaStatements(db, userId, toAccountId, deltaTarget, 'manual_create_transfer', operationId, txId));
+    }
+
+    const responsePayload = {
+      success: true,
+      id: txId,
+      operationId,
+      status,
+      revision: 1,
+      serverTimestamp: new Date().toISOString()
+    };
+
+    const receiptStmt = buildMutationReceiptStatement(
+      db,
+      operationId,
+      userId,
+      'POST /api/transactions',
+      receiptCheck.payloadHash,
+      200,
+      responsePayload
+    );
+    if (receiptStmt) stmts.unshift(receiptStmt);
+
+    // Execute all statements atomically in a single batch!
+    await db.batch(stmts);
+
+    const updatedAccs = await db
+      .prepare('SELECT id, balance, revision FROM accounts WHERE user_id = ? AND id IN (?, ?)')
+      .bind(userId, accountId, toAccountId || accountId)
+      .all<any>();
+
+    return c.json({
+      ...responsePayload,
+      affectedAccounts: updatedAccs.results || []
+    });
+  } catch (err: any) {
+    if (replayInput) {
+      const replay = await getMutationReceipt(db, replayInput.operationId, userId, 'POST /api/transactions', replayInput.body);
+      if (replay.conflict) return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+      if (replay.cachedResponse) return c.json(replay.cachedResponse, (replay.statusCode || 200) as any);
+    }
+    return c.json({ error: err.message, code: 'TRANSACTION_CREATE_FAILED' }, 500);
   }
-
-  const clientOpId = c.req.header('X-Operation-Id') || body.operationId;
-  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
-    db, userId, clientOpId, { path: '/api/transactions', body }
-  );
-
-  if (conflict) {
-    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
-  }
-  if (cachedAck) {
-    return c.json(cachedAck);
-  }
-
-  const txnId = body.id || `txn_man_${Date.now()}`;
-  const cleanAmount = Math.round(rawAmt);
-  let jarId = body.type === 'expense' ? (body.jarId || null) : null;
-  if (!jarId && body.jarCode && body.type === 'expense') {
-    const jar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND code = ?')
-      .bind(userId, body.jarCode).first<{ id: string }>();
-    jarId = jar?.id || null;
-  }
-  const incomeSourceId = body.type === 'income' ? (body.incomeSourceId || null) : null;
-
-  await db.prepare(`
-    INSERT INTO transactions (
-      id, user_id, account_id, to_account_id, type, amount, occurred_at, description,
-      jar_id, income_source_id, status, notes, original_type, revision
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, 1)
-  `).bind(
-    txnId,
-    userId,
-    body.accountId,
-    body.toAccountId || null,
-    body.type,
-    cleanAmount,
-    body.occurredAt || new Date().toISOString(),
-    body.description,
-    body.type === 'transfer' ? null : jarId,
-    incomeSourceId,
-    body.categoryName || null,
-    body.type === 'transfer' ? 'expense' : body.type
-  ).run();
-
-  // Hạch toán delta chuẩn xác
-  const newTxnState: TxnState = {
-    type: body.type,
-    amount: cleanAmount,
-    status: 'confirmed',
-    sourceAccountId: body.accountId,
-    toAccountId: body.toAccountId || null
-  };
-
-  const deltaSrc = calculateBalanceDelta(null, newTxnState, body.accountId);
-  await applyLedgerDelta(db, userId, operationId, body.accountId, txnId, deltaSrc);
-
-  if (body.type === 'transfer' && body.toAccountId) {
-    const deltaDst = calculateBalanceDelta(null, newTxnState, body.toAccountId);
-    await applyLedgerDelta(db, userId, operationId, body.toAccountId, txnId, deltaDst);
-  }
-
-  const ack = { success: true, id: txnId, operationId, revision: 1 };
-  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
-  return c.json(ack);
 });
 
-// Xóa giao dịch (V2-02: Hoàn tác sổ cái Delta hai chiều, soft delete và bảo toàn lịch sử)
+// Update / Confirm / Undo / Edit Transaction (Atomic Batch V2-02, V2-20)
+app.put('/api/transactions/:id', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const requestedId = c.req.param('id');
+  let replayInput: { operationId: string; body: any } | undefined;
+
+  try {
+    const body = await c.req.json();
+    const operationId =
+      body.operationId ||
+      c.req.header('X-Operation-Id') ||
+      `op_tx_update_${requestedId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    replayInput = { operationId, body };
+
+    const receiptCheck = await getMutationReceipt(db, operationId, userId, `PUT /api/transactions/${requestedId}`, body);
+    if (receiptCheck.conflict) {
+      return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+    }
+    if (receiptCheck.cachedResponse) {
+      return c.json(receiptCheck.cachedResponse, (receiptCheck.statusCode || 200) as any);
+    }
+
+    let oldTx = await db
+      .prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
+      .bind(requestedId, userId)
+      .first<any>();
+
+    if (!oldTx) {
+      return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
+    }
+
+    // V2-10: If user targets a paired_hidden secondary leg, resolve to the primary leg in the same transfer_pair_id
+    if (oldTx.status === 'paired_hidden' && oldTx.transfer_pair_id) {
+      const primaryLeg = await db
+        .prepare(
+          `SELECT * FROM transactions
+           WHERE user_id = ? AND transfer_pair_id = ? AND status != 'paired_hidden' AND deleted_at IS NULL
+           LIMIT 1`
+        )
+        .bind(userId, oldTx.transfer_pair_id)
+        .first<any>();
+      if (primaryLeg) {
+        oldTx = primaryLeg;
+      }
+    }
+
+    const txId = oldTx.id;
+
+    // Optimistic concurrency check (V2-02 / AT2-06)
+    if (body.expectedRevision !== undefined && Number(body.expectedRevision) !== Number(oldTx.revision || 1)) {
+      return c.json(
+        {
+          error: 'Dữ liệu giao dịch đã thay đổi ở phiên khác, vui lòng tải lại',
+          code: 'REVISION_CONFLICT',
+          currentRevision: oldTx.revision || 1
+        },
+        409
+      );
+    }
+
+    const newStatus = body.status !== undefined ? body.status : oldTx.status;
+    const newType = body.type !== undefined ? body.type : oldTx.type;
+    const newAmount = body.amount !== undefined ? Number(body.amount) : Number(oldTx.amount);
+    if (!isValidVndAmount(newAmount)) {
+      return c.json({ error: 'Số tiền không hợp lệ', code: 'INVALID_AMOUNT' }, 400);
+    }
+
+    const newAccountId = body.accountId !== undefined ? String(body.accountId).trim() : String(oldTx.account_id);
+    const newToAccountId =
+      newType === 'transfer'
+        ? body.toAccountId !== undefined
+          ? body.toAccountId
+          : oldTx.to_account_id
+        : null;
+
+    const newJarId = newType === 'expense' ? (body.jarId !== undefined ? body.jarId : oldTx.jar_id) : null;
+    const newIncomeSourceId =
+      newType === 'income' ? (body.incomeSourceId !== undefined ? body.incomeSourceId : oldTx.income_source_id) : null;
+    const newDescription = body.description !== undefined ? body.description : oldTx.description;
+    const newOccurredAt = body.occurredAt !== undefined ? new Date(body.occurredAt).toISOString() : oldTx.occurred_at;
+
+    // If user explicitly assigns an accountId during review/edit, clear needs_account_review
+    const needsAccountReview =
+      body.accountId !== undefined && body.accountId !== 'acc_unassigned'
+        ? 0
+        : body.needsAccountReview !== undefined
+          ? body.needsAccountReview
+            ? 1
+            : 0
+          : Number(oldTx.needs_account_review || 0);
+
+    // Block confirming an ambiguous transaction until a valid account is selected (V2-03 / AT2-07)
+    if (newStatus === 'confirmed' && (needsAccountReview === 1 || newAccountId === 'acc_unassigned')) {
+      return c.json(
+        {
+          error: 'Giao dịch chưa xác định rõ tài khoản ngân hàng. Vui lòng chọn tài khoản trước khi duyệt.',
+          code: 'ACCOUNT_REVIEW_REQUIRED'
+        },
+        400
+      );
+    }
+
+    if (newType === 'transfer' && (!newToAccountId || newToAccountId === newAccountId)) {
+      return c.json(
+        {
+          error: 'Giao dịch chuyển khoản nội bộ cần tài khoản đích khác tài khoản nguồn',
+          code: 'INVALID_TRANSFER_TARGET'
+        },
+        400
+      );
+    }
+
+    const oldState: LedgerTxState = {
+      status: oldTx.status,
+      type: oldTx.type,
+      amount: Number(oldTx.amount),
+      accountId: oldTx.account_id,
+      toAccountId: oldTx.to_account_id
+    };
+
+    const newState: LedgerTxState = {
+      status: newStatus,
+      type: newType,
+      amount: newAmount,
+      accountId: newAccountId,
+      toAccountId: newToAccountId
+    };
+
+    const nextRevision = Number(oldTx.revision || 1) + 1;
+    const stmts: D1PreparedStatement[] = [];
+
+    // Atomic DB-level revision assertion inside batch
+    stmts.push(
+      buildBatchAssertion(
+        db,
+        'SELECT COUNT(*) FROM transactions WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ? AND deleted_at IS NULL',
+        [txId, userId, Number(oldTx.revision || 1)]
+      )
+    );
+
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE transactions
+           SET status = ?, type = ?, amount = ?, account_id = ?, to_account_id = ?,
+               jar_id = ?, income_source_id = ?, description = ?, occurred_at = ?,
+               needs_account_review = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ?`
+        )
+        .bind(
+          newStatus,
+          newType,
+          newAmount,
+          newAccountId,
+          newToAccountId,
+          newJarId,
+          newIncomeSourceId,
+          newDescription,
+          newOccurredAt,
+          needsAccountReview,
+          nextRevision,
+          txId,
+          userId,
+          Number(oldTx.revision || 1)
+        )
+    );
+
+    // Compute exact balance deltas across ALL affected accounts (old and new source/target accounts!)
+    const candidateAccountIds = new Set<string>();
+    if (oldTx.account_id) candidateAccountIds.add(oldTx.account_id);
+    if (oldTx.to_account_id) candidateAccountIds.add(oldTx.to_account_id);
+    if (newAccountId) candidateAccountIds.add(newAccountId);
+    if (newToAccountId) candidateAccountIds.add(newToAccountId);
+
+    const deltasByAccount: Record<string, number> = {};
+    for (const accId of candidateAccountIds) {
+      const delta = calculateBalanceDelta(oldState, newState, accId);
+      if (delta !== 0) {
+        deltasByAccount[accId] = delta;
+        stmts.push(...buildLedgerDeltaStatements(db, userId, accId, delta, `tx_update_${newStatus}`, operationId, txId));
+      }
+    }
+
+    // Auto-Learn Categorization Rule when confirming
+    if (body.learnRule && body.pattern && newStatus === 'confirmed') {
+      const targetId = newType === 'expense' ? newJarId : newType === 'income' ? newIncomeSourceId : newToAccountId;
+      const actionType =
+        newType === 'expense' ? 'assign_jar' : newType === 'income' ? 'assign_income' : 'mark_transfer';
+
+      if (targetId) {
+        const ruleId = `rule_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        stmts.push(
+          db
+            .prepare(
+              `INSERT INTO rules (id, user_id, match_field, match_type, pattern, action_type, target_id)
+               VALUES (?, ?, 'description', 'contains', ?, ?, ?)`
+            )
+            .bind(ruleId, userId, String(body.pattern).toUpperCase(), actionType, targetId)
+        );
+      }
+    }
+
+    const responsePayload = {
+      success: true,
+      id: txId,
+      operationId,
+      status: newStatus,
+      revision: nextRevision,
+      deltasByAccount,
+      serverTimestamp: new Date().toISOString()
+    };
+
+    const receiptStmt = buildMutationReceiptStatement(
+      db,
+      operationId,
+      userId,
+      `PUT /api/transactions/${requestedId}`,
+      receiptCheck.payloadHash,
+      200,
+      responsePayload
+    );
+    if (receiptStmt) stmts.unshift(receiptStmt);
+
+    await db.batch(stmts);
+
+    return c.json(responsePayload);
+  } catch (err: any) {
+    if (replayInput) {
+      const replay = await getMutationReceipt(db, replayInput.operationId, userId, `PUT /api/transactions/${requestedId}`, replayInput.body);
+      if (replay.conflict) return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+      if (replay.cachedResponse) return c.json(replay.cachedResponse, (replay.statusCode || 200) as any);
+    }
+    if (String(err.message || '').includes('CHECK constraint failed')) {
+      return c.json({ error: 'Xung đột phiên bản dữ liệu (Revision conflict)', code: 'REVISION_CONFLICT' }, 409);
+    }
+    return c.json({ error: err.message, code: 'TRANSACTION_UPDATE_FAILED' }, 500);
+  }
+});
+
+// Delete Confirmed or Pending Transaction (Atomic Batch V2-02)
 app.delete('/api/transactions/:id', async (c) => {
   const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const clientOpId = c.req.header('X-Operation-Id');
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const txId = c.req.param('id');
+  const operationId = c.req.header('X-Operation-Id') || `op_tx_del_${txId}_${Date.now()}`;
 
-  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
-    db, userId, clientOpId, { deleteTxnId: id }
-  );
-  if (conflict) {
-    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
-  }
-  if (cachedAck) {
-    return c.json(cachedAck);
-  }
+  try {
+    const receiptCheck = await getMutationReceipt(db, operationId, userId, `DELETE /api/transactions/${txId}`, { txId });
+    if (receiptCheck.conflict) {
+      return c.json({ error: 'Operation ID conflict', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+    }
+    if (receiptCheck.cachedResponse) {
+      return c.json(receiptCheck.cachedResponse, (receiptCheck.statusCode || 200) as any);
+    }
 
-  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
-    .bind(id, userId).first<any>();
+    const oldTx = await db
+      .prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
+      .bind(txId, userId)
+      .first<any>();
 
-  if (!txn) {
-    return c.json({ success: true, message: 'Giao dịch không tồn tại hoặc đã xóa' });
-  }
+    if (!oldTx) {
+      return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
+    }
 
-  // Hoàn tác sổ cái số dư nếu giao dịch đang confirmed
-  const oldState: TxnState = {
-    type: txn.type,
-    amount: txn.amount,
-    status: txn.status,
-    sourceAccountId: txn.account_id,
-    toAccountId: txn.to_account_id,
-    isPairedHidden: txn.status === 'paired_hidden',
-    deletedAt: txn.deleted_at
-  };
-
-  const deltaSrc = calculateBalanceDelta(oldState, null, txn.account_id);
-  await applyLedgerDelta(db, userId, operationId, txn.account_id, id, deltaSrc);
-
-  if (txn.to_account_id) {
-    const deltaDst = calculateBalanceDelta(oldState, null, txn.to_account_id);
-    await applyLedgerDelta(db, userId, operationId, txn.to_account_id, id, deltaDst);
-  }
-
-  // Soft delete cả cặp nếu có transfer_pair_id (V2-02, AT2-21)
-  if (txn.transfer_pair_id) {
-    await db.prepare('UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE transfer_pair_id = ? AND user_id = ?')
-      .bind(txn.transfer_pair_id, userId).run();
-  } else {
-    await db.prepare('UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE id = ? AND user_id = ?')
-      .bind(id, userId).run();
-  }
-
-  const ack = { success: true, operationId };
-  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
-  return c.json(ack);
-});
-
-// Tách 2 giao dịch (Unpair - V2-10, AT2-21: Xử lý chân synthetic không biến thành giao dịch thật)
-app.post('/api/transactions/:id/unpair', async (c) => {
-  const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const clientOpId = c.req.header('X-Operation-Id');
-
-  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
-    db, userId, clientOpId, { unpairTxnId: id }
-  );
-  if (conflict) {
-    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
-  }
-  if (cachedAck) {
-    return c.json(cachedAck);
-  }
-
-  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
-    .bind(id, userId).first<any>();
-
-  if (!txn || !txn.transfer_pair_id) {
-    return c.json({ success: false, message: 'Giao dịch này không nằm trong cặp chuyển khoản nào' }, 400);
-  }
-
-  const pairId = txn.transfer_pair_id;
-
-  // Nếu giao dịch chuyển nội bộ đã từng được duyệt, đảo ngược đóng góp chuyển khoản trước khi tách
-  if (txn.status === 'confirmed' && txn.type === 'transfer') {
-    const oldTransferState: TxnState = {
-      type: 'transfer',
-      amount: txn.amount,
-      status: 'confirmed',
-      sourceAccountId: txn.account_id,
-      toAccountId: txn.to_account_id
+    const oldState: LedgerTxState = {
+      status: oldTx.status,
+      type: oldTx.type,
+      amount: Number(oldTx.amount),
+      accountId: oldTx.account_id,
+      toAccountId: oldTx.to_account_id
     };
-    const deltaSrc = calculateBalanceDelta(oldTransferState, null, txn.account_id);
-    await applyLedgerDelta(db, userId, operationId, txn.account_id, id, deltaSrc);
 
-    if (txn.to_account_id) {
-      const deltaDst = calculateBalanceDelta(oldTransferState, null, txn.to_account_id);
-      await applyLedgerDelta(db, userId, operationId, txn.to_account_id, id, deltaDst);
+    const stmts: D1PreparedStatement[] = [];
+    stmts.push(buildBatchAssertion(
+      db,
+      'SELECT COUNT(*) FROM transactions WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ? AND deleted_at IS NULL',
+      [txId, userId, Number(oldTx.revision || 1)]
+    ));
+    const candidateAccountIds = new Set<string>();
+    if (oldTx.account_id) candidateAccountIds.add(oldTx.account_id);
+    if (oldTx.to_account_id) candidateAccountIds.add(oldTx.to_account_id);
+
+    for (const accId of candidateAccountIds) {
+      const delta = calculateBalanceDelta(oldState, null, accId);
+      if (delta !== 0) {
+        stmts.push(...buildLedgerDeltaStatements(db, userId, accId, delta, 'tx_delete', operationId, txId));
+      }
     }
+
+    const nextRevision = Number(oldTx.revision || 1) + 1;
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE transactions
+           SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP, revision = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ? AND deleted_at IS NULL`
+        )
+        .bind(nextRevision, txId, userId, Number(oldTx.revision || 1))
+    );
+
+    // If this transaction was part of a transfer pair, also clean up synthetic or restore paired leg
+    if (oldTx.transfer_pair_id) {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE transactions
+             SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND transfer_pair_id = ? AND is_synthetic = 1 AND id != ?`
+          )
+          .bind(userId, oldTx.transfer_pair_id, txId)
+      );
+    }
+
+    const responsePayload = {
+      success: true,
+      id: txId,
+      operationId,
+      status: 'deleted',
+      revision: nextRevision
+    };
+
+    const receiptStmt = buildMutationReceiptStatement(
+      db,
+      operationId,
+      userId,
+      `DELETE /api/transactions/${txId}`,
+      receiptCheck.payloadHash,
+      200,
+      responsePayload
+    );
+    if (receiptStmt) stmts.unshift(receiptStmt);
+
+    await db.batch(stmts);
+    return c.json(responsePayload);
+  } catch (err: any) {
+    const replay = await getMutationReceipt(db, operationId, userId, `DELETE /api/transactions/${txId}`, { txId });
+    if (replay.conflict) return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+    if (replay.cachedResponse) return c.json(replay.cachedResponse, (replay.statusCode || 200) as any);
+    if (String(err.message || '').includes('CHECK constraint failed')) {
+      return c.json({ error: 'Xung đột phiên bản dữ liệu (Revision conflict)', code: 'REVISION_CONFLICT' }, 409);
+    }
+    return c.json({ error: err.message }, 500);
   }
-
-  const pairedTxns = await db.prepare(`
-    SELECT t.id, t.raw_notification_id, t.original_type, r.raw_body, t.description, t.is_synthetic
-    FROM transactions t
-    LEFT JOIN raw_notifications r ON t.raw_notification_id = r.id
-    WHERE t.transfer_pair_id = ? AND t.user_id = ?
-  `).bind(pairId, userId).all<{ id: string; raw_notification_id: string | null; original_type: string | null; raw_body: string | null; description: string; is_synthetic: number | null }>();
-
-  // Lấy hũ mặc định
-  const defaultJar = await db.prepare('SELECT id FROM jars WHERE user_id = ? AND is_default = 1').bind(userId).first<{ id: string }>()
-    || await db.prepare('SELECT id FROM jars WHERE user_id = ? ORDER BY sort_order ASC LIMIT 1').bind(userId).first<{ id: string }>();
-  const fallbackJarId = defaultJar?.id || 'jar_nec';
-
-  for (const t of pairedTxns.results) {
-    // AT2-21: Chân synthetic (chân ảo tự tạo lúc ghép đơn lẻ) KHÔNG ĐƯỢC biến thành giao dịch thật sau khi tách
-    if (t.is_synthetic === 1) {
-      await db.prepare('DELETE FROM transactions WHERE id = ? AND user_id = ?').bind(t.id, userId).run();
-      continue;
-    }
-
-    let origType = t.original_type;
-    if (!origType) {
-      const text = (t.raw_body || t.description || '').toLowerCase();
-      origType = text.includes('+') || text.includes('cộng') || text.includes('nhận') ? 'income' : 'expense';
-    }
-    const jarId = origType === 'income' ? null : fallbackJarId;
-
-    await db.prepare(`
-      UPDATE transactions 
-      SET transfer_pair_id = NULL,
-          to_account_id = NULL,
-          type = ?,
-          jar_id = ?,
-          status = 'pending',
-          notes = 'Đã tách thủ công từ cặp chuyển tiền',
-          revision = revision + 1,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND user_id = ?
-    `).bind(origType, jarId, t.id, userId).run();
-  }
-
-  const ack = { success: true, message: 'Đã tách 2 giao dịch thành công', operationId };
-  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
-  return c.json(ack);
 });
 
-// Ghép cặp thủ công 1 giao dịch (thu hoặc chi) thành chuyển khoản nội bộ (V2-10, AT2-21)
+// Pair Transfer Endpoints (V2-10 Atomic & Reversible)
 app.post('/api/transactions/:id/pair-transfer', async (c) => {
   const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const { toAccountId, operationId: clientOpId } = await c.req.json<{ toAccountId: string; operationId?: string }>();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const txId = c.req.param('id');
 
-  const { operationId, cachedAck, conflict, payloadHash } = await processMutationReceipt(
-    db, userId, clientOpId, { pairTxnId: id, toAccountId }
-  );
-  if (conflict) {
-    return c.json({ success: false, code: 'MUTATION_CONFLICT', message: 'Operation ID collision with different payload' }, 409);
-  }
-  if (cachedAck) {
-    return c.json(cachedAck);
-  }
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const operationId = body.operationId || c.req.header('X-Operation-Id') || `op_pair_${txId}_${Date.now()}`;
 
-  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ?')
-    .bind(id, userId).first<any>();
+    const tx = await db
+      .prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
+      .bind(txId, userId)
+      .first<any>();
+    if (!tx) return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
 
-  if (!txn) {
-    return c.json({ success: false, message: 'Không tìm thấy giao dịch' }, 404);
-  }
+    // Determine counterpart transaction (explicit counterpartTxId, suggested_pair_id, or search within 120 mins)
+    let counterpart: any = null;
+    const requestedCounterpartId = body.counterpartTxId || tx.suggested_pair_id;
+    if (requestedCounterpartId) {
+      counterpart = await db
+        .prepare(
+          `SELECT * FROM transactions
+           WHERE id = ? AND user_id = ? AND id != ? AND deleted_at IS NULL`
+        )
+        .bind(requestedCounterpartId, userId, txId)
+        .first<any>();
+    }
 
-  const selectedAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
-    .bind(toAccountId, userId).first<any>();
+    if (!counterpart && !body.toAccountId) {
+      const oppositeType = tx.type === 'income' ? 'expense' : 'income';
+      counterpart = await db
+        .prepare(
+          `SELECT * FROM transactions
+           WHERE user_id = ?
+             AND id != ?
+             AND amount = ?
+             AND type = ?
+             AND account_id != ?
+             AND status IN ('pending', 'confirmed')
+             AND transfer_pair_id IS NULL
+             AND deleted_at IS NULL
+             AND ABS(strftime('%s', occurred_at) - strftime('%s', ?)) <= 7200
+           ORDER BY occurred_at DESC
+           LIMIT 1`
+        )
+        .bind(userId, txId, tx.amount, oppositeType, tx.account_id, tx.occurred_at)
+        .first<any>();
+    }
 
-  if (!selectedAcc) {
-    return c.json({ success: false, message: 'Không tìm thấy tài khoản đã chọn' }, 404);
-  }
+    const pairId = `pair_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const targetStatus = body.confirmImmediately ? 'confirmed' : tx.status === 'confirmed' ? 'confirmed' : 'pending';
+    const stmts: D1PreparedStatement[] = [];
 
-  if (toAccountId === txn.account_id) {
-    return c.json({ success: false, message: 'Tài khoản chuyển và nhận phải khác nhau' }, 400);
-  }
+    if (counterpart) {
+      const expenseLeg = tx.type === 'expense' ? tx : counterpart;
+      const incomeLeg = tx.type === 'income' ? tx : counterpart;
 
-  const currentAcc = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
-    .bind(txn.account_id, userId).first<any>();
+      // Calculate ledger delta if either leg was already confirmed before pairing!
+      const oldExpenseState: LedgerTxState = {
+        status: expenseLeg.status,
+        type: expenseLeg.type,
+        amount: Number(expenseLeg.amount),
+        accountId: expenseLeg.account_id,
+        toAccountId: expenseLeg.to_account_id
+      };
+      const oldIncomeState: LedgerTxState = {
+        status: incomeLeg.status,
+        type: incomeLeg.type,
+        amount: Number(incomeLeg.amount),
+        accountId: incomeLeg.account_id,
+        toAccountId: incomeLeg.to_account_id
+      };
 
-  const isIncome = txn.type === 'income' || txn.original_type === 'income';
-  const pairId = `pair_${Date.now()}`;
+      const newPrimaryState: LedgerTxState = {
+        status: targetStatus,
+        type: 'transfer',
+        amount: Number(expenseLeg.amount),
+        accountId: expenseLeg.account_id,
+        toAccountId: incomeLeg.account_id
+      };
+      const newHiddenState: LedgerTxState = {
+        status: 'paired_hidden',
+        type: incomeLeg.type,
+        amount: Number(incomeLeg.amount),
+        accountId: incomeLeg.account_id,
+        toAccountId: null
+      };
 
-  if (isIncome) {
-    const sourceAccountId = toAccountId;
-    const destAccountId = txn.account_id;
+      // Net delta on expenseLeg.account_id and incomeLeg.account_id
+      for (const accId of new Set([expenseLeg.account_id, incomeLeg.account_id])) {
+        const deltaFromPrimary = calculateBalanceDelta(oldExpenseState, newPrimaryState, accId);
+        const deltaFromHidden = calculateBalanceDelta(oldIncomeState, newHiddenState, accId);
+        const netDelta = deltaFromPrimary + deltaFromHidden;
+        if (netDelta !== 0) {
+          stmts.push(...buildLedgerDeltaStatements(db, userId, accId, netDelta, 'pair_transfer', operationId, expenseLeg.id));
+        }
+      }
 
-    const existingCounter = await db.prepare(`
-      SELECT id FROM transactions
-      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'expense' AND status = 'pending' AND transfer_pair_id IS NULL AND deleted_at IS NULL
-      ORDER BY occurred_at DESC LIMIT 1
-    `).bind(userId, sourceAccountId, txn.amount).first<{ id: string }>();
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE transactions
+             SET type = 'transfer',
+                 to_account_id = ?,
+                 status = ?,
+                 transfer_pair_id = ?,
+                 suggested_pair_id = NULL,
+                 jar_id = NULL,
+                 income_source_id = NULL,
+                 original_type = COALESCE(original_type, ?),
+                 original_account_id = COALESCE(original_account_id, ?),
+                 original_jar_id = COALESCE(original_jar_id, ?),
+                 original_income_source_id = COALESCE(original_income_source_id, ?),
+                 original_description = COALESCE(original_description, ?),
+                 original_status = COALESCE(original_status, ?),
+                 revision = COALESCE(revision, 1) + 1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(
+            incomeLeg.account_id,
+            targetStatus,
+            pairId,
+            expenseLeg.type,
+            expenseLeg.account_id,
+            expenseLeg.jar_id,
+            expenseLeg.income_source_id,
+            expenseLeg.description,
+            expenseLeg.status,
+            expenseLeg.id,
+            userId
+          )
+      );
 
-    if (existingCounter) {
-      await db.prepare(`
-        UPDATE transactions
-        SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?, revision = revision + 1
-        WHERE id = ? AND user_id = ?
-      `).bind(destAccountId, pairId, `Chuyển sang ${currentAcc?.name || 'tài khoản nhận'}`, existingCounter.id, userId).run();
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE transactions
+             SET status = 'paired_hidden',
+                 transfer_pair_id = ?,
+                 suggested_pair_id = NULL,
+                 original_type = COALESCE(original_type, ?),
+                 original_account_id = COALESCE(original_account_id, ?),
+                 original_jar_id = COALESCE(original_jar_id, ?),
+                 original_income_source_id = COALESCE(original_income_source_id, ?),
+                 original_description = COALESCE(original_description, ?),
+                 original_status = COALESCE(original_status, ?),
+                 revision = COALESCE(revision, 1) + 1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(
+            pairId,
+            incomeLeg.type,
+            incomeLeg.account_id,
+            incomeLeg.jar_id,
+            incomeLeg.income_source_id,
+            incomeLeg.description,
+            incomeLeg.status,
+            incomeLeg.id,
+            userId
+          )
+      );
 
-      await db.prepare(`
-        UPDATE transactions
-        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?, revision = revision + 1
-        WHERE id = ? AND user_id = ?
-      `).bind(pairId, `Nhận từ đối ứng ${existingCounter.id}`, id, userId).run();
-    } else {
-      await db.prepare(`
-        UPDATE transactions
-        SET account_id = ?, to_account_id = ?, type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = 'expense', notes = ?, revision = revision + 1
-        WHERE id = ? AND user_id = ?
-      `).bind(sourceAccountId, destAccountId, pairId, `Chuyển từ ${selectedAcc.name} sang ${currentAcc?.name || 'tài khoản nhận'}`, id, userId).run();
-
-      const counterTxnId = `txn_pair_${Date.now()}`;
-      await db.prepare(`
-        INSERT INTO transactions (
-          id, user_id, account_id, type, amount, occurred_at, description,
-          status, transfer_pair_id, original_type, notes, is_synthetic, revision
-        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?, 1, 1)
-      `).bind(
-        counterTxnId,
-        userId,
-        destAccountId,
-        txn.amount,
-        txn.occurred_at,
-        `Nhận chuyển khoản nội bộ vào ${currentAcc?.name || 'tài khoản nhận'}`,
+      await db.batch(stmts);
+      return c.json({
+        success: true,
+        paired: true,
         pairId,
-        `Nhận từ đối ứng ${id}`
-      ).run();
-    }
-
-    if (txn.status === 'confirmed') {
-      await applyLedgerDelta(db, userId, operationId, sourceAccountId, id, -txn.amount);
-    }
-  } else {
-    const sourceAccountId = txn.account_id;
-    const destAccountId = toAccountId;
-
-    const existingCounter = await db.prepare(`
-      SELECT id FROM transactions
-      WHERE user_id = ? AND account_id = ? AND amount = ? AND type = 'income' AND status = 'pending' AND transfer_pair_id IS NULL AND deleted_at IS NULL
-      ORDER BY occurred_at DESC LIMIT 1
-    `).bind(userId, destAccountId, txn.amount).first<{ id: string }>();
-
-    await db.prepare(`
-      UPDATE transactions 
-      SET type = 'transfer', to_account_id = ?, transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, original_type = COALESCE(original_type, 'expense'), notes = ?, revision = revision + 1
-      WHERE id = ? AND user_id = ?
-    `).bind(destAccountId, pairId, `Chuyển sang ${selectedAcc.name}`, id, userId).run();
-
-    if (txn.status === 'confirmed') {
-      await applyLedgerDelta(db, userId, operationId, destAccountId, id, txn.amount);
-    }
-
-    if (existingCounter) {
-      await db.prepare(`
-        UPDATE transactions
-        SET type = 'transfer', transfer_pair_id = ?, jar_id = NULL, income_source_id = NULL, status = 'paired_hidden', original_type = 'income', notes = ?, revision = revision + 1
-        WHERE id = ? AND user_id = ?
-      `).bind(pairId, `Nhận từ đối ứng ${id}`, existingCounter.id, userId).run();
+        primaryTxId: expenseLeg.id,
+        hiddenTxId: incomeLeg.id,
+        status: targetStatus
+      });
     } else {
-      const counterTxnId = `txn_pair_${Date.now()}`;
-      await db.prepare(`
-        INSERT INTO transactions (
-          id, user_id, account_id, type, amount, occurred_at, description,
-          status, transfer_pair_id, original_type, notes, is_synthetic, revision
-        ) VALUES (?, ?, ?, 'transfer', ?, ?, ?, 'paired_hidden', ?, 'income', ?, 1, 1)
-      `).bind(
-        counterTxnId,
-        userId,
-        destAccountId,
-        txn.amount,
-        txn.occurred_at,
-        `Nhận chuyển khoản nội bộ vào ${selectedAcc.name}`,
-        pairId,
-        `Nhận từ đối ứng ${id}`
-      ).run();
-    }
-  }
+      // Single-leg manual transfer conversion with synthetic counterpart
+      let targetAccId = body.toAccountId;
+      if (!targetAccId || targetAccId === tx.account_id) {
+        return c.json(
+          {
+            error: 'Vui lòng chọn tài khoản đối ứng khác tài khoản nguồn để chuyển thành giao dịch nội bộ',
+            code: 'MISSING_TARGET_ACCOUNT'
+          },
+          400
+        );
+      }
 
-  const ack = { success: true, message: 'Đã tạo chuyển khoản nội bộ thành công', operationId };
-  await saveMutationReceipt(db, userId, operationId, payloadHash, ack);
-  return c.json(ack);
+      const oldState: LedgerTxState = {
+        status: tx.status,
+        type: tx.type,
+        amount: Number(tx.amount),
+        accountId: tx.account_id,
+        toAccountId: tx.to_account_id
+      };
+
+      const sourceAccId = tx.type === 'income' ? targetAccId : tx.account_id;
+      const destAccId = tx.type === 'income' ? tx.account_id : targetAccId;
+
+      const newState: LedgerTxState = {
+        status: targetStatus,
+        type: 'transfer',
+        amount: Number(tx.amount),
+        accountId: sourceAccId,
+        toAccountId: destAccId
+      };
+
+      for (const accId of new Set([sourceAccId, destAccId])) {
+        const delta = calculateBalanceDelta(oldState, newState, accId);
+        if (delta !== 0) {
+          stmts.push(...buildLedgerDeltaStatements(db, userId, accId, delta, 'pair_transfer_synthetic', operationId, tx.id));
+        }
+      }
+
+      const syntheticId = `tx_syn_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO transactions (
+              id, user_id, occurred_at, time_source, type, amount, account_id,
+              status, source, description, transfer_pair_id, is_synthetic, original_type, original_status
+            ) VALUES (?, ?, ?, 'system', ?, ?, ?, 'paired_hidden', 'system', ?, ?, 1, ?, 'paired_hidden')`
+          )
+          .bind(
+            syntheticId,
+            userId,
+            tx.occurred_at,
+            tx.type === 'income' ? 'expense' : 'income',
+            tx.amount,
+            targetAccId,
+            `[Đối ứng tự động] ${tx.description || ''}`,
+            pairId,
+            tx.type === 'income' ? 'expense' : 'income'
+          )
+      );
+
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE transactions
+             SET type = 'transfer',
+                 account_id = ?,
+                 to_account_id = ?,
+                 status = ?,
+                 transfer_pair_id = ?,
+                 suggested_pair_id = NULL,
+                 jar_id = NULL,
+                 income_source_id = NULL,
+                 original_type = COALESCE(original_type, ?),
+                 original_account_id = COALESCE(original_account_id, ?),
+                 original_jar_id = COALESCE(original_jar_id, ?),
+                 original_income_source_id = COALESCE(original_income_source_id, ?),
+                 original_description = COALESCE(original_description, ?),
+                 original_status = COALESCE(original_status, ?),
+                 revision = COALESCE(revision, 1) + 1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(
+            sourceAccId,
+            destAccId,
+            targetStatus,
+            pairId,
+            tx.type,
+            tx.account_id,
+            tx.jar_id,
+            tx.income_source_id,
+            tx.description,
+            tx.status,
+            tx.id,
+            userId
+          )
+      );
+
+      await db.batch(stmts);
+      return c.json({
+        success: true,
+        paired: false,
+        syntheticCreated: true,
+        pairId,
+        primaryTxId: tx.id,
+        syntheticTxId: syntheticId,
+        status: targetStatus
+      });
+    }
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
 });
 
-// Thống kê tổng quan (Dashboard - Chuẩn UTC+7 & Đầy đủ 6 lớp tài sản)
+app.post('/api/transactions/:id/unpair', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const txId = c.req.param('id');
+
+  try {
+    const operationId = c.req.header('X-Operation-Id') || `op_unpair_${txId}_${Date.now()}`;
+    const tx = await db
+      .prepare('SELECT * FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
+      .bind(txId, userId)
+      .first<any>();
+    if (!tx) return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
+
+    const pairId = tx.transfer_pair_id;
+    const stmts: D1PreparedStatement[] = [];
+
+    if (pairId) {
+      const { results: pairTxs } = await db
+        .prepare('SELECT * FROM transactions WHERE user_id = ? AND transfer_pair_id = ? AND deleted_at IS NULL')
+        .bind(userId, pairId)
+        .all<any>();
+
+      const primaryLeg = (pairTxs || []).find((p) => p.status !== 'paired_hidden') || tx;
+      const oldPrimaryState: LedgerTxState = {
+        status: primaryLeg.status,
+        type: primaryLeg.type,
+        amount: Number(primaryLeg.amount),
+        accountId: primaryLeg.account_id,
+        toAccountId: primaryLeg.to_account_id
+      };
+
+      // Reverse any confirmed transfer ledger effect first
+      for (const accId of new Set([primaryLeg.account_id, primaryLeg.to_account_id].filter(Boolean))) {
+        const revertDelta = calculateBalanceDelta(oldPrimaryState, null, accId);
+        if (revertDelta !== 0) {
+          stmts.push(...buildLedgerDeltaStatements(db, userId, accId, revertDelta, 'unpair_revert', operationId, primaryLeg.id));
+        }
+      }
+
+      for (const p of pairTxs || []) {
+        if (p.is_synthetic === 1 || String(p.id).startsWith('tx_syn_') || String(p.description || '').startsWith('[Đối ứng tự động]')) {
+          stmts.push(
+            db
+              .prepare(`UPDATE transactions SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`)
+              .bind(p.id, userId)
+          );
+        } else {
+          const restoredType = p.original_type || (p.id === primaryLeg.id ? 'expense' : 'income');
+          const restoredAccountId = p.original_account_id || p.account_id;
+          const restoredJarId = p.original_jar_id || null;
+          const restoredIncomeId = p.original_income_source_id || null;
+          const restoredDesc = p.original_description || p.description;
+          const restoredStatus = 'pending';
+
+          stmts.push(
+            db
+              .prepare(
+                `UPDATE transactions
+                 SET type = ?,
+                     account_id = ?,
+                     to_account_id = NULL,
+                     jar_id = ?,
+                     income_source_id = ?,
+                     description = ?,
+                     status = ?,
+                     transfer_pair_id = NULL,
+                     revision = COALESCE(revision, 1) + 1,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ? AND user_id = ?`
+              )
+              .bind(
+                restoredType,
+                restoredAccountId,
+                restoredJarId,
+                restoredIncomeId,
+                restoredDesc,
+                restoredStatus,
+                p.id,
+                userId
+              )
+          );
+        }
+      }
+    } else {
+      const oldState: LedgerTxState = {
+        status: tx.status,
+        type: tx.type,
+        amount: Number(tx.amount),
+        accountId: tx.account_id,
+        toAccountId: tx.to_account_id
+      };
+      for (const accId of new Set([tx.account_id, tx.to_account_id].filter(Boolean))) {
+        const revertDelta = calculateBalanceDelta(oldState, null, accId);
+        if (revertDelta !== 0) {
+          stmts.push(...buildLedgerDeltaStatements(db, userId, accId, revertDelta, 'unpair_revert', operationId, tx.id));
+        }
+      }
+      const restoredType = tx.original_type || 'expense';
+      const restoredAccountId = tx.original_account_id || tx.account_id;
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE transactions
+             SET type = ?, account_id = ?, to_account_id = NULL, status = 'pending',
+                 jar_id = ?, income_source_id = ?,
+                 revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(restoredType, restoredAccountId, tx.original_jar_id || null, tx.original_income_source_id || null, tx.id, userId)
+      );
+    }
+
+    if (stmts.length > 0) {
+      await db.batch(stmts);
+    }
+    return c.json({ success: true });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// ============================================================================
+// OVERVIEW, ACCOUNTS, JARS, INCOME SOURCES & PLANNED EXPENSES (V2-08, V2-11, V2-16, V2-17)
+// ============================================================================
+
 app.get('/api/overview', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
+  const principal = c.get('principal');
+  const userId = principal.userId;
 
-  // Tổng số dư các tài khoản
-  const accountsResult = await db.prepare(`
-    SELECT type, SUM(balance) as total_balance
-    FROM accounts
-    WHERE user_id = ? AND is_active = 1
-    GROUP BY type
-  `).bind(userId).all<{ type: string; total_balance: number }>();
-
-  let liquidCash = 0;
-  let allCash = 0;
-  for (const row of accountsResult.results) {
-    const b = row.total_balance || 0;
-    allCash += b;
-    if (['bank', 'cash', 'ewallet', 'savings'].includes(row.type)) {
-      liquidCash += b;
-    }
-  }
-
-  // Danh mục đầu tư
-  const holdingsResult = await db.prepare(`
-    SELECT h.quantity, a.current_price, a.symbol, a.asset_class
-    FROM holdings h
-    JOIN assets a ON h.asset_id = a.id
-    WHERE h.user_id = ?
-  `).bind(userId).all<{ quantity: number; current_price: number; symbol: string; asset_class: string }>();
-
-  let totalInvestments = 0;
-  for (const h of holdingsResult.results) {
-    totalInvestments += (h.quantity * h.current_price);
-  }
-
-  // L-04: Tổng tài sản ròng = toàn bộ số dư tài khoản + toàn bộ danh mục tài sản
-  const netWorth = allCash + totalInvestments;
-
-  // Dòng tiền tháng hiện tại (Múi giờ UTC+7 Việt Nam)
-  const monthStats = await db.prepare(`
-    SELECT
-      SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
-      SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expense
-    FROM transactions
-    WHERE user_id = ? AND status = 'confirmed'
-      AND strftime('%Y-%m', datetime(occurred_at, '+7 hours')) = strftime('%Y-%m', datetime('now', '+7 hours'))
-  `).bind(userId).first<{ total_income: number; total_expense: number }>();
-
-  // Số lượng giao dịch chờ duyệt
-  const pendingCount = await db.prepare(`
-    SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND status = 'pending'
-  `).bind(userId).first<{ count: number }>();
-
-  // Các hũ chi tiêu và mức tiêu tháng này (Múi giờ UTC+7)
-  const jarsStats = await db.prepare(`
-    SELECT
-      j.id, j.code, j.name, j.target_percent, j.monthly_limit, j.color, j.is_default,
-      COALESCE(SUM(t.amount), 0) as spent_this_month
-    FROM jars j
-    LEFT JOIN transactions t ON t.jar_id = j.id
-      AND t.type = 'expense'
-      AND t.status = 'confirmed'
-      AND strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = strftime('%Y-%m', datetime('now', '+7 hours'))
-    WHERE j.user_id = ?
-    GROUP BY j.id
-    ORDER BY j.sort_order ASC
-  `).bind(userId).all();
-
-  return c.json({
-    netWorth,
-    liquidCash,
-    totalInvestments,
-    currentMonth: {
-      income: monthStats?.total_income || 0,
-      expense: monthStats?.total_expense || 0,
-      savingsRate: monthStats?.total_income
-        ? Math.round(((monthStats.total_income - (monthStats.total_expense || 0)) / monthStats.total_income) * 100)
-        : 0
-    },
-    pendingCount: pendingCount?.count || 0,
-    jars: jarsStats.results
-  });
-});
-
-// V2-14: API Analytics tổng hợp trên server với định dạng chuẩn FinanceSummary
-app.get('/api/analytics/summary', async (c) => {
-  const db = c.env.DB;
-  await ensureDatabaseSchema(db);
-  const userId = 'user_default';
-  const period = c.req.query('period') || 'month'; // 'month' | 'quarter' | 'year' | 'all'
-  const rawTarget = (c.req.query('target') || '').trim();
-  const qYear = c.req.query('year');
-  const qMonth = c.req.query('month');
-  const qQuarter = c.req.query('quarter');
-
-  // Tính năm/tháng/quý mặc định theo giờ Việt Nam (UTC+7)
   const vnNow = new Date(Date.now() + 7 * 3600 * 1000);
-  const yearNum = qYear ? parseInt(qYear, 10) : (rawTarget.match(/^\d{4}/) ? parseInt(rawTarget.slice(0, 4), 10) : vnNow.getUTCFullYear());
-  const monthNum = qMonth ? parseInt(qMonth, 10) : (rawTarget.match(/^\d{4}-(\d{2})$/) ? parseInt(rawTarget.slice(5, 7), 10) : (vnNow.getUTCMonth() + 1));
-  const quarterNum = qQuarter ? parseInt(qQuarter, 10) : (Math.floor((monthNum - 1) / 3) + 1);
+  const year = vnNow.getUTCFullYear();
+  const month = String(vnNow.getUTCMonth() + 1).padStart(2, '0');
+  const startOfMonth = `${year}-${month}-01T00:00:00.000Z`;
 
-  const yearStr = String(yearNum);
-  const yearMonthStr = `${yearStr}-${String(monthNum).padStart(2, '0')}`;
-  const quarterZeroIdx = Math.max(0, Math.min(3, quarterNum - 1));
-
-  let dateClause = '1=1';
-  let dateBindings: any[] = [];
-  if (period === 'month') {
-    dateClause = `strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = ?`;
-    dateBindings = [yearMonthStr];
-  } else if (period === 'quarter') {
-    dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ? AND ((CAST(strftime('%m', datetime(t.occurred_at, '+7 hours')) AS INTEGER) - 1) / 3) = ?`;
-    dateBindings = [yearStr, quarterZeroIdx];
-  } else if (period === 'year') {
-    dateClause = `strftime('%Y', datetime(t.occurred_at, '+7 hours')) = ?`;
-    dateBindings = [yearStr];
-  }
-
-  // 1. Tổng Thu & Chi
-  const totalStats = await db.prepare(`
-    SELECT
-      COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as total_income,
-      COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as total_expense
-    FROM transactions t
-    WHERE t.user_id = ? AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
-  `).bind(userId, ...dateBindings).first<{ total_income: number; total_expense: number }>();
-
-  // 2. Phân rã Chi tiêu theo Hũ (V2-13: Đầy đủ các hũ hoạt động + nhóm Chi chưa gắn hũ)
-  const { results: jarsDb } = await db.prepare(`
-    SELECT j.id, j.name, j.code, j.color, j.target_percent, j.monthly_limit,
-           COALESCE(SUM(t.amount), 0) as spent,
-           COUNT(t.id) as count
-    FROM jars j
-    LEFT JOIN transactions t ON t.jar_id = j.id AND t.type = 'expense' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
-    WHERE j.user_id = ? AND (j.is_active = 1 OR j.is_active IS NULL)
-    GROUP BY j.id
-    ORDER BY j.sort_order ASC
-  `).bind(...dateBindings, userId).all<any>();
-
-  const unassignedExpenseRow = await db.prepare(`
-    SELECT COALESCE(SUM(t.amount), 0) as spent, COUNT(t.id) as count
-    FROM transactions t
-    WHERE t.user_id = ? AND t.type = 'expense' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND t.jar_id IS NULL AND ${dateClause}
-  `).bind(userId, ...dateBindings).first<{ spent: number; count: number }>();
-
-  const expenseBuckets: Array<{
-    kind: 'assigned' | 'unassigned' | 'orphaned';
-    jarId: string | null;
-    jarCode?: string;
-    jarName?: string;
-    amountVnd: number;
-    count: number;
-  }> = (jarsDb || []).map((j: any) => ({
-    kind: 'assigned' as const,
-    jarId: j.id,
-    jarCode: j.code,
-    jarName: j.name,
-    amountVnd: j.spent || 0,
-    count: j.count || 0
-  }));
-
-  if (unassignedExpenseRow && (unassignedExpenseRow.spent > 0 || unassignedExpenseRow.count > 0)) {
-    expenseBuckets.push({
-      kind: 'unassigned',
-      jarId: null,
-      jarCode: 'UNASSIGNED',
-      jarName: 'Chi chưa phân loại',
-      amountVnd: unassignedExpenseRow.spent,
-      count: unassignedExpenseRow.count
-    });
-  }
-
-  // 3. Phân rã Thu nhập theo Nguồn thu (V2-12: Nguồn hoạt động + Thu ngoài dự kiến)
-  const { results: sourcesDb } = await db.prepare(`
-    SELECT s.id, s.name, s.color, s.expected_amount,
-           COALESCE(SUM(t.amount), 0) as total_amount,
-           COUNT(t.id) as count
-    FROM income_sources s
-    LEFT JOIN transactions t ON t.income_source_id = s.id AND t.type = 'income' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND ${dateClause}
-    WHERE s.user_id = ? AND (s.is_active = 1 OR s.is_active IS NULL)
-    GROUP BY s.id
-    ORDER BY s.created_at ASC
-  `).bind(...dateBindings, userId).all<any>();
-
-  const unassignedIncomeRow = await db.prepare(`
-    SELECT COALESCE(SUM(t.amount), 0) as total_amount, COUNT(t.id) as count
-    FROM transactions t
-    WHERE t.user_id = ? AND t.type = 'income' AND t.status = 'confirmed' AND t.deleted_at IS NULL AND t.history_hidden_at IS NULL AND t.income_source_id IS NULL AND ${dateClause}
-  `).bind(userId, ...dateBindings).first<{ total_amount: number; count: number }>();
-
-  const incomeBuckets: Array<{
-    kind: 'assigned' | 'unassigned' | 'orphaned';
-    sourceId: string | null;
-    sourceName?: string;
-    amountVnd: number;
-    count: number;
-  }> = (sourcesDb || []).map((s: any) => ({
-    kind: 'assigned' as const,
-    sourceId: s.id,
-    sourceName: s.name,
-    amountVnd: s.total_amount || 0,
-    count: s.count || 0
-  }));
-
-  if (unassignedIncomeRow && (unassignedIncomeRow.total_amount > 0 || unassignedIncomeRow.count > 0)) {
-    incomeBuckets.push({
-      kind: 'unassigned',
-      sourceId: null,
-      sourceName: 'Thu ngoài dự kiến / Khác',
-      amountVnd: unassignedIncomeRow.total_amount,
-      count: unassignedIncomeRow.count
-    });
-  }
-
-  // 4. Lấy revision an toàn
-  let dataRevision = 1;
   try {
-    const dataRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM transactions WHERE user_id = ?')
-      .bind(userId).first<{ max_rev: number }>();
-    dataRevision = dataRevRow?.max_rev || 1;
-  } catch {}
+    // V2-11: Include all accounts with include_in_net_worth != 0 (including archived accounts that still hold balance!)
+    const { results: allAccounts } = await db
+      .prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY is_active DESC, created_at ASC')
+      .bind(userId)
+      .all<any>();
 
-  let planRevision = 1;
-  try {
-    const planRevRow = await db.prepare('SELECT COALESCE(MAX(revision), 1) as max_rev FROM plan_versions WHERE user_id = ?')
-      .bind(userId).first<{ max_rev: number }>();
-    planRevision = planRevRow?.max_rev || 1;
-  } catch {}
+    const accounts = (allAccounts || []).filter((a) => a.is_active !== 0);
+    const totalCash = (allAccounts || [])
+      .filter((a) => a.include_in_net_worth !== 0 && (a.is_active !== 0 || Number(a.balance || 0) !== 0))
+      .reduce((sum, a) => sum + Number(a.balance || 0), 0);
 
-  const totalIncomeVnd = totalStats?.total_income || 0;
-  const totalExpenseVnd = totalStats?.total_expense || 0;
+    const { results: holdings } = await db
+      .prepare(
+        `SELECT h.*, a.symbol, a.name as asset_name, a.asset_class, a.current_price, a.unit, a.quote_unit, a.price_as_of, a.sync_status
+         FROM holdings h
+         JOIN assets a ON h.asset_id = a.id
+         WHERE h.user_id = ?`
+      )
+      .bind(userId)
+      .all<any>();
 
-  return c.json({
-    range: {
-      mode: period,
-      year: yearNum,
-      month: monthNum,
-      quarter: quarterNum
-    },
-    dataRevision,
-    planRevision,
-    totalIncomeVnd,
-    totalExpenseVnd,
-    incomeBuckets,
-    expenseBuckets,
-    complete: true,
-    generatedAt: new Date().toISOString(),
+    const totalInvestments = (holdings || []).reduce(
+      (sum, h) => sum + Math.round(Number(h.quantity || 0) * Number(h.current_price || 0)),
+      0
+    );
 
-    // Tương thích ngược với client cũ
-    period,
-    year: yearNum,
-    month: monthNum,
-    quarter: quarterNum,
-    totalIncome: totalIncomeVnd,
-    totalExpense: totalExpenseVnd,
-    jarBreakdown: jarsDb || [],
-    incomeBreakdown: (sourcesDb || []).map((s: any) => ({
-      source_id: s.id,
-      source_name: s.name,
-      total_amount: s.total_amount
-    }))
-  });
-});
+    const { results: jars } = await db
+      .prepare(
+        `SELECT j.*, COALESCE(SUM(t.amount), 0) as spent_this_month
+         FROM jars j
+         LEFT JOIN transactions t
+           ON j.id = t.jar_id
+          AND t.user_id = ?
+          AND t.status = 'confirmed'
+          AND t.type = 'expense'
+          AND t.deleted_at IS NULL
+          AND COALESCE(t.history_hidden, 0) = 0
+          AND t.occurred_at >= ?
+         WHERE j.user_id = ? AND COALESCE(j.is_active, 1) = 1
+         GROUP BY j.id
+         ORDER BY j.sort_order ASC`
+      )
+      .bind(userId, startOfMonth, userId)
+      .all<any>();
 
-// Thông tin hồ sơ người dùng
-app.get('/api/user/profile', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  let user = await db.prepare('SELECT id, email, name, phone, avatar FROM users WHERE id = ?')
-    .bind(userId).first<{ id: string; email: string; name: string; phone: string | null; avatar: string | null }>();
-  if (!user) {
-    await db.prepare('INSERT OR IGNORE INTO users (id, email, name) VALUES (?, ?, ?)')
-      .bind(userId, 'duc@qltc.local', 'Anh Đức').run();
-    user = { id: userId, email: 'duc@qltc.local', name: 'Anh Đức', phone: null, avatar: null };
+    const monthStats = await db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as income_this_month,
+           COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as expense_this_month
+         FROM transactions
+         WHERE user_id = ? AND status = 'confirmed' AND deleted_at IS NULL AND COALESCE(history_hidden, 0) = 0 AND occurred_at >= ?`
+      )
+      .bind(userId, startOfMonth)
+      .first<any>();
+
+    return c.json({
+      netWorth: totalCash + totalInvestments,
+      totalCash,
+      totalInvestments,
+      incomeThisMonth: Number(monthStats?.income_this_month || 0),
+      expenseThisMonth: Number(monthStats?.expense_this_month || 0),
+      accounts,
+      allAccounts: allAccounts || [],
+      jars: jars || [],
+      holdings: holdings || []
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
-  return c.json({ user, profile: user });
 });
 
-// Cập nhật thông tin hồ sơ người dùng
-app.put('/api/user/profile', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const body = await c.req.json<{ name?: string; email?: string; phone?: string; avatar?: string }>();
-  
-  const current = await db.prepare('SELECT id, email, name, phone, avatar FROM users WHERE id = ?')
-    .bind(userId).first<{ id: string; email: string; name: string; phone: string | null; avatar: string | null }>();
-  
-  const newName = body.name !== undefined ? body.name.trim() : (current?.name || 'Anh Đức');
-  const newEmail = body.email !== undefined ? body.email.trim() : (current?.email || 'duc@qltc.local');
-  const newPhone = body.phone !== undefined ? body.phone.trim() : (current?.phone || null);
-  const newAvatar = body.avatar !== undefined ? body.avatar : (current?.avatar || null);
-
-  await db.prepare(`
-    INSERT INTO users (id, name, email, phone, avatar)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      email = excluded.email,
-      phone = excluded.phone,
-      avatar = excluded.avatar
-  `).bind(userId, newName, newEmail, newPhone, newAvatar).run();
-
-  const updatedUser = {
-    id: userId,
-    name: newName,
-    email: newEmail,
-    phone: newPhone,
-    avatar: newAvatar
-  };
-
-  return c.json({
-    success: true,
-    user: updatedUser,
-    profile: updatedUser
-  });
-});
-
-// Danh sách các hũ (Chuẩn múi giờ UTC+7)
-app.get('/api/jars', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const { results } = await db.prepare(`
-    SELECT j.*,
-           COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.status = 'confirmed' AND strftime('%Y-%m', datetime(t.occurred_at, '+7 hours')) = strftime('%Y-%m', datetime('now', '+7 hours')) THEN t.amount ELSE 0 END), 0) as spent_this_month
-    FROM jars j
-    LEFT JOIN transactions t ON t.jar_id = j.id
-    WHERE j.user_id = ?
-    GROUP BY j.id
-    ORDER BY j.sort_order ASC
-  `).bind(userId).all();
-  return c.json({ jars: results });
-});
-
-// Danh sách tài khoản
 app.get('/api/accounts', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  const { results } = await db.prepare(`
-    SELECT * FROM accounts WHERE user_id = ? AND is_active = 1 ORDER BY type, name
-  `).bind(userId).all<any>();
-
-  const formatted = (results || []).map(a => ({
-    id: a.id,
-    name: a.name,
-    type: a.type,
-    bankCode: a.bank_code,
-    accountNumberMask: a.account_number_mask,
-    accountNumber: a.account_number,
-    accountHolder: a.account_holder,
-    branch: a.branch,
-    bankBin: a.bank_bin,
-    balance: a.balance,
-    isActive: a.is_active,
-    bank_code: a.bank_code,
-    account_number_mask: a.account_number_mask,
-    account_number: a.account_number,
-    account_holder: a.account_holder,
-    bank_bin: a.bank_bin
-  }));
-
-  return c.json({ accounts: formatted });
-});
-
-// Thêm tài khoản mới (chấp nhận cả camelCase và snake_case, lưu đầy đủ thông tin ngân hàng & QR)
-app.post('/api/accounts', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    id?: string;
-    name: string;
-    balance?: number;
-    bank_code?: string;
-    bankCode?: string;
-    account_number_mask?: string;
-    accountNumberMask?: string;
-    account_number?: string;
-    accountNumber?: string;
-    account_holder?: string;
-    accountHolder?: string;
-    branch?: string;
-    bank_bin?: string;
-    bankBin?: string;
-    type?: string;
-  }>();
-
-  const id = body.id || `acc_${Date.now()}`;
-  const bankCode = body.bankCode ?? body.bank_code ?? null;
-  const accountNumber = body.accountNumber ?? body.account_number ?? null;
-  const accountHolder = (body.accountHolder ?? body.account_holder ?? '') ? (body.accountHolder ?? body.account_holder) : null;
-  const branch = body.branch ?? null;
-  const bankBin = body.bankBin ?? body.bank_bin ?? null;
-
-  let mask = body.accountNumberMask ?? body.account_number_mask ?? null;
-  if (!mask && accountNumber && accountNumber.length >= 4) {
-    mask = accountNumber.slice(-4);
-  }
-
-  const bal = Math.round(body.balance || 0);
-
-  await db.prepare(`
-    INSERT INTO accounts (
-      id, user_id, name, type, bank_code, account_number_mask, balance,
-      account_number, account_holder, branch, bank_bin
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      type = excluded.type,
-      bank_code = excluded.bank_code,
-      account_number_mask = excluded.account_number_mask,
-      balance = excluded.balance,
-      account_number = excluded.account_number,
-      account_holder = excluded.account_holder,
-      branch = excluded.branch,
-      bank_bin = excluded.bank_bin,
-      updated_at = CURRENT_TIMESTAMP
-  `).bind(
-    id,
-    userId,
-    body.name,
-    body.type || 'bank',
-    bankCode,
-    mask,
-    bal,
-    accountNumber,
-    accountHolder,
-    branch,
-    bankBin
-  ).run();
-
-  return c.json({ success: true, id, message: 'Đã thêm tài khoản mới' });
-});
-
-// Chỉnh sửa tài khoản (Cập nhật số dư thực tế, tên, thông tin STK, chủ TK, chi nhánh... hỗ trợ camelCase & snake_case)
-app.put('/api/accounts/:id', async (c) => {
-  const db = c.env.DB;
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    name?: string;
-    balance?: number;
-    bank_code?: string;
-    bankCode?: string;
-    account_number_mask?: string;
-    accountNumberMask?: string;
-    account_number?: string;
-    accountNumber?: string;
-    account_holder?: string;
-    accountHolder?: string;
-    branch?: string;
-    bank_bin?: string;
-    bankBin?: string;
-    type?: string;
-  }>();
-
-  const updates: string[] = ['updated_at = CURRENT_TIMESTAMP', 'revision = revision + 1'];
-  const params: any[] = [];
-
-  if (body.name !== undefined) {
-    updates.push('name = ?');
-    params.push(body.name);
-  }
-  if (body.balance !== undefined) {
-    updates.push('balance = ?');
-    params.push(Math.round(body.balance));
-  }
-  const bankCode = body.bankCode !== undefined ? body.bankCode : body.bank_code;
-  if (bankCode !== undefined) {
-    updates.push('bank_code = ?');
-    params.push(bankCode);
-  }
-
-  const accountNumber = body.accountNumber !== undefined ? body.accountNumber : body.account_number;
-  if (accountNumber !== undefined) {
-    updates.push('account_number = ?');
-    params.push(accountNumber);
-  }
-
-  const accountHolder = body.accountHolder !== undefined ? body.accountHolder : body.account_holder;
-  if (accountHolder !== undefined) {
-    updates.push('account_holder = ?');
-    params.push(accountHolder);
-  }
-
-  if (body.branch !== undefined) {
-    updates.push('branch = ?');
-    params.push(body.branch);
-  }
-
-  const bankBin = body.bankBin !== undefined ? body.bankBin : body.bank_bin;
-  if (bankBin !== undefined) {
-    updates.push('bank_bin = ?');
-    params.push(bankBin);
-  }
-
-  let mask = body.accountNumberMask !== undefined ? body.accountNumberMask : body.account_number_mask;
-  if (mask === undefined && accountNumber && accountNumber.length >= 4) {
-    mask = accountNumber.slice(-4);
-  }
-  if (mask !== undefined) {
-    updates.push('account_number_mask = ?');
-    params.push(mask);
-  }
-
-  if (body.type !== undefined) {
-    updates.push('type = ?');
-    params.push(body.type);
-  }
-
-  params.push(id);
-  params.push(userId);
-
-  await db.prepare(`UPDATE accounts SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
-  return c.json({ success: true, message: 'Đã cập nhật tài khoản' });
-});
-
-// Xóa hoặc Lưu trữ tài khoản (Tuân thủ đặc tả V2-11: Giữ toàn vẹn lịch sử, không tạo giao dịch mồ côi)
-app.delete('/api/accounts/:id', async (c) => {
-  const db = c.env.DB;
-  const id = c.req.param('id');
-  const userId = 'user_default';
-
-  // Kiểm tra xem tài khoản này đã phát sinh giao dịch nào chưa
-  const txnCheck = await db.prepare(
-    'SELECT COUNT(*) as count FROM transactions WHERE (account_id = ? OR to_account_id = ?) AND user_id = ?'
-  ).bind(id, id, userId).first<{ count: number }>();
-
-  if (txnCheck && txnCheck.count > 0) {
-    // Đã có lịch sử giao dịch -> Chuyển sang lưu trữ (Archive) để bảo toàn báo cáo và đối soát
-    await db.prepare(
-      'UPDATE accounts SET is_active = 0, archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?'
-    ).bind(id, userId).run();
-    return c.json({
-      success: true,
-      archived: true,
-      message: 'Tài khoản đã có lịch sử giao dịch nên được lưu trữ an toàn để bảo toàn báo cáo'
-    });
-  }
-
-  // Chưa có giao dịch nào -> Cho phép xóa an toàn
-  await db.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true, archived: false, message: 'Đã xóa tài khoản' });
-});
-
-// Tạo hũ chi tiêu mới (L-13: Tự động sinh mã code duy nhất không trùng, hỗ trợ cả camelCase & snake_case)
-app.post('/api/jars', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    id?: string;
-    code?: string;
-    name: string;
-    targetPercent?: number;
-    target_percent?: number;
-    monthlyLimit?: number;
-    monthly_limit?: number;
-    color?: string;
-    isDefault?: boolean;
-    is_default?: boolean;
-  }>();
-
-  const jarId = body.id || `jar_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  
-  // Lấy các mã hũ hiện có của user để chống trùng lặp tuyệt đối
-  const { results: existingJars } = await db.prepare('SELECT code FROM jars WHERE user_id = ?').bind(userId).all<{ code: string }>();
-  const existingCodes = (existingJars || []).map(j => j.code);
-  const existingSet = new Set(existingCodes.map(c => (c || '').toUpperCase()));
-  const code = (body.code && !existingSet.has(body.code.toUpperCase()))
-    ? body.code.toUpperCase()
-    : generateUniqueCodeFromName(body.name, existingCodes);
-  const color = body.color || '#657D81';
-  const targetPct = body.targetPercent ?? body.target_percent ?? 0.1;
-  const monthlyLimit = Math.round(body.monthlyLimit ?? body.monthly_limit ?? 0);
-  const isDefault = body.isDefault ?? body.is_default ?? false;
-
-  // Lấy số thứ tự lớn nhất
-  const maxOrder = await db.prepare('SELECT MAX(sort_order) as m FROM jars WHERE user_id = ?').bind(userId).first<{ m: number }>();
-  const sortOrder = (maxOrder?.m || 0) + 1;
-
-  if (isDefault) {
-    await db.prepare('UPDATE jars SET is_default = 0 WHERE user_id = ?').bind(userId).run();
-  }
-
-  await db.prepare(`
-    INSERT INTO jars (id, user_id, code, name, target_percent, monthly_limit, color, sort_order, is_default)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      target_percent = excluded.target_percent,
-      monthly_limit = excluded.monthly_limit,
-      color = excluded.color,
-      is_default = excluded.is_default
-  `).bind(jarId, userId, code, body.name, targetPct, monthlyLimit, color, sortOrder, isDefault ? 1 : 0).run();
-
-  return c.json({ success: true, jarId, code, message: 'Đã tạo hũ chi tiêu mới thành công' });
-});
-
-// Tự động phân bổ hạn mức các hũ theo % từ Tổng Thu Dự Kiến
-app.post('/api/jars/auto-allocate', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const body = await c.req.json<{ totalIncome: number }>();
-  const totalIncome = Math.max(0, Math.round(body.totalIncome || 0));
-
-  const { results: jars } = await db.prepare('SELECT id, target_percent FROM jars WHERE user_id = ?')
-    .bind(userId).all<{ id: string; target_percent: number }>();
-
-  for (const j of (jars || [])) {
-    const newLimit = Math.round(totalIncome * (j.target_percent || 0));
-    await db.prepare('UPDATE jars SET monthly_limit = ? WHERE id = ? AND user_id = ?')
-      .bind(newLimit, j.id, userId).run();
-  }
-
-  return c.json({ success: true, message: 'Đã phân bổ hạn mức các hũ theo % thu nhập dự kiến' });
-});
-
-// Cập nhật thông tin hũ chi tiêu (hạn mức, tỷ lệ %, tên, màu, hũ mặc định - hỗ trợ camelCase & snake_case)
-app.put('/api/jars/:id', async (c) => {
-  const db = c.env.DB;
-  const id = c.req.param('id');
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    monthly_limit?: number;
-    monthlyLimit?: number;
-    target_percent?: number;
-    targetPercent?: number;
-    name?: string;
-    color?: string;
-    code?: string;
-    isDefault?: boolean;
-    is_default?: boolean;
-  }>();
-
-  const updates: string[] = [];
-  const bindings: any[] = [];
-
-  const monthlyLimit = body.monthlyLimit !== undefined ? body.monthlyLimit : body.monthly_limit;
-  if (monthlyLimit !== undefined) {
-    updates.push('monthly_limit = ?');
-    bindings.push(Math.round(monthlyLimit));
-  }
-  const targetPercent = body.targetPercent !== undefined ? body.targetPercent : body.target_percent;
-  if (targetPercent !== undefined) {
-    updates.push('target_percent = ?');
-    bindings.push(targetPercent);
-  }
-  if (body.name !== undefined) {
-    updates.push('name = ?');
-    bindings.push(body.name);
-  }
-  if (body.color !== undefined) {
-    updates.push('color = ?');
-    bindings.push(body.color);
-  }
-  if (body.code !== undefined) {
-    updates.push('code = ?');
-    bindings.push(body.code.toUpperCase());
-  }
-  const isDefault = body.isDefault !== undefined ? body.isDefault : body.is_default;
-  if (isDefault !== undefined) {
-    if (isDefault) {
-      await db.prepare('UPDATE jars SET is_default = 0 WHERE user_id = ?').bind(userId).run();
-    }
-    updates.push('is_default = ?');
-    bindings.push(isDefault ? 1 : 0);
-  }
-
-  if (updates.length > 0) {
-    bindings.push(id, userId);
-    await db.prepare(`UPDATE jars SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`)
-      .bind(...bindings).run();
-  }
-
-  return c.json({ success: true, message: 'Đã cập nhật hũ chi tiêu thành công' });
-});
-
-// Xóa 1 hũ chi tiêu
-// Xóa hoặc Lưu trữ Hũ chi tiêu (V2-11: Ưu tiên archive nếu đã có giao dịch)
-app.delete('/api/jars/:id', async (c) => {
-  const db = c.env.DB;
-  const id = c.req.param('id');
-  const userId = 'user_default';
-
-  const txnCheck = await db.prepare(
-    'SELECT COUNT(*) as count FROM transactions WHERE jar_id = ? AND user_id = ?'
-  ).bind(id, userId).first<{ count: number }>();
-
-  if (txnCheck && txnCheck.count > 0) {
-    // Có giao dịch -> Đánh dấu rollover = 0 và không hiện ở danh sách tạo mới
-    await db.prepare('UPDATE jars SET rollover = 0 WHERE id = ? AND user_id = ?').bind(id, userId).run();
-    return c.json({ success: true, archived: true, message: 'Đã lưu trữ hũ chi tiêu để bảo toàn lịch sử' });
-  }
-
-  await db.prepare('DELETE FROM jars WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true, archived: false, message: 'Đã xóa hũ thành công' });
-});
-
-// Khởi tạo bảng mở rộng cho Kế hoạch Thu/Chi dự kiến
-async function ensurePlanningTables(db: D1Database) {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS income_sources (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      kind TEXT NOT NULL DEFAULT 'fixed',
-      recurrence TEXT DEFAULT 'Hàng tháng',
-      expected_amount INTEGER DEFAULT 0,
-      color TEXT DEFAULT '#8CC7AE',
-      keywords TEXT,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const includeArchived = c.req.query('includeArchived') === '1';
 
   try {
-    await db.prepare('ALTER TABLE income_sources ADD COLUMN keywords TEXT').run();
-  } catch {}
+    const sql = includeArchived
+      ? 'SELECT * FROM accounts WHERE user_id = ? ORDER BY is_active DESC, created_at ASC'
+      : 'SELECT * FROM accounts WHERE user_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY created_at ASC';
+    const { results } = await db.prepare(sql).bind(userId).all<any>();
+    return c.json({ accounts: results || [] });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
 
-  // ĐẶC TẢ V2-09: Bỏ seed tự động. Trạng thái không có nguồn thu là hoàn toàn hợp lệ, không tự seed lại sau reset!
+app.post('/api/accounts', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
 
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS planned_expenses (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      jar_code TEXT NOT NULL DEFAULT 'NEC',
-      expected_amount INTEGER NOT NULL DEFAULT 0,
-      recurrence TEXT DEFAULT 'Hàng tháng',
-      note TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-}
+  try {
+    const body = await c.req.json();
+    const id = body.id || `acc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const operationId = body.operationId || c.req.header('X-Operation-Id') || `op_acc_create_${id}`;
+    const rawAccountNumber = body.accountNumber ? String(body.accountNumber).trim() : null;
+    const explicitMask = body.accountNumberMask ? String(body.accountNumberMask).replace(/\D/g, '').slice(-4) : null;
+    // V2-08: Never turn a 4-digit mask into a full accountNumber!
+    const mask = explicitMask || (rawAccountNumber && rawAccountNumber.length >= 4 ? rawAccountNumber.slice(-4) : null);
+    const initialBalance = Number(body.balance || 0);
+    if (!Number.isSafeInteger(initialBalance)) {
+      return c.json({ error: 'Số dư ban đầu không hợp lệ', code: 'INVALID_BALANCE' }, 400);
+    }
 
-// Danh sách Nguồn thu
+    const aliasesJson = Array.isArray(body.aliases) ? JSON.stringify(body.aliases) : body.aliases_json || null;
+
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO accounts (
+            id, user_id, name, type, balance, account_number_mask, account_number,
+            bank_code, bank_name, account_holder, branch, aliases_json, include_in_net_worth, is_active, revision
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
+        )
+        .bind(
+          id,
+          userId,
+          body.name || 'Tài khoản mới',
+          body.type || 'bank',
+          initialBalance,
+          mask,
+          rawAccountNumber,
+          body.bankCode || null,
+          body.bankName || null,
+          body.accountHolder || null,
+          body.branch || null,
+          aliasesJson,
+          body.includeInNetWorth !== undefined ? (body.includeInNetWorth ? 1 : 0) : 1
+        ),
+      db
+        .prepare(
+          `INSERT OR REPLACE INTO ledger_baselines (account_id, user_id, baseline_amount_vnd, note)
+           VALUES (?, ?, ?, ?)`
+        )
+        .bind(id, userId, initialBalance, `Opening balance (${operationId})`)
+    ]);
+
+    const created = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).first<any>();
+    return c.json({ success: true, id, account: created });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.put('/api/accounts/:id', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const accId = c.req.param('id');
+
+  try {
+    const body = await c.req.json();
+    const operationId = body.operationId || c.req.header('X-Operation-Id') || `op_acc_upd_${accId}_${Date.now()}`;
+
+    const existing = await db
+      .prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
+      .bind(accId, userId)
+      .first<any>();
+    if (!existing) {
+      return c.json({ error: 'Account not found', code: 'NOT_FOUND' }, 404);
+    }
+
+    if (body.expectedRevision !== undefined && Number(body.expectedRevision) !== Number(existing.revision || 1)) {
+      return c.json({ error: 'Xung đột phiên bản tài khoản', code: 'REVISION_CONFLICT' }, 409);
+    }
+
+    // V2-08: Preserve full account_number vs account_number_mask cleanly!
+    let nextAccountNumber = existing.account_number;
+    let nextMask = existing.account_number_mask;
+
+    if (body.accountNumber !== undefined) {
+      const cleaned = body.accountNumber === null ? null : String(body.accountNumber).trim();
+      // If user didn't pass a masked placeholder like "*6789"
+      if (cleaned && !cleaned.startsWith('*')) {
+        nextAccountNumber = cleaned;
+        if (cleaned.length >= 4) {
+          nextMask = cleaned.replace(/\D/g, '').slice(-4);
+        }
+      } else if (cleaned === '' || cleaned === null) {
+        nextAccountNumber = null;
+      }
+    }
+    if (body.accountNumberMask !== undefined) {
+      nextMask = body.accountNumberMask ? String(body.accountNumberMask).replace(/\D/g, '').slice(-4) : null;
+    }
+
+    const targetBalance = body.balance !== undefined ? Number(body.balance) : Number(existing.balance || 0);
+    if (!Number.isSafeInteger(targetBalance)) {
+      return c.json({ error: 'Số dư không hợp lệ', code: 'INVALID_BALANCE' }, 400);
+    }
+    const delta = targetBalance - Number(existing.balance || 0);
+    const nextRevision = Number(existing.revision || 1) + 1;
+
+    const stmts: D1PreparedStatement[] = [
+      db
+        .prepare(
+          `UPDATE accounts
+           SET name = ?,
+               type = ?,
+               balance = ?,
+               account_number_mask = ?,
+               account_number = ?,
+               bank_code = ?,
+               bank_name = ?,
+               account_holder = ?,
+               branch = ?,
+               aliases_json = ?,
+               include_in_net_worth = ?,
+               is_active = ?,
+               revision = ?
+           WHERE id = ? AND user_id = ?`
+        )
+        .bind(
+          body.name !== undefined ? body.name : existing.name,
+          body.type !== undefined ? body.type : existing.type,
+          targetBalance,
+          nextMask,
+          nextAccountNumber,
+          body.bankCode !== undefined ? body.bankCode : existing.bank_code,
+          body.bankName !== undefined ? body.bankName : existing.bank_name,
+          body.accountHolder !== undefined ? body.accountHolder : existing.account_holder,
+          body.branch !== undefined ? body.branch : existing.branch,
+          body.aliases !== undefined ? JSON.stringify(body.aliases) : existing.aliases_json,
+          body.includeInNetWorth !== undefined ? (body.includeInNetWorth ? 1 : 0) : existing.include_in_net_worth ?? 1,
+          body.isActive !== undefined ? (body.isActive ? 1 : 0) : existing.is_active ?? 1,
+          nextRevision,
+          accId,
+          userId
+        )
+    ];
+
+    if (delta !== 0) {
+      const postingId = `post_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO ledger_postings (id, user_id, account_id, transaction_id, operation_id, delta_vnd, reason)
+             VALUES (?, ?, ?, NULL, ?, ?, 'manual_adjustment')`
+          )
+          .bind(postingId, userId, accId, operationId, delta)
+      );
+    }
+
+    await db.batch(stmts);
+    const updated = await db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?').bind(accId, userId).first<any>();
+    return c.json({ success: true, account: updated, revision: nextRevision });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// V2-11: Safe Account Archive / Delete (Never orphan historical transactions or vanish positive balance!)
+app.delete('/api/accounts/:id', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const accId = c.req.param('id');
+
+  try {
+    const existing = await db
+      .prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?')
+      .bind(accId, userId)
+      .first<any>();
+    if (!existing) {
+      return c.json({ error: 'Account not found', code: 'NOT_FOUND' }, 404);
+    }
+
+    const txCount = await db
+      .prepare(
+        'SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND (account_id = ? OR to_account_id = ?) AND deleted_at IS NULL'
+      )
+      .bind(userId, accId, accId)
+      .first<{ cnt: number }>();
+
+    const postingCount = await db
+      .prepare('SELECT COUNT(*) as cnt FROM ledger_postings WHERE user_id = ? AND account_id = ?')
+      .bind(userId, accId)
+      .first<{ cnt: number }>();
+
+    const hasHistory = (txCount?.cnt || 0) > 0 || (postingCount?.cnt || 0) > 0 || Number(existing.balance || 0) !== 0;
+
+    if (hasHistory) {
+      await db
+        .prepare(
+          `UPDATE accounts
+           SET is_active = 0, archived_at = CURRENT_TIMESTAMP, revision = COALESCE(revision, 1) + 1
+           WHERE id = ? AND user_id = ?`
+        )
+        .bind(accId, userId)
+        .run();
+      return c.json({
+        success: true,
+        action: 'archived',
+        id: accId,
+        balanceRemaining: Number(existing.balance || 0),
+        message: 'Tài khoản có lịch sử giao dịch hoặc số dư nên đã được chuyển sang trạng thái Lưu trữ (Archived) để bảo toàn sổ cái.'
+      });
+    } else {
+      await db.batch([
+        db.prepare('DELETE FROM ledger_baselines WHERE account_id = ? AND user_id = ?').bind(accId, userId),
+        db.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(accId, userId)
+      ]);
+      return c.json({ success: true, action: 'deleted', id: accId });
+    }
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Income Sources & Planned Expenses with Plan Versioning (V2-16)
 app.get('/api/income-sources', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const { results } = await db.prepare('SELECT id, name, kind, expected_amount as expectedAmount, recurrence, color, keywords FROM income_sources WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC')
-    .bind(userId).all();
-  return c.json({ incomeSources: results || [] });
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  const { results: sources } = await db
+    .prepare('SELECT * FROM income_sources WHERE user_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY created_at ASC')
+    .bind(userId)
+    .all<any>();
+  const { results: plans } = await db
+    .prepare(
+      `SELECT p.*, j.name as jar_name, j.color as jar_color
+       FROM planned_expenses p
+       LEFT JOIN jars j ON p.jar_id = j.id
+       WHERE p.user_id = ? AND COALESCE(p.is_active, 1) = 1
+       ORDER BY p.due_day ASC, p.created_at ASC`
+    )
+    .bind(userId)
+    .all<any>();
+
+  return c.json({ incomeSources: sources || [], plannedExpenses: plans || [] });
 });
 
 app.post('/api/income-sources', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const body = await c.req.json<{
-    id?: string;
-    name: string;
-    kind?: string;
-    expectedAmount?: number;
-    expected_amount?: number;
-    recurrence?: string;
-    color?: string;
-    keywords?: string;
-  }>();
-  const id = body.id || `inc_${Date.now()}`;
-  const amt = Math.round(body.expectedAmount ?? body.expected_amount ?? 0);
-  await db.prepare(`
-    INSERT INTO income_sources (id, user_id, name, kind, expected_amount, recurrence, color, keywords, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      kind = excluded.kind,
-      expected_amount = excluded.expected_amount,
-      recurrence = excluded.recurrence,
-      color = excluded.color,
-      keywords = excluded.keywords
-  `).bind(id, userId, body.name, body.kind || 'fixed', amt, body.recurrence || 'Hàng tháng', body.color || '#8CC7AE', body.keywords || null).run();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const body = await c.req.json();
+  const id = body.id || `inc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const cadence = body.cadence || 'monthly';
+  const oneTimeDate = cadence === 'one_time' ? body.oneTimeDate : null;
+  if (cadence === 'one_time' && !isValidIsoCalendarDate(oneTimeDate)) {
+    return c.json({ error: 'Ngày khoản thu một lần bắt buộc đúng định dạng YYYY-MM-DD và phải là ngày hợp lệ', code: 'INVALID_ONE_TIME_DATE' }, 400);
+  }
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO income_sources (id, user_id, name, expected_amount, cadence, one_time_date, expected_day, account_id, icon, color, is_active, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
+      )
+      .bind(
+        id,
+        userId,
+        body.name,
+        Number(body.expectedAmount || 0),
+        cadence,
+        oneTimeDate,
+        body.expectedDay || 1,
+        body.accountId || null,
+        body.icon || 'payments',
+        body.color || '#10B981'
+      )
+  ];
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'income_source', id, effectiveMonth, {
+    id,
+    name: body.name,
+    expected_amount: Number(body.expectedAmount || 0),
+    cadence,
+    one_time_date: oneTimeDate,
+    expected_day: body.expectedDay || 1,
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
   return c.json({ success: true, id });
 });
 
 app.put('/api/income-sources/:id', async (c) => {
   const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
   const id = c.req.param('id');
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const body = await c.req.json<{
-    name?: string;
-    kind?: string;
-    expectedAmount?: number;
-    expected_amount?: number;
-    recurrence?: string;
-    color?: string;
-    keywords?: string;
-  }>();
+  const body = await c.req.json();
 
-  const updates: string[] = [];
-  const params: any[] = [];
-  if (body.name !== undefined) {
-    updates.push('name = ?');
-    params.push(body.name);
+  const existing = await db
+    .prepare('SELECT * FROM income_sources WHERE id = ? AND user_id = ?')
+    .bind(id, userId)
+    .first<any>();
+  if (!existing) return c.json({ error: 'Not found' }, 404);
+
+  const name = body.name !== undefined ? body.name : existing.name;
+  const expectedAmount = body.expectedAmount !== undefined ? Number(body.expectedAmount) : Number(existing.expected_amount || 0);
+  const cadence = body.cadence !== undefined ? body.cadence : existing.cadence;
+  const oneTimeDate = cadence === 'one_time'
+    ? body.oneTimeDate !== undefined ? body.oneTimeDate : existing.one_time_date
+    : null;
+  if (cadence === 'one_time' && !isValidIsoCalendarDate(oneTimeDate)) {
+    return c.json({ error: 'Ngày khoản thu một lần bắt buộc đúng định dạng YYYY-MM-DD và phải là ngày hợp lệ', code: 'INVALID_ONE_TIME_DATE' }, 400);
   }
-  if (body.kind !== undefined) {
-    updates.push('kind = ?');
-    params.push(body.kind);
-  }
-  const amt = body.expectedAmount !== undefined ? body.expectedAmount : body.expected_amount;
-  if (amt !== undefined) {
-    updates.push('expected_amount = ?');
-    params.push(Math.round(amt));
-  }
-  if (body.recurrence !== undefined) {
-    updates.push('recurrence = ?');
-    params.push(body.recurrence);
-  }
-  if (body.color !== undefined) {
-    updates.push('color = ?');
-    params.push(body.color);
-  }
-  if (body.keywords !== undefined) {
-    updates.push('keywords = ?');
-    params.push(body.keywords || null);
+  const expectedDay = body.expectedDay !== undefined ? body.expectedDay : existing.expected_day;
+  const icon = body.icon !== undefined ? body.icon : existing.icon || 'payments';
+  const color = body.color !== undefined ? body.color : existing.color || '#10B981';
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  // Ensure initial historical snapshot exists before effectiveMonth if none was recorded yet
+  const existingPvCount = await db
+    .prepare('SELECT COUNT(*) as cnt FROM plan_versions WHERE user_id = ? AND entity_type = ? AND entity_id = ?')
+    .bind(userId, 'income_source', id)
+    .first<{ cnt: number }>();
+
+  const stmts: D1PreparedStatement[] = [];
+  if ((existingPvCount?.cnt || 0) === 0) {
+    const seedMonth = historicalSeedMonth(existing.created_at, effectiveMonth);
+    if (seedMonth) stmts.push(
+      db
+        .prepare(
+          `INSERT INTO plan_versions (id, user_id, entity_type, entity_id, effective_from_month, effective_to_month_exclusive, payload_json)
+           VALUES (?, ?, 'income_source', ?, ?, ?, ?)`
+        )
+        .bind(
+          `pv_seed_inc_${id}`,
+          userId,
+          id,
+          seedMonth,
+          effectiveMonth > seedMonth ? effectiveMonth : null,
+          JSON.stringify({
+            id,
+            name: existing.name,
+            expected_amount: Number(existing.expected_amount || 0),
+            cadence: existing.cadence || 'monthly',
+            one_time_date: existing.one_time_date || null,
+            expected_day: existing.expected_day || 1,
+            is_active: existing.is_active ?? 1
+          })
+        )
+    );
   }
 
-  if (updates.length > 0) {
-    params.push(id, userId);
-    await db.prepare(`UPDATE income_sources SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
-  }
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE income_sources
+         SET name = ?, expected_amount = ?, cadence = ?, one_time_date = ?, expected_day = ?, icon = ?, color = ?, revision = COALESCE(revision, 1) + 1
+         WHERE id = ? AND user_id = ?`
+      )
+      .bind(name, expectedAmount, cadence, oneTimeDate, expectedDay, icon, color, id, userId)
+  );
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'income_source', id, effectiveMonth, {
+    id,
+    name,
+    expected_amount: expectedAmount,
+    cadence,
+    one_time_date: oneTimeDate,
+    expected_day: expectedDay,
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
   return c.json({ success: true, id });
 });
 
-// Xóa hoặc Lưu trữ Nguồn thu (V2-11: Ưu tiên archive để bảo toàn báo cáo nguồn thu thực tế)
 app.delete('/api/income-sources/:id', async (c) => {
   const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
   const id = c.req.param('id');
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
+  const effectiveMonth = c.req.query('effectiveFromMonth') || getCurrentVnMonth();
 
-  const txnCheck = await db.prepare(
-    'SELECT COUNT(*) as count FROM transactions WHERE income_source_id = ? AND user_id = ?'
-  ).bind(id, userId).first<{ count: number }>();
-
-  if (txnCheck && txnCheck.count > 0) {
-    // Đã có giao dịch -> Soft archive (is_active = 0) để giữ lịch sử giao dịch
-    await db.prepare('UPDATE income_sources SET is_active = 0 WHERE id = ? AND user_id = ?').bind(id, userId).run();
-    return c.json({ success: true, archived: true, message: 'Đã lưu trữ nguồn thu' });
-  }
-
-  await db.prepare('DELETE FROM income_sources WHERE id = ? AND user_id = ?').bind(id, userId).run();
-  return c.json({ success: true, archived: false, message: 'Đã xóa nguồn thu' });
-});
-
-// Danh sách Khoản chi dự kiến
-app.get('/api/planned-expenses', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const { results } = await db.prepare('SELECT * FROM planned_expenses WHERE user_id = ? ORDER BY created_at ASC')
-    .bind(userId).all();
-  return c.json({ plannedExpenses: results });
+  const stmts: D1PreparedStatement[] = [
+    db.prepare('DELETE FROM income_sources WHERE id = ? AND user_id = ?').bind(id, userId),
+    db
+      .prepare(
+        `UPDATE plan_versions
+         SET effective_to_month_exclusive = ?
+         WHERE user_id = ? AND entity_type = 'income_source' AND entity_id = ? AND effective_to_month_exclusive IS NULL`
+      )
+      .bind(effectiveMonth, userId, id)
+  ];
+  await db.batch(stmts);
+  return c.json({ success: true });
 });
 
 app.post('/api/planned-expenses', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const body = await c.req.json<{
-    id?: string;
-    name: string;
-    jarCode?: string;
-    jar_code?: string;
-    expectedAmount?: number;
-    expected_amount?: number;
-    recurrence?: string;
-    note?: string;
-  }>();
-  const id = body.id || `pexp_${Date.now()}`;
-  const jarCode = body.jarCode ?? body.jar_code ?? 'NEC';
-  const amt = Math.round(body.expectedAmount ?? body.expected_amount ?? 0);
-  await db.prepare(`
-    INSERT INTO planned_expenses (id, user_id, name, jar_code, expected_amount, recurrence, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      jar_code = excluded.jar_code,
-      expected_amount = excluded.expected_amount,
-      recurrence = excluded.recurrence,
-      note = excluded.note
-  `).bind(id, userId, body.name, jarCode, amt, body.recurrence || 'Hàng tháng', body.note || null).run();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const body = await c.req.json();
+  const id = body.id || `plan_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const cadence = body.cadence || 'monthly';
+  const oneTimeDate = cadence === 'one_time' ? body.oneTimeDate : null;
+  if (cadence === 'one_time' && !isValidIsoCalendarDate(oneTimeDate)) {
+    return c.json({ error: 'Ngày khoản chi một lần bắt buộc đúng định dạng YYYY-MM-DD và phải là ngày hợp lệ', code: 'INVALID_ONE_TIME_DATE' }, 400);
+  }
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO planned_expenses (id, user_id, name, expected_amount, cadence, one_time_date, due_day, jar_id, account_id, is_active, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
+      )
+      .bind(
+        id,
+        userId,
+        body.name,
+        Number(body.expectedAmount || 0),
+        cadence,
+        oneTimeDate,
+        body.dueDay || 1,
+        body.jarId || 'jar_nec',
+        body.accountId || null
+      )
+  ];
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'planned_expense', id, effectiveMonth, {
+    id,
+    name: body.name,
+    expected_amount: Number(body.expectedAmount || 0),
+    cadence,
+    one_time_date: oneTimeDate,
+    due_day: body.dueDay || 1,
+    jar_id: body.jarId || 'jar_nec',
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
   return c.json({ success: true, id });
 });
 
 app.put('/api/planned-expenses/:id', async (c) => {
   const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
   const id = c.req.param('id');
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const body = await c.req.json<{
-    name?: string;
-    jarCode?: string;
-    jar_code?: string;
-    expectedAmount?: number;
-    expected_amount?: number;
-    recurrence?: string;
-    note?: string;
-  }>();
+  const body = await c.req.json();
 
-  const updates: string[] = [];
-  const params: any[] = [];
-  if (body.name !== undefined) {
-    updates.push('name = ?');
-    params.push(body.name);
+  const existing = await db
+    .prepare('SELECT * FROM planned_expenses WHERE id = ? AND user_id = ?')
+    .bind(id, userId)
+    .first<any>();
+  if (!existing) return c.json({ error: 'Not found' }, 404);
+
+  const name = body.name !== undefined ? body.name : existing.name;
+  const expectedAmount = body.expectedAmount !== undefined ? Number(body.expectedAmount) : Number(existing.expected_amount || 0);
+  const cadence = body.cadence !== undefined ? body.cadence : existing.cadence;
+  const oneTimeDate = cadence === 'one_time'
+    ? body.oneTimeDate !== undefined ? body.oneTimeDate : existing.one_time_date
+    : null;
+  if (cadence === 'one_time' && !isValidIsoCalendarDate(oneTimeDate)) {
+    return c.json({ error: 'Ngày khoản chi một lần bắt buộc đúng định dạng YYYY-MM-DD và phải là ngày hợp lệ', code: 'INVALID_ONE_TIME_DATE' }, 400);
   }
-  const jarCode = body.jarCode !== undefined ? body.jarCode : body.jar_code;
-  if (jarCode !== undefined) {
-    updates.push('jar_code = ?');
-    params.push(jarCode);
-  }
-  const amt = body.expectedAmount !== undefined ? body.expectedAmount : body.expected_amount;
-  if (amt !== undefined) {
-    updates.push('expected_amount = ?');
-    params.push(Math.round(amt));
-  }
-  if (body.recurrence !== undefined) {
-    updates.push('recurrence = ?');
-    params.push(body.recurrence);
-  }
-  if (body.note !== undefined) {
-    updates.push('note = ?');
-    params.push(body.note);
+  const dueDay = body.dueDay !== undefined ? body.dueDay : existing.due_day;
+  const jarId = body.jarId !== undefined ? body.jarId : existing.jar_id;
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  const existingPvCount = await db
+    .prepare('SELECT COUNT(*) as cnt FROM plan_versions WHERE user_id = ? AND entity_type = ? AND entity_id = ?')
+    .bind(userId, 'planned_expense', id)
+    .first<{ cnt: number }>();
+
+  const stmts: D1PreparedStatement[] = [];
+  if ((existingPvCount?.cnt || 0) === 0) {
+    const seedMonth = historicalSeedMonth(existing.created_at, effectiveMonth);
+    if (seedMonth) stmts.push(
+      db
+        .prepare(
+          `INSERT INTO plan_versions (id, user_id, entity_type, entity_id, effective_from_month, effective_to_month_exclusive, payload_json)
+           VALUES (?, ?, 'planned_expense', ?, ?, ?, ?)`
+        )
+        .bind(
+          `pv_seed_plan_${id}`,
+          userId,
+          id,
+          seedMonth,
+          effectiveMonth > seedMonth ? effectiveMonth : null,
+          JSON.stringify({
+            id,
+            name: existing.name,
+            expected_amount: Number(existing.expected_amount || 0),
+            cadence: existing.cadence || 'monthly',
+            one_time_date: existing.one_time_date || null,
+            due_day: existing.due_day || 1,
+            jar_id: existing.jar_id || 'jar_nec',
+            is_active: existing.is_active ?? 1
+          })
+        )
+    );
   }
 
-  if (updates.length > 0) {
-    params.push(id, userId);
-    await db.prepare(`UPDATE planned_expenses SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).bind(...params).run();
-  }
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE planned_expenses
+         SET name = ?, expected_amount = ?, cadence = ?, one_time_date = ?, due_day = ?, jar_id = ?, revision = COALESCE(revision, 1) + 1
+         WHERE id = ? AND user_id = ?`
+      )
+      .bind(name, expectedAmount, cadence, oneTimeDate, dueDay, jarId, id, userId)
+  );
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'planned_expense', id, effectiveMonth, {
+    id,
+    name,
+    expected_amount: expectedAmount,
+    cadence,
+    one_time_date: oneTimeDate,
+    due_day: dueDay,
+    jar_id: jarId,
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
   return c.json({ success: true, id });
 });
 
 app.delete('/api/planned-expenses/:id', async (c) => {
   const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
   const id = c.req.param('id');
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  await db.prepare('DELETE FROM planned_expenses WHERE id = ? AND user_id = ?').bind(id, userId).run();
+  const effectiveMonth = c.req.query('effectiveFromMonth') || getCurrentVnMonth();
+
+  await db.batch([
+    db.prepare('DELETE FROM planned_expenses WHERE id = ? AND user_id = ?').bind(id, userId),
+    db
+      .prepare(
+        `UPDATE plan_versions
+         SET effective_to_month_exclusive = ?
+         WHERE user_id = ? AND entity_type = 'planned_expense' AND entity_id = ? AND effective_to_month_exclusive IS NULL`
+      )
+      .bind(effectiveMonth, userId, id)
+  ]);
   return c.json({ success: true });
 });
 
-// Lấy danh sách Quỹ mở trực tiếp từ Fmarket API
-async function fetchFmarketFundsList(): Promise<Array<{ shortName: string; name: string; nav: number; updatedAt?: number }>> {
+// Jars CRUD & Largest Remainder Auto-Allocation (V2-17)
+app.post('/api/jars', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const body = await c.req.json();
+  const id = body.id || `jar_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO jars (id, user_id, name, icon, color, target_percent, monthly_limit, sort_order, is_active, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
+      )
+      .bind(
+        id,
+        userId,
+        body.name,
+        body.icon || 'account_balance_wallet',
+        body.color || '#3B82F6',
+        Number(body.targetPercent || 0),
+        Number(body.monthlyLimit || 0),
+        body.sortOrder || 10
+      )
+  ];
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'jar', id, effectiveMonth, {
+    id,
+    name: body.name,
+    target_percent: Number(body.targetPercent || 0),
+    monthly_limit: Number(body.monthlyLimit || 0),
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
+  return c.json({ success: true, id });
+});
+
+app.put('/api/jars/:id', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const jarId = c.req.param('id');
+  const body = await c.req.json();
+
+  const existing = await db.prepare('SELECT * FROM jars WHERE id = ? AND user_id = ?').bind(jarId, userId).first<any>();
+  if (!existing) return c.json({ error: 'Jar not found' }, 404);
+
+  const name = body.name !== undefined ? body.name : existing.name;
+  const icon = body.icon !== undefined ? body.icon : existing.icon;
+  const color = body.color !== undefined ? body.color : existing.color;
+  const targetPercent = body.targetPercent !== undefined ? Number(body.targetPercent) : Number(existing.target_percent || 0);
+  const monthlyLimit = body.monthlyLimit !== undefined ? Number(body.monthlyLimit) : Number(existing.monthly_limit || 0);
+  const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `UPDATE jars
+         SET name = ?, icon = ?, color = ?, target_percent = ?, monthly_limit = ?, revision = COALESCE(revision, 1) + 1
+         WHERE id = ? AND user_id = ?`
+      )
+      .bind(name, icon, color, targetPercent, monthlyLimit, jarId, userId)
+  ];
+
+  const pvStmts = await buildPlanVersionStatements(db, userId, 'jar', jarId, effectiveMonth, {
+    id: jarId,
+    name,
+    target_percent: targetPercent,
+    monthly_limit: monthlyLimit,
+    is_active: 1
+  });
+  stmts.push(...pvStmts);
+
+  await db.batch(stmts);
+  return c.json({ success: true, id: jarId });
+});
+
+app.delete('/api/jars/:id', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const jarId = c.req.param('id');
+
+  // Nullify references or soft-delete cleanly
+  await db.batch([
+    db.prepare('DELETE FROM jars WHERE id = ? AND user_id = ?').bind(jarId, userId)
+  ]);
+  return c.json({ success: true });
+});
+
+// V2-17: Exact Largest Remainder Allocation with 100% Weight & Safe Integer Validation
+app.post('/api/jars/auto-allocate', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
   try {
-    const res = await fetch('https://api.fmarket.vn/res/products/filter', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0'
-      },
-      body: JSON.stringify({
-        types: ['NEW_FUND', 'TRADING_FUND'],
-        issuerIds: [],
-        sortOrder: 'DESC',
-        sortField: 'annualizedReturn36Months',
-        page: 1,
-        pageSize: 100,
-        isIpo: false,
-        fundAssetTypes: [],
-        bondRemainPeriods: [],
-        searchField: '',
-        isBuyByReward: false,
-        thirdAppIds: []
-      })
+    const body = await c.req.json();
+    const totalIncome = Number(body.totalIncome);
+    const previewOnly = Boolean(body.preview);
+    const effectiveMonth = body.effectiveFromMonth || getCurrentVnMonth();
+
+    if (!Number.isFinite(totalIncome) || !Number.isSafeInteger(totalIncome) || totalIncome < 0 || totalIncome > 10_000_000_000_000) {
+      return c.json(
+        {
+          error: 'Tổng thu nhập phân bổ không hợp lệ (cần số nguyên không âm trong phạm vi an toàn)',
+          code: 'INVALID_TOTAL_INCOME'
+        },
+        400
+      );
+    }
+
+    const { results: jars } = await db
+      .prepare('SELECT id, name, target_percent, sort_order FROM jars WHERE user_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY sort_order ASC, id ASC')
+      .bind(userId)
+      .all<{ id: string; name: string; target_percent: number; sort_order: number }>();
+
+    if (!jars || jars.length === 0) {
+      return c.json({ error: 'Không có hũ chi tiêu nào đang hoạt động để phân bổ', code: 'NO_ACTIVE_JARS' }, 400);
+    }
+
+    // Allow custom weights override in request or use jars' target_percent
+    const items = jars.map((j) => {
+      const overridePct = body.weights && body.weights[j.id] !== undefined ? Number(body.weights[j.id]) : Number(j.target_percent || 0);
+      // Support both 0..1 (e.g. 0.55) and 0..100 (e.g. 55) representations
+      const normalizedFraction = overridePct > 1.0001 ? overridePct / 100 : overridePct;
+      const weightBps = Math.round(normalizedFraction * 10000);
+      return { id: j.id, name: j.name, weightBps, targetPercent: normalizedFraction };
     });
-    if (!res.ok) return [];
-    const json: any = await res.json();
-    const rows = json?.data?.rows || [];
-    return rows.map((r: any) => ({
-      shortName: String(r.shortName || '').toUpperCase(),
-      name: r.name || r.shortName,
-      nav: Number(r.nav) || 0,
-      updatedAt: r.productNavChange?.updateAt
-    }));
-  } catch (e) {
-    console.error('Fmarket fetch error:', e);
-    return [];
+
+    const validation = validateAllocationWeights(items);
+    if (!validation.valid) {
+      return c.json({ error: validation.error, code: 'INVALID_JAR_WEIGHTS' }, 400);
+    }
+
+    const allocated = allocateVndLargestRemainder(
+      totalIncome,
+      items.map((x) => ({ id: x.id, weightBps: x.weightBps }))
+    );
+
+    const allocationsMap: Record<string, number> = {};
+    for (const item of items) {
+      allocationsMap[item.id] = allocated[item.id] ?? 0;
+    }
+
+    if (previewOnly) {
+      return c.json({
+        success: true,
+        preview: true,
+        totalIncome,
+        allocations: allocationsMap
+      });
+    }
+
+    const stmts: D1PreparedStatement[] = [];
+    for (const item of items) {
+      const limitVnd = allocationsMap[item.id] ?? 0;
+      stmts.push(
+        db
+          .prepare('UPDATE jars SET monthly_limit = ?, target_percent = ?, revision = COALESCE(revision, 1) + 1 WHERE id = ? AND user_id = ?')
+          .bind(limitVnd, item.targetPercent, item.id, userId)
+      );
+      const pvStmts = await buildPlanVersionStatements(db, userId, 'jar', item.id, effectiveMonth, {
+        id: item.id,
+        name: item.name,
+        target_percent: item.targetPercent,
+        monthly_limit: limitVnd,
+        is_active: 1
+      });
+      stmts.push(...pvStmts);
+    }
+
+    await db.batch(stmts);
+    return c.json({
+      success: true,
+      totalIncome,
+      allocations: allocationsMap
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message, code: 'AUTO_ALLOCATE_FAILED' }, 400);
   }
+});
+
+// ============================================================================
+// ANALYTICS SUMMARY WITH HISTORICAL PLAN VERSIONS & EXCLUSIVE BUCKETS (V2-12..V2-16)
+// ============================================================================
+
+function listMonthsBetween(startIso: string, endExclusiveIso: string): string[] {
+  const start = new Date(startIso);
+  const endExclusive = new Date(endExclusiveIso);
+  if (isNaN(start.getTime()) || isNaN(endExclusive.getTime()) || start >= endExclusive) return [];
+
+  // Evaluate the first and last included instants in Vietnam's UTC+7 calendar.
+  const sVn = new Date(start.getTime() + 7 * 3600 * 1000);
+  const eVn = new Date(endExclusive.getTime() - 1 + 7 * 3600 * 1000);
+
+  const months: string[] = [];
+  let y = sVn.getUTCFullYear();
+  let m = sVn.getUTCMonth() + 1;
+  const endY = eVn.getUTCFullYear();
+  const endM = eVn.getUTCMonth() + 1;
+
+  while (y < endY || (y === endY && m <= endM)) {
+    months.push(`${y}-${String(m).padStart(2, '0')}`);
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+    if (months.length > 240) break; // safety cap
+  }
+  return months;
 }
 
-// Đồng bộ giá tài sản tự động theo ngày (Fmarket NAV + Vàng + Bạc + Crypto)
-async function syncAllMarketPrices(db: D1Database) {
-  const fmarketFunds = await fetchFmarketFundsList();
-  const fundMap = new Map<string, { name: string; nav: number }>();
-  for (const f of fmarketFunds) {
-    if (f.shortName && f.nav > 0) {
-      fundMap.set(f.shortName.toUpperCase(), { name: f.name, nav: f.nav });
+function getPlannedAmountForMonth(item: any, targetMonth: string): number {
+  const amount = Number(item.expected_amount || 0);
+  if (amount <= 0) return 0;
+  const cadence = item.cadence || 'monthly';
+  const [, mmStr] = targetMonth.split('-');
+  const monthNum = Number(mmStr);
+
+  if (cadence === 'monthly') {
+    return amount;
+  }
+  if (cadence === 'quarterly') {
+    const monthInQuarter = (monthNum - 1) % 3 + 1;
+    return Math.floor(amount / 3) + (monthInQuarter <= amount % 3 ? 1 : 0);
+  }
+  if (cadence === 'annual' || cadence === 'yearly') {
+    const base = Math.floor(amount / 12);
+    return base + (monthNum <= amount % 12 ? 1 : 0);
+  }
+  if (cadence === 'semiannual') {
+    const monthInHalf = (monthNum - 1) % 6 + 1;
+    return Math.floor(amount / 6) + (monthInHalf <= amount % 6 ? 1 : 0);
+  }
+  if (cadence === 'weekly') {
+    const yearly = amount * 52;
+    const base = Math.floor(yearly / 12);
+    return base + (monthNum <= yearly % 12 ? 1 : 0);
+  }
+  if (cadence === 'one_time') {
+    const oneTimeDate = String(item.one_time_date || '');
+    if (oneTimeDate && oneTimeDate.startsWith(targetMonth)) {
+      return amount;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+app.get('/api/analytics/summary', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  const periodType = c.req.query('period') || 'month'; // 'month', 'quarter', 'year', 'all'
+  const startDateParam = c.req.query('startDate');
+  const endDateParam = c.req.query('endDate');
+  const toExclusiveParam = c.req.query('toExclusive');
+
+  const vnNow = new Date(Date.now() + 7 * 3600 * 1000);
+  const currYear = vnNow.getUTCFullYear();
+  const currMonth = vnNow.getUTCMonth() + 1;
+
+  let startDate = startDateParam || new Date(Date.UTC(currYear, currMonth - 1, 1) - 7 * 3600 * 1000).toISOString();
+  let endDate = endDateParam || new Date(Date.UTC(currYear, currMonth, 1) - 7 * 3600 * 1000 - 1).toISOString();
+
+  if (!startDateParam && !endDateParam) {
+    if (periodType === 'quarter') {
+      const qStartMonth = Math.floor((currMonth - 1) / 3) * 3 + 1;
+      startDate = new Date(Date.UTC(currYear, qStartMonth - 1, 1) - 7 * 3600 * 1000).toISOString();
+      endDate = new Date(Date.UTC(currYear, qStartMonth + 2, 1) - 7 * 3600 * 1000 - 1).toISOString();
+    } else if (periodType === 'year') {
+      startDate = new Date(Date.UTC(currYear, 0, 1) - 7 * 3600 * 1000).toISOString();
+      endDate = new Date(Date.UTC(currYear + 1, 0, 1) - 7 * 3600 * 1000 - 1).toISOString();
+    } else if (periodType === 'all') {
+      startDate = '1970-01-01T00:00:00.000Z';
+      endDate = '2099-12-31T23:59:59.999Z';
     }
   }
 
-  // Lấy giá Vàng, Bạc, Crypto từ CoinGecko
-  let goldPerChi = 0;
-  let silverPerLuong = 0;
-  let btcVnd = 0;
-  let ethVnd = 0;
+  const endExclusive = toExclusiveParam || new Date(Date.parse(endDate) + 1).toISOString();
+
   try {
-    const cgRes = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,pax-gold,kinesis-silver&vs_currencies=vnd',
-      { headers: { 'User-Agent': 'Mozilla/5.0' } }
-    );
-    if (cgRes.ok) {
-      const cg: any = await cgRes.json();
-      if (cg['pax-gold']?.vnd) {
-        // 1 troy oz = 8.29426 chỉ
-        goldPerChi = Math.round(cg['pax-gold'].vnd / 8.29426);
-      }
-      if (cg['kinesis-silver']?.vnd) {
-        // 1 troy oz = 0.829426 lượng
-        silverPerLuong = Math.round(cg['kinesis-silver'].vnd / 0.829426);
-      }
-      if (cg['bitcoin']?.vnd) btcVnd = Math.round(cg['bitcoin'].vnd);
-      if (cg['ethereum']?.vnd) ethVnd = Math.round(cg['ethereum'].vnd);
+    const startingRevision = await db.prepare('SELECT revision, plan_revision FROM user_data_revisions WHERE user_id = ?').bind(userId).first<any>();
+    const dataRevision = Number(startingRevision?.revision || 0);
+    const planRevision = Number(startingRevision?.plan_revision || 0);
+    // 1. Fetch all active/current entities
+    const { results: jars } = await db
+      .prepare('SELECT * FROM jars WHERE user_id = ? ORDER BY sort_order ASC')
+      .bind(userId)
+      .all<any>();
+    const { results: incomeSources } = await db
+      .prepare('SELECT * FROM income_sources WHERE user_id = ? ORDER BY created_at ASC')
+      .bind(userId)
+      .all<any>();
+    const { results: plannedExpenses } = await db
+      .prepare('SELECT * FROM planned_expenses WHERE user_id = ? ORDER BY created_at ASC')
+      .bind(userId)
+      .all<any>();
+    const { results: planVersions } = await db
+      .prepare('SELECT * FROM plan_versions WHERE user_id = ? ORDER BY effective_from_month ASC, created_at ASC')
+      .bind(userId)
+      .all<any>();
+
+    // 2. Exclusive ID-based grouping for confirmed transactions in range (V2-12, V2-13)
+    const { results: confirmedTxs } = await db
+      .prepare(
+        `SELECT id, type, amount, jar_id, income_source_id, occurred_at, description, account_id, to_account_id
+         FROM transactions
+         WHERE user_id = ?
+           AND status = 'confirmed'
+           AND deleted_at IS NULL
+           AND COALESCE(history_hidden, 0) = 0
+           AND occurred_at >= ?
+           AND occurred_at ${toExclusiveParam ? '<' : '<='} ?
+         ORDER BY occurred_at DESC`
+      )
+      .bind(userId, startDate, toExclusiveParam || endDate)
+      .all<any>();
+
+    const jarMap = new Map<string, any>();
+    for (const j of jars || []) {
+      jarMap.set(j.id, {
+        id: j.id,
+        name: j.name,
+        icon: j.icon,
+        color: j.color,
+        targetPercent: Number(j.target_percent || 0),
+        monthlyLimit: Number(j.monthly_limit || 0),
+        actualSpent: 0,
+        txCount: 0
+      });
     }
-  } catch (e) {
-    console.error('CoinGecko error:', e);
-  }
 
-  const { results: assets } = await db.prepare('SELECT id, name, symbol, asset_class, current_price, source, auto_sync FROM assets').all<{
-    id: string;
-    name?: string | null;
-    symbol: string;
-    asset_class: string;
-    current_price: number;
-    source: string | null;
-    auto_sync: number | null;
-  }>();
+    const incomeMap = new Map<string, any>();
+    for (const s of incomeSources || []) {
+      incomeMap.set(s.id, {
+        id: s.id,
+        name: s.name,
+        icon: s.icon || 'payments',
+        color: s.color || '#10B981',
+        expectedAmount: Number(s.expected_amount || 0),
+        cadence: s.cadence || 'monthly',
+        actualReceived: 0,
+        txCount: 0
+      });
+    }
 
-  let updatedCount = 0;
-  for (const ast of assets) {
-    // L-10: Bỏ qua nếu tài sản đã tắt autoSync (bảo vệ giá Vàng SJC/Đất do người dùng tự nhập)
-    if (ast.auto_sync === 0) continue;
+    let totalActualIncome = 0;
+    let totalActualExpense = 0;
+    let totalTransferVolume = 0;
 
-    const sym = ast.symbol.toUpperCase();
-    let newPrice: number | null = null;
+    let unassignedIncome = 0;
+    let unassignedIncomeCount = 0;
+    let orphanedIncome = 0;
+    let orphanedIncomeCount = 0;
 
-    // 1. Nếu là quỹ trên Fmarket (hoặc trùng mã quỹ Fmarket)
-    if (fundMap.has(sym)) {
-      newPrice = fundMap.get(sym)!.nav;
-    } else if (ast.asset_class === 'crypto') {
-      if (sym === 'BTC' && btcVnd > 0) newPrice = btcVnd;
-      if (sym === 'ETH' && ethVnd > 0) newPrice = ethVnd;
-    } else if (ast.asset_class === 'gold' && goldPerChi > 0) {
-      // V2-18: TUYỆT ĐỐI KHÔNG dùng giá PAXG để ghi đè Vàng miếng SJC trong nước!
-      const isSjc = sym === 'SJC' || sym.includes('SJC') || (ast.name || '').toUpperCase().includes('SJC');
-      if (!isSjc) {
-        const unit = (ast.source || 'chỉ').toLowerCase();
-        if (unit.includes('lượng') || unit.includes('cây')) {
-          newPrice = goldPerChi * 10;
-        } else if (unit.includes('gram') || unit.includes('g')) {
-          // 1 chỉ = 3.75 gram -> 1 gram = 1 chỉ / 3.75
-          newPrice = Math.round(goldPerChi / 3.75);
+    let unassignedExpense = 0;
+    let unassignedExpenseCount = 0;
+    let orphanedExpense = 0;
+    let orphanedExpenseCount = 0;
+
+    for (const tx of confirmedTxs || []) {
+      const amt = Number(tx.amount || 0);
+      if (tx.type === 'income') {
+        totalActualIncome += amt;
+        if (!tx.income_source_id) {
+          unassignedIncome += amt;
+          unassignedIncomeCount++;
+        } else if (incomeMap.has(tx.income_source_id)) {
+          const entry = incomeMap.get(tx.income_source_id);
+          entry.actualReceived += amt;
+          entry.txCount++;
         } else {
-          newPrice = goldPerChi;
+          orphanedIncome += amt;
+          orphanedIncomeCount++;
+        }
+      } else if (tx.type === 'expense') {
+        totalActualExpense += amt;
+        if (!tx.jar_id) {
+          unassignedExpense += amt;
+          unassignedExpenseCount++;
+        } else if (jarMap.has(tx.jar_id)) {
+          const entry = jarMap.get(tx.jar_id);
+          entry.actualSpent += amt;
+          entry.txCount++;
+        } else {
+          orphanedExpense += amt;
+          orphanedExpenseCount++;
+        }
+      } else if (tx.type === 'transfer') {
+        totalTransferVolume += amt;
+      }
+    }
+
+    // 3. Calculate Planned / Expected Totals using Historical Plan Versions (V2-15, V2-16)
+    let plannedIncomeTotal: number | null = 0;
+    let plannedExpenseTotal: number | null = 0;
+    let plannedIncomeComplete = true;
+    let plannedExpenseComplete = true;
+    let usesCurrentPlanSnapshot = false;
+    const currentPlanMonth = getCurrentVnMonth();
+
+    if (periodType === 'all') {
+      // V2-15 / AT2-27: "all" period has no single-month denominator!
+      plannedIncomeTotal = null;
+      plannedExpenseTotal = null;
+    } else {
+      const monthsInPeriod = listMonthsBetween(startDate, endExclusive);
+      const pvByEntity = new Map<string, any[]>();
+      for (const pv of planVersions || []) {
+        const key = `${pv.entity_type}:${pv.entity_id}`;
+        if (!pvByEntity.has(key)) pvByEntity.set(key, []);
+        pvByEntity.get(key)!.push(pv);
+      }
+
+      for (const m of monthsInPeriod) {
+        // Income Sources for month m
+        const seenIncomeIds = new Set<string>();
+        for (const [key, versions] of pvByEntity.entries()) {
+          if (!key.startsWith('income_source:')) continue;
+          const entityId = key.slice('income_source:'.length);
+          seenIncomeIds.add(entityId);
+          // Find version active in month m
+          const activeVer = versions
+            .filter(
+              (v) =>
+                v.effective_from_month <= m &&
+                (!v.effective_to_month_exclusive || v.effective_to_month_exclusive > m)
+            )
+            .pop();
+          if (activeVer) {
+            try {
+              const payload = JSON.parse(activeVer.payload_json);
+              plannedIncomeTotal += getPlannedAmountForMonth(payload, m);
+            } catch {
+              // Ignore malformed json
+            }
+          }
+        }
+        // Fallback for income sources without plan_versions rows yet
+        for (const s of incomeSources || []) {
+          if (!seenIncomeIds.has(s.id)) {
+            const createdMonth = getCreatedVnMonth(s.created_at);
+            if (createdMonth && createdMonth > m) continue;
+            if (m === currentPlanMonth) {
+              plannedIncomeTotal! += getPlannedAmountForMonth(s, m);
+              usesCurrentPlanSnapshot = true;
+            } else {
+              plannedIncomeComplete = false;
+            }
+          }
+        }
+
+        // Planned Expenses for month m
+        const seenPlanIds = new Set<string>();
+        for (const [key, versions] of pvByEntity.entries()) {
+          if (!key.startsWith('planned_expense:')) continue;
+          const entityId = key.slice('planned_expense:'.length);
+          seenPlanIds.add(entityId);
+          const activeVer = versions
+            .filter(
+              (v) =>
+                v.effective_from_month <= m &&
+                (!v.effective_to_month_exclusive || v.effective_to_month_exclusive > m)
+            )
+            .pop();
+          if (activeVer) {
+            try {
+              const payload = JSON.parse(activeVer.payload_json);
+              plannedExpenseTotal += getPlannedAmountForMonth(payload, m);
+            } catch {
+              // Ignore malformed json
+            }
+          }
+        }
+        for (const p of plannedExpenses || []) {
+          if (!seenPlanIds.has(p.id)) {
+            const createdMonth = getCreatedVnMonth(p.created_at);
+            if (createdMonth && createdMonth > m) continue;
+            if (m === currentPlanMonth) {
+              plannedExpenseTotal! += getPlannedAmountForMonth(p, m);
+              usesCurrentPlanSnapshot = true;
+            } else {
+              plannedExpenseComplete = false;
+            }
+          }
         }
       }
-    } else if (ast.asset_class === 'silver' && silverPerLuong > 0) {
-      const unit = (ast.source || 'lượng').toLowerCase();
-      if (unit.includes('chỉ')) {
-        newPrice = Math.round(silverPerLuong / 10);
-      } else if (unit.includes('kg')) {
-        newPrice = Math.round(silverPerLuong * 26.666);
-      } else if (unit.includes('gram') || unit.includes('g')) {
-        // 1 lượng = 37.5 gram -> 1 gram = 1 lượng / 37.5
-        newPrice = Math.round(silverPerLuong / 37.5);
-      } else {
-        newPrice = silverPerLuong;
-      }
+      if (!plannedIncomeComplete) plannedIncomeTotal = null;
+      if (!plannedExpenseComplete) plannedExpenseTotal = null;
     }
 
-    if (newPrice !== null && newPrice > 0) {
-      await db.prepare('UPDATE assets SET current_price = ?, price_updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-        .bind(newPrice, ast.id).run();
-      updatedCount++;
+    const jarBuckets = Array.from(jarMap.values());
+    if (unassignedExpense > 0 || unassignedExpenseCount > 0) {
+      jarBuckets.push({
+        id: '__unassigned__',
+        name: 'Chưa phân hũ',
+        icon: 'help_outline',
+        color: '#94A3B8',
+        targetPercent: 0,
+        monthlyLimit: 0,
+        actualSpent: unassignedExpense,
+        txCount: unassignedExpenseCount,
+        isUnassigned: true
+      });
+    }
+    if (orphanedExpense > 0 || orphanedExpenseCount > 0) {
+      jarBuckets.push({
+        id: '__orphaned__',
+        name: 'Hũ đã xóa (Orphaned)',
+        icon: 'archive',
+        color: '#64748B',
+        targetPercent: 0,
+        monthlyLimit: 0,
+        actualSpent: orphanedExpense,
+        txCount: orphanedExpenseCount,
+        isOrphaned: true
+      });
+    }
+
+    const incomeBuckets = Array.from(incomeMap.values());
+    if (unassignedIncome > 0 || unassignedIncomeCount > 0) {
+      incomeBuckets.push({
+        id: '__unassigned__',
+        name: 'Chưa gán nguồn thu',
+        icon: 'help_outline',
+        color: '#94A3B8',
+        expectedAmount: 0,
+        cadence: 'monthly',
+        actualReceived: unassignedIncome,
+        txCount: unassignedIncomeCount,
+        isUnassigned: true
+      });
+    }
+    if (orphanedIncome > 0 || orphanedIncomeCount > 0) {
+      incomeBuckets.push({
+        id: '__orphaned__',
+        name: 'Nguồn thu đã xóa (Orphaned)',
+        icon: 'archive',
+        color: '#64748B',
+        expectedAmount: 0,
+        cadence: 'monthly',
+        actualReceived: orphanedIncome,
+        txCount: orphanedIncomeCount,
+        isOrphaned: true
+      });
+    }
+
+    const endingRevision = await db.prepare('SELECT revision, plan_revision FROM user_data_revisions WHERE user_id = ?').bind(userId).first<any>();
+    if (Number(endingRevision?.revision || 0) !== dataRevision || Number(endingRevision?.plan_revision || 0) !== planRevision) {
+      return c.json({ error: 'Dữ liệu đã thay đổi trong khi tạo báo cáo; hãy tải lại', code: 'STALE_SUMMARY' }, 409);
+    }
+
+    return c.json({
+      period: {
+        type: periodType,
+        startDate,
+        endDate
+      },
+      totals: {
+        actualIncome: totalActualIncome,
+        actualExpense: totalActualExpense,
+        netCashflow: totalActualIncome - totalActualExpense,
+        transferVolume: totalTransferVolume,
+        plannedIncome: plannedIncomeTotal,
+        plannedExpense: plannedExpenseTotal,
+        incomeCompletionPct:
+          plannedIncomeTotal && plannedIncomeTotal > 0
+            ? Number(((totalActualIncome / plannedIncomeTotal) * 100).toFixed(2))
+            : null,
+        expenseCompletionPct:
+          plannedExpenseTotal && plannedExpenseTotal > 0
+            ? Number(((totalActualExpense / plannedExpenseTotal) * 100).toFixed(2))
+            : null
+      },
+      planCompleteness: {
+        plannedIncomeComplete,
+        plannedExpenseComplete,
+        usesCurrentPlanSnapshot
+      },
+      dataRevision,
+      planRevision,
+      jarBuckets,
+      incomeBuckets,
+      unassigned: {
+        income: unassignedIncome,
+        incomeCount: unassignedIncomeCount,
+        expense: unassignedExpense,
+        expenseCount: unassignedExpenseCount
+      },
+      orphaned: {
+        income: orphanedIncome,
+        incomeCount: orphanedIncomeCount,
+        expense: orphanedExpense,
+        expenseCount: orphanedExpenseCount
+      }
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// ============================================================================
+// INVESTMENTS, MARKET PRICES & XIRR (V2-18, V2-19)
+// ============================================================================
+
+function parseExternalCashflowDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(text);
+  const parsed = new Date(dateOnly ? `${text}T00:00:00.000Z` : text);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  if (dateOnly && parsed.toISOString().slice(0, 10) !== text) return null;
+  return parsed.toISOString();
+}
+
+async function getPortfolioXirr(db: D1Database, userId: string) {
+  const [flowRows, settings, holdingsRows, cashRows] = await Promise.all([
+    db.prepare('SELECT id, type, amount_vnd, occurred_at, note, created_at FROM investment_cashflows WHERE user_id = ? ORDER BY occurred_at ASC, id ASC').bind(userId).all<any>(),
+    db.prepare('SELECT complete_from FROM investment_cashflow_settings WHERE user_id = ?').bind(userId).first<any>(),
+    db.prepare(`SELECT h.quantity, a.current_price, a.currency, a.price_as_of, a.sync_status, a.provider
+      FROM holdings h JOIN assets a ON h.asset_id = a.id WHERE h.user_id = ?`).bind(userId).all<any>(),
+    db.prepare(`SELECT balance, currency FROM accounts WHERE user_id = ? AND type IN ('securities', 'crypto')
+      AND COALESCE(include_in_net_worth, 1) = 1`).bind(userId).all<any>()
+  ]);
+
+  const cashflows = flowRows.results || [];
+  const historyCompleteFrom = settings?.complete_from || null;
+  const valuationDate = new Date().toISOString();
+  const today = valuationDate.slice(0, 10);
+  let terminalValueVnd = 0;
+  let valuationUnavailable = false;
+  let valuationFailureCode: 'TERMINAL_VALUE_UNAVAILABLE' | 'UNSUPPORTED_CURRENCY' = 'TERMINAL_VALUE_UNAVAILABLE';
+  let priceAsOfOldestMs: number | null = null;
+
+  for (const holding of holdingsRows.results || []) {
+    const quantity = Number(holding.quantity);
+    const price = Number(holding.current_price);
+    const priceAsOf = typeof holding.price_as_of === 'string' ? new Date(holding.price_as_of).getTime() : NaN;
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      valuationUnavailable = true;
+      break;
+    }
+    if (quantity === 0) continue;
+    if (String(holding.currency || '').toUpperCase() !== 'VND') {
+      valuationUnavailable = true;
+      valuationFailureCode = 'UNSUPPORTED_CURRENCY';
+      break;
+    }
+    const isExternalPriceFeed = Boolean(holding.provider && holding.provider !== 'manual');
+    if (!Number.isFinite(price) || price <= 0 ||
+        !Number.isFinite(priceAsOf) || priceAsOf > Date.now() + 60_000 ||
+        (isExternalPriceFeed && ['stale', 'error'].includes(String(holding.sync_status)))) {
+      valuationUnavailable = true;
+      break;
+    }
+    priceAsOfOldestMs = priceAsOfOldestMs === null ? priceAsOf : Math.min(priceAsOfOldestMs, priceAsOf);
+    terminalValueVnd += Math.round(quantity * price);
+  }
+  // Securities/crypto account balances are explicitly treated as uninvested cash, including negative balances.
+  if (!valuationUnavailable) {
+    for (const account of cashRows.results || []) {
+      if (String(account.currency || '').toUpperCase() !== 'VND') {
+        valuationUnavailable = true;
+        valuationFailureCode = 'UNSUPPORTED_CURRENCY';
+        break;
+      }
+      const balance = Number(account.balance);
+      if (!Number.isFinite(balance)) {
+        valuationUnavailable = true;
+        break;
+      }
+      terminalValueVnd += balance;
+    }
+  }
+
+  let reasonCode: string | null = null;
+  let message = '';
+  let rate: number | null = null;
+  if (!historyCompleteFrom) {
+    reasonCode = 'HISTORY_INCOMPLETE';
+    message = 'Hãy ghi đủ mọi khoản góp/rút từ ngày bắt đầu và xác nhận mốc lịch sử đầy đủ trước khi xem XIRR.';
+  } else if (cashflows.some((flow: any) => String(flow.occurred_at).slice(0, 10) < historyCompleteFrom)) {
+    reasonCode = 'FLOW_BEFORE_COMPLETE_FROM';
+    message = 'Có dòng tiền trước mốc lịch sử được xác nhận; hãy sửa mốc hoặc bổ sung lịch sử trước khi xem XIRR.';
+  } else if (valuationUnavailable) {
+    reasonCode = valuationFailureCode;
+    message = valuationFailureCode === 'UNSUPPORTED_CURRENCY'
+      ? 'Chưa thể tính XIRR: mọi giá trị cuối kỳ phải được quy đổi sang VND; hiện chưa có tỷ giá được xác minh cho currency của tài sản/tài khoản.'
+      : 'Chưa thể xác định giá trị cuối kỳ vì thiếu giá/ngày giá hợp lệ hoặc nguồn giá tự động đang stale/lỗi.';
+  } else if (cashflows.length === 0) {
+    reasonCode = 'INSUFFICIENT_CASHFLOWS';
+    message = 'Cần có ít nhất một khoản góp/rút đã ghi nhận để tính XIRR.';
+  } else if (cashflows.some((flow: any) => String(flow.occurred_at) > valuationDate)) {
+    reasonCode = 'FUTURE_CASHFLOW';
+    message = 'Dòng tiền có ngày sau ngày định giá hiện tại.';
+  } else {
+    const solverFlows = cashflows.map((flow: any) => ({
+      amount: flow.type === 'contribution' ? -Number(flow.amount_vnd) : Number(flow.amount_vnd),
+      date: flow.occurred_at
+    }));
+    solverFlows.push({ amount: terminalValueVnd, date: valuationDate });
+    const nonZeroSigns = solverFlows.map((flow) => Math.sign(flow.amount)).filter((sign) => sign !== 0);
+    const signChanges = nonZeroSigns.slice(1).reduce((count, sign, index) => count + (sign !== nonZeroSigns[index] ? 1 : 0), 0);
+    rate = signChanges <= 1 ? calculateXIRR(solverFlows) : null;
+    const firstDate = Math.min(...solverFlows.map((flow) => new Date(flow.date).getTime()));
+    const residual = rate === null || !Number.isFinite(rate) || rate <= -1 ? Infinity : solverFlows.reduce((sum, flow) => {
+      const years = (new Date(flow.date).getTime() - firstDate) / (365 * 24 * 60 * 60 * 1000);
+      return sum + flow.amount / Math.pow(1 + rate!, years);
+    }, 0);
+    const residualTolerance = Math.max(0.01, solverFlows.reduce((sum, flow) => sum + Math.abs(flow.amount), 0) * 1e-8);
+    if (rate === null || !Number.isFinite(rate) || rate <= -1 || !Number.isFinite(residual) || Math.abs(residual) > residualTolerance) {
+      rate = null;
+      reasonCode = 'XIRR_UNDEFINED';
+      message = 'Dòng tiền chưa có nghiệm XIRR xác định hoặc bộ giải không hội tụ.';
+    } else {
+      message = 'XIRR tính từ các khoản góp/rút đã ghi rõ, giá trị holdings theo giá đã lưu, và tiền chưa đầu tư trong tài khoản securities/crypto.';
     }
   }
 
   return {
-    updatedCount,
-    fmarketCount: fmarketFunds.length,
-    goldPerChi,
-    silverPerLuong,
-    btcVnd
+    cashflows,
+    historyCompleteFrom,
+    xirr: {
+      rate,
+      annualizedPct: rate === null ? null : Number((rate * 100).toFixed(2)),
+      reasonCode,
+      message,
+      terminalValueVnd: valuationUnavailable ? null : Math.round(terminalValueVnd),
+      priceAsOfOldest: priceAsOfOldestMs === null ? null : new Date(priceAsOfOldestMs).toISOString(),
+      valuationDate
+    }
   };
 }
 
-// API lấy danh sách quỹ Fmarket trực tiếp
-app.get('/api/market/fmarket-funds', async (c) => {
-  const funds = await fetchFmarketFundsList();
-  return c.json({ funds });
-});
-
-// API đồng bộ giá thị trường & Fmarket ngay lập tức (kèm danh sách holdings mới nhất)
-app.post('/api/market/sync-prices', async (c) => {
-  const db = c.env.DB;
-  const userId = 'user_default';
-  const syncResult = await syncAllMarketPrices(db);
-  const { results: holdings } = await db.prepare(`
-    SELECT h.id, h.quantity, h.avg_cost, h.auto_sync, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price, a.source as unit, a.price_updated_at
-    FROM holdings h
-    JOIN assets a ON h.asset_id = a.id
-    WHERE h.user_id = ?
-  `).bind(userId).all();
-
-  return c.json({
-    success: true,
-    ...syncResult,
-    holdings: holdings || [],
-    message: `Đã cập nhật giá mới nhất cho ${syncResult.updatedCount} tài sản từ Fmarket & Thị trường`
-  });
-});
-
-// Danh sách tài sản đầu tư
 app.get('/api/holdings', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  const { results } = await db.prepare(`
-    SELECT h.id, h.quantity, h.avg_cost, h.auto_sync, a.id as asset_id, a.symbol, a.name, a.asset_class, a.current_price, a.source as unit, a.price_updated_at
-    FROM holdings h
-    JOIN assets a ON h.asset_id = a.id
-    WHERE h.user_id = ?
-  `).bind(userId).all();
-  return c.json({ holdings: results });
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  try {
+    const { results: holdings } = await db
+      .prepare(
+        `SELECT h.*, a.symbol, a.name as asset_name, a.asset_class, a.current_price,
+                a.unit, a.quote_unit, a.provider, a.price_as_of, a.sync_status, a.updated_at as price_updated_at
+         FROM holdings h
+         JOIN assets a ON h.asset_id = a.id
+         WHERE h.user_id = ?
+         ORDER BY h.updated_at DESC`
+      )
+      .bind(userId)
+      .all<any>();
+
+    const { results: invTxs } = await db
+      .prepare('SELECT * FROM investment_transactions WHERE user_id = ? ORDER BY occurred_at ASC')
+      .bind(userId)
+      .all<any>();
+
+    // Enrich each holding with unrealized PnL, exact ROI (null if costBasis <= 0), and compute portfolio XIRR
+    const enrichedHoldings = (holdings || []).map((h) => {
+      const qty = Number(h.quantity || 0);
+      const avgCost = Number(h.avg_cost || 0);
+      const currentPrice = Number(h.current_price || 0);
+      const costBasisVnd = Math.round(qty * avgCost);
+      const marketValueVnd = Math.round(qty * currentPrice);
+      const unrealizedPnlVnd = marketValueVnd - costBasisVnd;
+      const simpleRoiPct = costBasisVnd > 0 ? Number(((unrealizedPnlVnd / costBasisVnd) * 100).toFixed(2)) : null;
+
+      return {
+        ...h,
+        quantity: qty,
+        avg_cost: avgCost,
+        current_price: currentPrice,
+        costBasisVnd,
+        marketValueVnd,
+        unrealizedPnlVnd,
+        simpleRoiPct
+      };
+    });
+
+    const portfolioXirr = await getPortfolioXirr(db, userId);
+
+    return c.json({
+      holdings: enrichedHoldings,
+      investmentTransactions: invTxs || [],
+      xirr: portfolioXirr.xirr
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
 });
 
-// Lưu / cập nhật tài sản đầu tư (Quỹ Fmarket, Cổ phiếu, Vàng, Bạc, Đất, Crypto)
+// Create or Edit Holding by Stable ID (V2-18: Renaming symbol updates in-place instead of duplicating!)
 app.post('/api/holdings', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  const body = await c.req.json<{
-    symbol: string;
-    name: string;
-    assetClass: 'stock' | 'fund' | 'crypto' | 'gold' | 'silver' | 'land';
-    quantity: number;
-    avgCost: number;
-    currentPrice: number;
-    unit?: string;
-    autoSync?: boolean;
-  }>();
+  const principal = c.get('principal');
+  const userId = principal.userId;
 
-  const cleanSymbol = body.symbol.trim().toUpperCase();
-  const assetId = `ast_${cleanSymbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
-  const defaultUnit = body.unit || (
-    body.assetClass === 'fund' ? 'CCQ' :
-    body.assetClass === 'stock' ? 'CP' :
-    body.assetClass === 'gold' ? 'chỉ' :
-    body.assetClass === 'silver' ? 'lượng' :
-    body.assetClass === 'land' ? 'm²' : 'Coin'
-  );
-  const autoSyncVal = body.autoSync === false ? 0 : 1;
+  try {
+    const body = await c.req.json();
+    const holdingId = body.id ? String(body.id).trim() : null;
+    const symbol = String(body.symbol || '').toUpperCase().trim();
+    const name = String(body.name || symbol).trim();
+    const assetClass = body.assetClass || 'stock';
+    const unit = body.unit || (assetClass === 'gold' ? 'luong' : assetClass === 'fund' ? 'ccq' : assetClass === 'crypto' ? 'coin' : 'share');
+    const quantity = Number(body.quantity);
+    const avgCost = Number(body.avgCost);
+    const currentPrice = body.currentPrice !== undefined ? Number(body.currentPrice) : avgCost;
 
-  await db.prepare(`
-    INSERT INTO assets (id, symbol, name, asset_class, current_price, source, auto_sync, price_updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(symbol) DO UPDATE SET
-      current_price = excluded.current_price,
-      name = excluded.name,
-      asset_class = excluded.asset_class,
-      source = excluded.source,
-      auto_sync = excluded.auto_sync,
-      price_updated_at = CURRENT_TIMESTAMP
-  `).bind(assetId, cleanSymbol, body.name, body.assetClass, body.currentPrice, defaultUnit, autoSyncVal).run();
+    if (!symbol) {
+      return c.json({ error: 'Vui lòng nhập mã tài sản (symbol)', code: 'MISSING_SYMBOL' }, 400);
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return c.json({ error: 'Số lượng nắm giữ phải lớn hơn 0', code: 'INVALID_QUANTITY' }, 400);
+    }
+    if (!Number.isFinite(avgCost) || avgCost < 0 || !Number.isFinite(currentPrice) || currentPrice < 0) {
+      return c.json({ error: 'Giá vốn hoặc thị giá không hợp lệ', code: 'INVALID_PRICE' }, 400);
+    }
 
-  const existingAsset = await db.prepare('SELECT id FROM assets WHERE symbol = ?').bind(cleanSymbol).first<{ id: string }>();
-  const finalAssetId = existingAsset?.id || assetId;
-  const holdingId = `hld_${finalAssetId}`;
+    const nowIso = new Date().toISOString();
 
-  await db.prepare(`
-    INSERT INTO holdings (id, user_id, asset_id, quantity, avg_cost, auto_sync, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(id) DO UPDATE SET
-      quantity = excluded.quantity,
-      avg_cost = excluded.avg_cost,
-      auto_sync = excluded.auto_sync,
-      updated_at = CURRENT_TIMESTAMP
-  `).bind(holdingId, userId, finalAssetId, body.quantity, body.avgCost, autoSyncVal).run();
+    // If holdingId is provided, update that exact holding!
+    if (holdingId) {
+      const existingHolding = await db
+        .prepare('SELECT * FROM holdings WHERE id = ? AND user_id = ?')
+        .bind(holdingId, userId)
+        .first<any>();
 
-  return c.json({ success: true, holdingId, message: 'Đã lưu tài sản thành công' });
+      if (existingHolding) {
+        // Ensure target asset exists or update existing asset
+        let asset = await db.prepare('SELECT * FROM assets WHERE symbol = ?').bind(symbol).first<any>();
+        let assetId = existingHolding.asset_id;
+
+        if (!asset) {
+          // Check if any other holding uses the old asset_id; if not, we can rename the asset symbol directly
+          const otherCount = await db
+            .prepare('SELECT COUNT(*) as cnt FROM holdings WHERE asset_id = ? AND id != ?')
+            .bind(existingHolding.asset_id, holdingId)
+            .first<{ cnt: number }>();
+
+          if ((otherCount?.cnt || 0) === 0) {
+            await db
+              .prepare(
+                `UPDATE assets
+                 SET symbol = ?, name = ?, asset_class = ?, unit = ?, quote_unit = ?, current_price = ?, price_as_of = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`
+              )
+              .bind(symbol, name, assetClass, unit, unit, currentPrice, nowIso, existingHolding.asset_id)
+              .run();
+            assetId = existingHolding.asset_id;
+          } else {
+            assetId = `asset_${symbol.toLowerCase()}_${Date.now()}`;
+            await db
+              .prepare(
+                `INSERT INTO assets (id, symbol, name, asset_class, unit, quote_unit, current_price, price_as_of, sync_status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok')`
+              )
+              .bind(assetId, symbol, name, assetClass, unit, unit, currentPrice, nowIso)
+              .run();
+          }
+        } else {
+          assetId = asset.id;
+          await db
+            .prepare(
+              `UPDATE assets
+               SET name = ?, asset_class = ?, unit = ?, current_price = ?, price_as_of = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`
+            )
+            .bind(name, assetClass, unit, currentPrice, nowIso, assetId)
+            .run();
+        }
+
+        await db
+          .prepare(
+            `UPDATE holdings
+             SET asset_id = ?, quantity = ?, holding_unit = ?, avg_cost = ?, revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND user_id = ?`
+          )
+          .bind(assetId, quantity, unit, avgCost, holdingId, userId)
+          .run();
+
+        return c.json({ success: true, id: holdingId, assetId, updated: true });
+      }
+    }
+
+    // Upsert asset by symbol
+    let asset = await db.prepare('SELECT * FROM assets WHERE symbol = ?').bind(symbol).first<any>();
+    let assetId = asset?.id;
+
+    if (!asset) {
+      assetId = `asset_${symbol.toLowerCase()}_${Date.now()}`;
+      await db
+        .prepare(
+          `INSERT INTO assets (id, symbol, name, asset_class, unit, quote_unit, provider, current_price, price_as_of, sync_status)
+           VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, 'ok')`
+        )
+        .bind(assetId, symbol, name, assetClass, unit, unit, currentPrice, nowIso)
+        .run();
+    } else {
+      await db
+        .prepare(
+          `UPDATE assets
+           SET current_price = ?, name = ?, asset_class = ?, unit = ?, price_as_of = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+        .bind(currentPrice, name, assetClass, unit, nowIso, assetId)
+        .run();
+    }
+
+    const existingByAsset = await db
+      .prepare('SELECT id FROM holdings WHERE user_id = ? AND asset_id = ?')
+      .bind(userId, assetId)
+      .first<any>();
+
+    let finalHoldingId = existingByAsset?.id;
+    if (existingByAsset) {
+      await db
+        .prepare(
+          `UPDATE holdings
+           SET quantity = ?, holding_unit = ?, avg_cost = ?, revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+        .bind(quantity, unit, avgCost, existingByAsset.id)
+        .run();
+    } else {
+      finalHoldingId = holdingId || `hold_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      await db
+        .prepare(
+          `INSERT INTO holdings (id, user_id, asset_id, quantity, holding_unit, avg_cost, revision)
+           VALUES (?, ?, ?, ?, ?, ?, 1)`
+        )
+        .bind(finalHoldingId, userId, assetId, quantity, unit, avgCost)
+        .run();
+    }
+
+    return c.json({ success: true, id: finalHoldingId, assetId });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
 });
 
-// Xóa 1 tài sản đầu tư (theo holding id hoặc symbol)
 app.delete('/api/holdings/:id', async (c) => {
   const db = c.env.DB;
-  const idOrSymbol = c.req.param('id');
-  const userId = 'user_default';
-
-  await db.prepare('DELETE FROM holdings WHERE (id = ? OR asset_id = ?) AND user_id = ?')
-    .bind(idOrSymbol, `ast_${idOrSymbol.toLowerCase().replace(/[^a-z0-9]/g, '')}`, userId).run();
-
-  const asset = await db.prepare('SELECT id FROM assets WHERE symbol = ?').bind(idOrSymbol.toUpperCase()).first<{ id: string }>();
-  if (asset) {
-    await db.prepare('DELETE FROM holdings WHERE asset_id = ? AND user_id = ?').bind(asset.id, userId).run();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const holdId = c.req.param('id');
+  try {
+    await db
+      .prepare(
+        `DELETE FROM holdings
+         WHERE user_id = ?
+           AND (id = ? OR asset_id = ? OR asset_id IN (SELECT id FROM assets WHERE UPPER(symbol) = UPPER(?)))`
+      )
+      .bind(userId, holdId, holdId, holdId)
+      .run();
+    return c.json({ success: true });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
-
-  return c.json({ success: true, message: 'Đã xóa tài sản' });
 });
 
-// RESET & KHỞI TẠO TÀI CHÍNH (Tuân thủ đặc tả V2-09: Tường minh theo scope, không ảnh hưởng chéo)
-app.post('/api/reset', async (c) => {
+// Investment Cashflow Transactions (Buy / Sell / Dividend / Fee / Tax) (V2-19)
+app.get('/api/investment-transactions', async (c) => {
   const db = c.env.DB;
-  const userId = 'user_default';
-  await ensurePlanningTables(db);
-  const body = await c.req.json<{
-    scope: 'transactions' | 'balances' | 'holdings' | 'income' | 'planned_expenses' | 'all';
-    clearNotifications?: boolean;
-    mode?: 'hide_history' | 'hard_delete';
-  }>();
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const { results } = await db
+    .prepare(
+      `SELECT it.*, a.symbol, a.name as asset_name
+       FROM investment_transactions it
+       LEFT JOIN assets a ON it.asset_id = a.id
+       WHERE it.user_id = ?
+       ORDER BY it.occurred_at DESC`
+    )
+    .bind(userId)
+    .all<any>();
+  return c.json({ investmentTransactions: results || [] });
+});
 
-  if (body.scope === 'transactions' || body.scope === 'all') {
-    if (body.mode === 'hard_delete' || body.scope === 'all') {
-      await db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId).run();
-    } else {
-      // Mặc định: Ẩn lịch sử nhưng bảo toàn số dư (history_hidden_at)
-      await db.prepare('UPDATE transactions SET history_hidden_at = CURRENT_TIMESTAMP WHERE user_id = ? AND history_hidden_at IS NULL').bind(userId).run();
+// Portfolio-level external cashflow history. These records never mutate account balances.
+app.get('/api/investment-cashflows', async (c) => {
+  try {
+    return c.json(await getPortfolioXirr(c.env.DB, c.get('principal').userId));
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.post('/api/investment-cashflows', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  try {
+    const body = await c.req.json();
+    const type = String(body.type || '');
+    const amountVnd = Number(body.amountVnd);
+    const occurredAt = parseExternalCashflowDate(body.occurredAt);
+    const note = body.note === undefined || body.note === null ? null : String(body.note).trim();
+    if (type !== 'contribution' && type !== 'withdrawal') {
+      return c.json({ error: 'Loại dòng tiền phải là contribution hoặc withdrawal', code: 'INVALID_CASHFLOW_TYPE' }, 400);
+    }
+    if (!Number.isSafeInteger(amountVnd) || amountVnd <= 0) {
+      return c.json({ error: 'Số tiền phải là số nguyên VND lớn hơn 0', code: 'INVALID_CASHFLOW_AMOUNT' }, 400);
+    }
+    if (!occurredAt) return c.json({ error: 'Ngày dòng tiền không hợp lệ', code: 'INVALID_CASHFLOW_DATE' }, 400);
+    if (occurredAt > new Date().toISOString()) {
+      return c.json({ error: 'Ngày dòng tiền không được ở tương lai', code: 'FUTURE_CASHFLOW' }, 400);
+    }
+    if (note && note.length > 500) return c.json({ error: 'Ghi chú tối đa 500 ký tự', code: 'CASHFLOW_NOTE_TOO_LONG' }, 400);
+    const settings = await db.prepare('SELECT complete_from FROM investment_cashflow_settings WHERE user_id = ?').bind(userId).first<any>();
+    if (settings?.complete_from && occurredAt.slice(0, 10) < settings.complete_from) {
+      return c.json({ error: 'Ngày này trước mốc lịch sử đầy đủ; hãy xóa mốc xác nhận trước khi bổ sung lịch sử', code: 'FLOW_BEFORE_COMPLETE_FROM' }, 400);
+    }
+    const id = typeof body.id === 'string' && body.id.trim() ? body.id.trim() : `cashflow_${crypto.randomUUID()}`;
+    await db.prepare(`INSERT INTO investment_cashflows (id, user_id, type, amount_vnd, occurred_at, note)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(id, userId, type, amountVnd, occurredAt, note || null).run();
+    return c.json({ success: true, id, ...(await getPortfolioXirr(db, userId)) });
+  } catch (err: any) {
+    if (/UNIQUE constraint failed: investment_cashflows\.id/i.test(String(err?.message || err))) {
+      return c.json({ error: 'Dòng tiền đã tồn tại', code: 'CASHFLOW_ID_CONFLICT' }, 409);
+    }
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.put('/api/investment-cashflows/completeness', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  try {
+    const body = await c.req.json();
+    if (body.completeFrom === null) {
+      await db.prepare('DELETE FROM investment_cashflow_settings WHERE user_id = ?').bind(userId).run();
+      return c.json({ success: true, ...(await getPortfolioXirr(db, userId)) });
+    }
+    const completeFrom = typeof body.completeFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.completeFrom)
+      ? parseExternalCashflowDate(body.completeFrom)?.slice(0, 10) || null
+      : null;
+    if (!completeFrom) return c.json({ error: 'completeFrom phải là ngày hợp lệ dạng YYYY-MM-DD hoặc null', code: 'INVALID_COMPLETENESS_DATE' }, 400);
+    if (completeFrom > new Date().toISOString().slice(0, 10)) {
+      return c.json({ error: 'Mốc lịch sử đầy đủ không được ở tương lai', code: 'INVALID_COMPLETENESS_DATE' }, 400);
+    }
+    const earlier = await db.prepare('SELECT id FROM investment_cashflows WHERE user_id = ? AND substr(occurred_at, 1, 10) < ? LIMIT 1')
+      .bind(userId, completeFrom).first<any>();
+    if (earlier) return c.json({ error: 'Đã có dòng tiền trước mốc được xác nhận; hãy sửa mốc hoặc xóa/sửa dòng tiền', code: 'FLOW_BEFORE_COMPLETE_FROM' }, 400);
+    await db.prepare(`INSERT INTO investment_cashflow_settings (user_id, complete_from, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id) DO UPDATE SET complete_from = excluded.complete_from, updated_at = CURRENT_TIMESTAMP`)
+      .bind(userId, completeFrom).run();
+    return c.json({ success: true, ...(await getPortfolioXirr(db, userId)) });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.delete('/api/investment-cashflows/:id', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  try {
+    const id = c.req.param('id');
+    const result = await db.prepare('DELETE FROM investment_cashflows WHERE id = ? AND user_id = ?').bind(id, userId).run();
+    if (!result.meta?.changes) return c.json({ error: 'Không tìm thấy dòng tiền', code: 'CASHFLOW_NOT_FOUND' }, 404);
+    return c.json({ success: true, ...(await getPortfolioXirr(db, userId)) });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.post('/api/investment-transactions', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  try {
+    const body = await c.req.json();
+    const operationId = body.operationId || c.req.header('X-Operation-Id') || `op_inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const type = String(body.type || 'buy'); // 'buy', 'sell', 'dividend', 'interest', 'fee', 'tax'
+    if (!['buy', 'sell', 'dividend', 'interest', 'fee', 'tax'].includes(type)) {
+      return c.json({ error: 'Loại giao dịch đầu tư không hợp lệ', code: 'INVALID_INV_TYPE' }, 400);
     }
 
-    if (body.clearNotifications || body.scope === 'all') {
-      await db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId).run();
+    const symbol = String(body.symbol || '').toUpperCase().trim();
+    let assetId = body.assetId;
+    if (!assetId && symbol) {
+      const asset = await db.prepare('SELECT id FROM assets WHERE symbol = ?').bind(symbol).first<{ id: string }>();
+      if (asset) {
+        assetId = asset.id;
+      } else {
+        assetId = `asset_${symbol.toLowerCase()}_${Date.now()}`;
+        await db
+          .prepare(
+            `INSERT INTO assets (id, symbol, name, asset_class, unit, quote_unit, current_price, price_as_of)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          )
+          .bind(
+            assetId,
+            symbol,
+            body.assetName || symbol,
+            body.assetClass || 'stock',
+            body.unit || 'share',
+            body.unit || 'share',
+            Number(body.unitPrice || 0)
+          )
+          .run();
+      }
+    }
+
+    if (!assetId) {
+      return c.json({ error: 'Thiếu thông tin tài sản đầu tư (assetId hoặc symbol)', code: 'MISSING_ASSET' }, 400);
+    }
+
+    const quantity = Number(body.quantity || 0);
+    const unitPrice = Number(body.unitPrice || 0);
+    const fee = Math.round(Number(body.fee || 0));
+    const tax = Math.round(Number(body.tax || 0));
+    const occurredAt = body.occurredAt ? new Date(body.occurredAt).toISOString() : new Date().toISOString();
+
+    let totalAmountVnd = body.totalAmountVnd !== undefined ? Math.round(Number(body.totalAmountVnd)) : 0;
+    if (!totalAmountVnd) {
+      if (type === 'buy') {
+        totalAmountVnd = Math.round(quantity * unitPrice) + fee + tax;
+      } else if (type === 'sell') {
+        totalAmountVnd = Math.round(quantity * unitPrice) - fee - tax;
+      } else {
+        totalAmountVnd = Math.round(Number(body.amount || 0));
+      }
+    }
+
+    const existingHolding = await db
+      .prepare('SELECT * FROM holdings WHERE user_id = ? AND asset_id = ? LIMIT 1')
+      .bind(userId, assetId)
+      .first<any>();
+
+    const stmts: D1PreparedStatement[] = [];
+    const invTxId = body.id || `invtx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    if (type === 'buy') {
+      const oldQty = Number(existingHolding?.quantity || 0);
+      const oldAvg = Number(existingHolding?.avg_cost || 0);
+      const newQty = oldQty + quantity;
+      const newAvg = newQty > 0 ? (oldQty * oldAvg + totalAmountVnd) / newQty : unitPrice;
+
+      if (existingHolding) {
+        stmts.push(
+          db
+            .prepare('UPDATE holdings SET quantity = ?, avg_cost = ?, revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+            .bind(newQty, newAvg, existingHolding.id)
+        );
+      } else {
+        stmts.push(
+          db
+            .prepare('INSERT INTO holdings (id, user_id, asset_id, quantity, avg_cost, revision) VALUES (?, ?, ?, ?, ?, 1)')
+            .bind(`hold_${Date.now()}`, userId, assetId, newQty, newAvg)
+        );
+      }
+    } else if (type === 'sell') {
+      const oldQty = Number(existingHolding?.quantity || 0);
+      if (quantity > oldQty + 1e-9) {
+        return c.json({ error: 'Số lượng bán vượt quá số lượng đang nắm giữ', code: 'INSUFFICIENT_HOLDING_QTY' }, 400);
+      }
+      const remainingQty = Math.max(0, Number((oldQty - quantity).toFixed(8)));
+      if (existingHolding) {
+        stmts.push(
+          db
+            .prepare('UPDATE holdings SET quantity = ?, revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+            .bind(remainingQty, existingHolding.id)
+        );
+      }
+    }
+
+    // Optional cash account deduction/credit ONLY if explicitly requested and not already linked to a bank notification
+    const accountId = body.accountId || null;
+    const deductAccountCash = Boolean(body.affectCashAccount) && accountId && !body.linkedTransactionId;
+    if (deductAccountCash) {
+      const cashDelta = type === 'buy' || type === 'fee' || type === 'tax' ? -Math.abs(totalAmountVnd) : Math.abs(totalAmountVnd);
+      stmts.push(...buildLedgerDeltaStatements(db, userId, accountId, cashDelta, `investment_${type}`, operationId, null));
+    }
+
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO investment_transactions (
+            id, user_id, asset_id, account_id, type, occurred_at,
+            quantity, unit_price, fee, tax, total_amount_vnd, linked_transaction_id, operation_id, note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          invTxId,
+          userId,
+          assetId,
+          accountId,
+          type,
+          occurredAt,
+          quantity,
+          unitPrice,
+          fee,
+          tax,
+          totalAmountVnd,
+          body.linkedTransactionId || null,
+          operationId,
+          body.note || null
+        )
+    );
+
+    await db.batch(stmts);
+    return c.json({ success: true, id: invTxId, totalAmountVnd });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Market Sync Prices (V2-18: SJC never overwritten by BTMC gold ring; stale state surfaced on failure!)
+async function syncMarketPrices(db: D1Database): Promise<{ updated: Record<string, number>; staleAssets: string[] }> {
+  const { results: assets } = await db.prepare('SELECT * FROM assets').all<any>();
+  if (!assets || assets.length === 0) return { updated: {}, staleAssets: [] };
+
+  const updated: Record<string, number> = {};
+  const staleAssets: string[] = [];
+  const nowIso = new Date().toISOString();
+
+  // 1. Gold prices (Separate SJC 9999 vs GOLD_RING / NHAN_TRON strictly!)
+  const goldAssets = assets.filter((a) => a.asset_class === 'gold');
+  for (const g of goldAssets) {
+    const sym = String(g.symbol || '').toUpperCase();
+    let fetchedPrice = 0;
+    let providerName = 'btmc';
+
+    try {
+      const res = await fetch('http://api.btmc.vn/api/BTMCAPI/getpricebtmc?key=3kd8ub1ll99t45h18hmn715p2v', {
+        headers: { Accept: 'application/json' }
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (sym.includes('SJC')) {
+          // Only match row containing SJC specifically
+          const sjcMatch = text.match(/SJC[\s\S]{0,200}?pb="(\d{6,9})"/i);
+          if (sjcMatch) {
+            const rawPrice = parseInt(sjcMatch[1], 10);
+            fetchedPrice = rawPrice < 20_000_000 ? rawPrice * 10 : rawPrice;
+          }
+        } else {
+          // Gold ring / Nhan tron
+          const ringMatch = text.match(/(?:Nhẫn tròn trơn|NHAN TRON|VRTL)[\s\S]{0,200}?pb="(\d{6,9})"/i);
+          if (ringMatch) {
+            const rawPrice = parseInt(ringMatch[1], 10);
+            fetchedPrice = rawPrice < 20_000_000 ? rawPrice * 10 : rawPrice;
+          }
+        }
+      }
+    } catch {
+      // External API unreachable
+    }
+
+    if (fetchedPrice > 0) {
+      await db
+        .prepare(
+          `UPDATE assets
+           SET current_price = ?, provider = ?, price_as_of = ?, sync_status = 'ok', updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+        .bind(fetchedPrice, providerName, nowIso, g.id)
+        .run();
+      updated[g.symbol] = fetchedPrice;
+    } else {
+      await db
+        .prepare(`UPDATE assets SET sync_status = 'stale' WHERE id = ?`)
+        .bind(g.id)
+        .run();
+      staleAssets.push(g.symbol);
     }
   }
 
-  if (body.scope === 'balances' || body.scope === 'all') {
-    // Cập nhật số dư về 0 và tăng revision
-    await db.prepare('UPDATE accounts SET balance = 0, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').bind(userId).run();
-    // Ghi nhận audit adjustment vào ledger_postings
-    const { results: accs } = await db.prepare('SELECT id, balance FROM accounts WHERE user_id = ?').bind(userId).all<{ id: string; balance: number }>();
-    if (accs && accs.length > 0) {
-      for (const a of accs) {
-        await db.prepare(
-          `INSERT INTO ledger_postings (id, user_id, operation_id, account_id, delta_vnd) VALUES (?, ?, ?, ?, ?)`
-        ).bind(`post_adj_${Date.now()}_${a.id}`, userId, `reset_balance_${Date.now()}`, a.id, -a.balance).run();
+  // 2. Stocks (VNDirect)
+  const stockAssets = assets.filter((a) => a.asset_class === 'stock');
+  for (const s of stockAssets) {
+    let fetchedPrice = 0;
+    try {
+      const vndRes = await fetch(
+        `https://finfo-api.vndirect.com.vn/v4/stock_prices/?q=code:${s.symbol.toUpperCase()}~date:gte:2025-01-01&size=1&sort=date`
+      );
+      if (vndRes.ok) {
+        const vndData: any = await vndRes.json();
+        if (vndData?.data?.length > 0) {
+          const closePrice = Number(vndData.data[0].close);
+          fetchedPrice = closePrice < 1000 ? Math.round(closePrice * 1000) : Math.round(closePrice);
+        }
+      }
+    } catch {
+      // Ignore network failure
+    }
+
+    if (fetchedPrice > 0) {
+      await db
+        .prepare(
+          `UPDATE assets
+           SET current_price = ?, provider = 'vndirect', price_as_of = ?, sync_status = 'ok', updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        )
+        .bind(fetchedPrice, nowIso, s.id)
+        .run();
+      updated[s.symbol] = fetchedPrice;
+    } else {
+      await db.prepare(`UPDATE assets SET sync_status = 'stale' WHERE id = ?`).bind(s.id).run();
+      staleAssets.push(s.symbol);
+    }
+  }
+
+  // 3. Crypto (CoinGecko)
+  const cryptoAssets = assets.filter((a) => a.asset_class === 'crypto');
+  if (cryptoAssets.length > 0) {
+    const cgMap: Record<string, string> = {
+      BTC: 'bitcoin',
+      ETH: 'ethereum',
+      SOL: 'solana',
+      BNB: 'binancecoin',
+      USDT: 'tether',
+      XRP: 'ripple',
+      ADA: 'cardano',
+      DOGE: 'dogecoin',
+      TON: 'the-open-network'
+    };
+    for (const ca of cryptoAssets) {
+      const cgId = cgMap[ca.symbol.toUpperCase()] || ca.symbol.toLowerCase();
+      let fetchedPrice = 0;
+      try {
+        const cgRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=vnd`);
+        if (cgRes.ok) {
+          const cgData: any = await cgRes.json();
+          if (cgData?.[cgId]?.vnd) {
+            fetchedPrice = Number(cgData[cgId].vnd);
+          }
+        }
+      } catch {
+        // Ignore network failure
+      }
+
+      if (fetchedPrice > 0) {
+        await db
+          .prepare(
+            `UPDATE assets
+             SET current_price = ?, provider = 'coingecko', price_as_of = ?, sync_status = 'ok', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`
+          )
+          .bind(fetchedPrice, nowIso, ca.id)
+          .run();
+        updated[ca.symbol] = fetchedPrice;
+      } else {
+        await db.prepare(`UPDATE assets SET sync_status = 'stale' WHERE id = ?`).bind(ca.id).run();
+        staleAssets.push(ca.symbol);
       }
     }
   }
 
-  if (body.scope === 'holdings' || body.scope === 'all') {
-    // V2-09: Chỉ xóa danh mục sở hữu holdings thuộc user, KHÔNG xóa bảng assets chung
-    await db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId).run();
-  }
+  return { updated, staleAssets };
+}
 
-  if (body.scope === 'income' || body.scope === 'all') {
-    // V2-09: Chỉ xóa nguồn thu, TUYỆT ĐỐI KHÔNG tự ý reset monthly_limit của các hũ chi tiêu!
-    await db.prepare('DELETE FROM income_sources WHERE user_id = ?').bind(userId).run();
+app.post('/api/market/sync-prices', async (c) => {
+  const db = c.env.DB;
+  try {
+    const { updated, staleAssets } = await syncMarketPrices(db);
+    return c.json({
+      success: true,
+      updated,
+      staleAssets,
+      stale: staleAssets.length > 0,
+      syncedAt: new Date().toISOString()
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
-
-  if (body.scope === 'planned_expenses' || body.scope === 'all') {
-    await db.prepare('DELETE FROM planned_expenses WHERE user_id = ?').bind(userId).run();
-  }
-
-  return c.json({
-    success: true,
-    message: 'Đã thiết lập lại dữ liệu thành công',
-    scope: body.scope
-  });
 });
 
-// Tải trực tiếp file APK có hỗ trợ CORS và báo Content-Length cho thanh tiến trình %
-app.get('/api/download-apk', async (c) => {
-  const apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.3.0/qltc-v1.3.0.apk';
-  const response = await fetch(apkUrl, {
-    redirect: 'follow',
-    headers: {
-      'User-Agent': 'QLTC-Updater/1.3.0'
-    }
-  });
+// ============================================================================
+// RESET / ARCHIVE & FULL BACKUP / RESTORE ENDPOINTS (V2-09, V2-26)
+// ============================================================================
 
-  if (!response.ok) {
-    return c.text('Không thể tải file APK từ GitHub', 502);
+app.post('/api/reset', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  let replayInput: { operationId: string; body: any } | undefined;
+
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    let targets: string[] = Array.isArray(body.targets) ? body.targets : [];
+    if (targets.length === 0 && typeof body.scope === 'string') {
+      const scope = body.scope;
+      if (scope === 'transactions') targets = ['transactions'];
+      else if (scope === 'balances') targets = ['balances'];
+      else if (scope === 'holdings') targets = ['investments'];
+      else if (scope === 'income') targets = ['income'];
+      else if (scope === 'all') targets = ['transactions', 'balances', 'budgets', 'investments'];
+    }
+    const previewOnly = Boolean(body.preview);
+    const mode = body.mode || 'revert_and_delete'; // 'hide_history' | 'revert_and_delete'
+    const operationId = body.operationId || c.req.header('X-Operation-Id') || `op_reset_${Date.now()}`;
+    if (!previewOnly) replayInput = { operationId, body };
+
+    const receiptCheck = await getMutationReceipt(db, operationId, userId, 'POST /api/reset', body);
+    if (receiptCheck.conflict) {
+      return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+    }
+    if (!previewOnly && receiptCheck.cachedResponse) {
+      return c.json(receiptCheck.cachedResponse, (receiptCheck.statusCode || 200) as any);
+    }
+
+    // Read current state BEFORE building any mutation statements (fixes V2-09 bug where UPDATE ran before SELECT!)
+    const { results: currentAccounts } = await db
+      .prepare('SELECT id, name, balance, revision FROM accounts WHERE user_id = ?')
+      .bind(userId)
+      .all<{ id: string; name: string; balance: number; revision: number }>();
+
+    const { results: activeTxs } = await db
+      .prepare('SELECT * FROM transactions WHERE user_id = ? AND deleted_at IS NULL')
+      .bind(userId)
+      .all<any>();
+
+    const { results: holdingsList } = await db
+      .prepare('SELECT * FROM holdings WHERE user_id = ?')
+      .bind(userId)
+      .all<any>();
+
+    const totalAccountBalance = (currentAccounts || []).reduce((s, a) => s + Number(a.balance || 0), 0);
+    const confirmedTxCount = (activeTxs || []).filter((t) => t.status === 'confirmed').length;
+    const pendingTxCount = (activeTxs || []).filter((t) => t.status === 'pending').length;
+
+    if (previewOnly) {
+      return c.json({
+        success: true,
+        preview: true,
+        targets,
+        mode,
+        summary: {
+          accountsCount: (currentAccounts || []).length,
+          totalAccountBalanceVnd: totalAccountBalance,
+          transactionsCount: (activeTxs || []).length,
+          confirmedTransactionsCount: confirmedTxCount,
+          pendingTransactionsCount: pendingTxCount,
+          holdingsCount: (holdingsList || []).length
+        }
+      });
+    }
+
+    const stmts: D1PreparedStatement[] = [];
+    const balanceAdjustments: Array<{ accountId: string; oldBalance: number; deltaVnd: number }> = [];
+
+    // 1. Transactions reset / hide_history
+    if (targets.includes('transactions')) {
+      if (mode === 'hide_history') {
+        // Mark this exact set of existing rows. Later backdated imports remain visible and ledger state is untouched.
+        stmts.push(
+          db.prepare('UPDATE transactions SET history_hidden = 1, revision = COALESCE(revision, 1) + 1 WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(history_hidden, 0) = 0').bind(userId),
+          db.prepare('UPDATE users SET history_hidden_at = CURRENT_TIMESTAMP WHERE id = ?').bind(userId)
+        );
+      } else {
+        // revert_and_delete: If balances are NOT simultaneously being zeroed out, revert confirmed transaction deltas
+        if (!targets.includes('balances') && !targets.includes('accounts')) {
+          for (const tx of activeTxs || []) {
+            if (tx.status === 'confirmed') {
+              const oldState: LedgerTxState = {
+                status: tx.status,
+                type: tx.type,
+                amount: Number(tx.amount),
+                accountId: tx.account_id,
+                toAccountId: tx.to_account_id
+              };
+              for (const accId of new Set([tx.account_id, tx.to_account_id].filter(Boolean))) {
+                const delta = calculateBalanceDelta(oldState, null, accId);
+                if (delta !== 0) {
+                  stmts.push(
+                    ...buildLedgerDeltaStatements(db, userId, accId, delta, 'reset_revert_tx', operationId, tx.id)
+                  );
+                }
+              }
+            }
+          }
+        }
+        stmts.push(
+          db
+            .prepare(
+              `UPDATE transactions
+               SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP, revision = COALESCE(revision, 1) + 1
+               WHERE user_id = ? AND deleted_at IS NULL`
+            )
+            .bind(userId)
+        );
+        stmts.push(
+          db
+            .prepare(`UPDATE raw_notifications SET parse_status = 'ignored' WHERE user_id = ?`)
+            .bind(userId)
+        );
+      }
+    }
+
+    // 2. Zero out account balances with exact ledger adjustment postings from pre-update balance (V2-09 / AT2-05!)
+    if (targets.includes('balances') && !targets.includes('accounts')) {
+      for (const acc of currentAccounts || []) {
+        const oldBal = Number(acc.balance || 0);
+        const deltaVnd = -oldBal;
+        balanceAdjustments.push({ accountId: acc.id, oldBalance: oldBal, deltaVnd });
+        if (deltaVnd !== 0) {
+          const postId = `post_rst_${acc.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          stmts.push(
+            db
+              .prepare(
+                `INSERT INTO ledger_postings (id, user_id, account_id, transaction_id, operation_id, delta_vnd, reason)
+                 VALUES (?, ?, ?, NULL, ?, ?, 'reset_adjustment')`
+              )
+              .bind(postId, userId, acc.id, operationId, deltaVnd)
+          );
+        }
+        stmts.push(
+          db
+            .prepare('UPDATE accounts SET balance = 0, revision = COALESCE(revision, 1) + 1 WHERE id = ? AND user_id = ?')
+            .bind(acc.id, userId)
+        );
+      }
+    }
+
+    // 3. Archive/Reset Accounts
+    if (targets.includes('accounts')) {
+      for (const acc of currentAccounts || []) {
+        const oldBal = Number(acc.balance || 0);
+        const deltaVnd = -oldBal;
+        if (deltaVnd !== 0) {
+          const postId = `post_rst_acc_${acc.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          stmts.push(
+            db
+              .prepare(
+                `INSERT INTO ledger_postings (id, user_id, account_id, transaction_id, operation_id, delta_vnd, reason)
+                 VALUES (?, ?, ?, NULL, ?, ?, 'reset_adjustment')`
+              )
+              .bind(postId, userId, acc.id, operationId, deltaVnd)
+          );
+        }
+        stmts.push(
+          db
+            .prepare(
+              'UPDATE accounts SET balance = 0, is_active = 0, archived_at = CURRENT_TIMESTAMP, revision = COALESCE(revision, 1) + 1 WHERE id = ? AND user_id = ?'
+            )
+            .bind(acc.id, userId)
+        );
+      }
+    }
+
+    // 4. Jars & Rules
+    if (targets.includes('jars')) {
+      stmts.push(db.prepare('DELETE FROM rules WHERE user_id = ?').bind(userId));
+      stmts.push(db.prepare('DELETE FROM jars WHERE user_id = ?').bind(userId));
+    }
+
+    // 5. Budgets (Income Sources & Planned Expenses)
+    if (targets.includes('budgets')) {
+      stmts.push(db.prepare('DELETE FROM planned_expenses WHERE user_id = ?').bind(userId));
+      stmts.push(db.prepare('DELETE FROM income_sources WHERE user_id = ?').bind(userId));
+    }
+
+    // Income-only reset archives sources while retaining their transaction links and historical plan versions.
+    if (targets.includes('income')) {
+      const effectiveMonth = getCurrentVnMonth();
+      stmts.push(
+        db.prepare(`UPDATE plan_versions SET effective_to_month_exclusive = ?
+          WHERE user_id = ? AND entity_type = 'income_source' AND effective_to_month_exclusive IS NULL
+            AND effective_from_month < ?`).bind(effectiveMonth, userId, effectiveMonth),
+        db.prepare(`DELETE FROM plan_versions
+          WHERE user_id = ? AND entity_type = 'income_source' AND effective_from_month >= ?`).bind(userId, effectiveMonth),
+        db.prepare(`UPDATE income_sources SET is_active = 0, revision = COALESCE(revision, 1) + 1
+          WHERE user_id = ? AND COALESCE(is_active, 1) = 1`).bind(userId)
+      );
+    }
+
+    // 6. Investments
+    if (targets.includes('investments')) {
+      stmts.push(db.prepare('DELETE FROM investment_transactions WHERE user_id = ?').bind(userId));
+      stmts.push(db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId));
+      stmts.push(db.prepare('DELETE FROM investment_cashflows WHERE user_id = ?').bind(userId));
+      stmts.push(db.prepare('DELETE FROM investment_cashflow_settings WHERE user_id = ?').bind(userId));
+    }
+
+    const responsePayload = {
+      success: true,
+      resetTargets: targets,
+      mode,
+      operationId,
+      balanceAdjustments
+    };
+
+    const receiptStmt = buildMutationReceiptStatement(
+      db,
+      operationId,
+      userId,
+      'POST /api/reset',
+      receiptCheck.payloadHash,
+      200,
+      responsePayload
+    );
+    if (receiptStmt) stmts.unshift(receiptStmt);
+
+    if (stmts.length > 0) {
+      await db.batch(stmts);
+    }
+
+    return c.json(responsePayload);
+  } catch (err: any) {
+    if (replayInput) {
+      const replay = await getMutationReceipt(db, replayInput.operationId, userId, 'POST /api/reset', replayInput.body);
+      if (replay.conflict) return c.json({ error: 'Operation ID conflict with different payload', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+      if (replay.cachedResponse) return c.json(replay.cachedResponse, (replay.statusCode || 200) as any);
+    }
+    return c.json({ error: err.message }, 500);
   }
-
-  const contentLength = response.headers.get('content-length') || '5634252';
-
-  return new Response(response.body, {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': 'attachment; filename="qltc-v1.3.0.apk"',
-      'Content-Length': contentLength,
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Expose-Headers': 'Content-Length, Content-Disposition',
-      'Cache-Control': 'public, max-age=3600'
-    }
-  });
 });
 
-// Thông tin phiên bản & link cập nhật (v1.3.0 V2 Core)
-app.get('/api/version', (c) => {
-  return c.json({
-    version: '1.3.0',
-    versionCode: 21,
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.3.0/qltc-v1.3.0.apk',
-    directDownloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
-    releasePageUrl: 'https://github.com/DUCDT3006/qltc/releases/latest',
-    otaUpdated: true,
-    message: 'Nâng cấp toàn diện kiến trúc V2: Sổ cái delta bất biến, chống lặp idempotency, bảo vệ vàng SJC, phân bổ VND chính xác.'
-  });
+// V2-26: Full Backup Export & Restore with Schema Version & SHA-256 Checksum
+app.get('/api/backup/export', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const includeRawNotifications = c.req.query('includeRawNotifications') === '1';
+
+  try {
+    const [
+      accountsRes,
+      jarsRes,
+      incomeSourcesRes,
+      plannedExpensesRes,
+      planVersionsRes,
+      transactionsRes,
+      baselinesRes,
+      postingsRes,
+      assetsRes,
+      holdingsRes,
+      invTxsRes,
+      cashflowsRes,
+      cashflowSettingsRes,
+      rulesRes,
+      profileRes,
+      rawNotificationsRes
+    ] = await Promise.all([
+      db.prepare('SELECT * FROM accounts WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM jars WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM income_sources WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM planned_expenses WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM plan_versions WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM transactions WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM ledger_baselines WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM ledger_postings WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM assets').all<any>(),
+      db.prepare('SELECT * FROM holdings WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM investment_transactions WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM investment_cashflows WHERE user_id = ? ORDER BY occurred_at ASC, id ASC').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM investment_cashflow_settings WHERE user_id = ?').bind(userId).first<any>(),
+      db.prepare('SELECT * FROM rules WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT id, email, name, phone, avatar, created_at FROM users WHERE id = ?').bind(userId).first<any>(),
+      includeRawNotifications
+        ? db.prepare('SELECT * FROM raw_notifications WHERE user_id = ?').bind(userId).all<any>()
+        : Promise.resolve({ results: [] })
+    ]);
+
+    const data: any = {
+      profile: profileRes ? {
+        id: profileRes.id,
+        email: profileRes.email,
+        name: profileRes.name,
+        phone: profileRes.phone || '',
+        avatar: profileRes.avatar || '',
+        created_at: profileRes.created_at
+      } : null,
+      accounts: accountsRes.results || [],
+      jars: jarsRes.results || [],
+      income_sources: incomeSourcesRes.results || [],
+      planned_expenses: plannedExpensesRes.results || [],
+      plan_versions: planVersionsRes.results || [],
+      // Raw notification bodies are opt-in. Without them, remove dangling references only in this export copy.
+      transactions: (transactionsRes.results || []).map((tx: any) => ({
+        ...tx,
+        raw_notification_id: includeRawNotifications ? tx.raw_notification_id : null
+      })),
+      ledger_baselines: baselinesRes.results || [],
+      ledger_postings: postingsRes.results || [],
+      assets: assetsRes.results || [],
+      holdings: holdingsRes.results || [],
+      investment_transactions: invTxsRes.results || [],
+      investment_cashflows: cashflowsRes.results || [],
+      investment_cashflow_settings: cashflowSettingsRes || null,
+      rules: rulesRes.results || []
+    };
+    if (includeRawNotifications) data.raw_notifications = rawNotificationsRes.results || [];
+
+    const counts: Record<string, number> = {};
+    for (const [key, value] of Object.entries(data)) if (Array.isArray(value)) counts[key] = value.length;
+    const checksum = await hashPayload(data);
+
+    return c.json({
+      app: 'QLTC_CA_NHAN',
+      schemaVersion: 2,
+      exportedAt: new Date().toISOString(),
+      userId,
+      counts,
+      options: { rawNotificationsIncluded: includeRawNotifications },
+      checksum,
+      data
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.post('/api/backup/restore', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+
+  try {
+    const body = await c.req.json();
+    const dryRun = Boolean(body.dryRun);
+    const schemaVersion = Number(body.schemaVersion);
+    const data = body.data;
+
+    if (!data || typeof data !== 'object' || schemaVersion !== 2) {
+      return c.json({ error: 'File sao lưu không hợp lệ hoặc sai phiên bản schemaVersion (yêu cầu v2)', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+    if (typeof body.checksum !== 'string' || !/^[a-f0-9]{64}$/i.test(body.checksum)) {
+      return c.json({ error: 'File sao lưu thiếu checksum SHA-256 hợp lệ', code: 'CHECKSUM_REQUIRED' }, 400);
+    }
+
+    const computedChecksum = await hashPayload(data);
+    if (body.checksum.toLowerCase() !== computedChecksum) {
+      return c.json({ error: 'Checksum file sao lưu không khớp (dữ liệu đã bị hỏng hoặc chỉnh sửa)', code: 'CHECKSUM_MISMATCH' }, 400);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'raw_notifications') && !Array.isArray(data.raw_notifications)) {
+      return c.json({ error: 'Danh sách raw_notifications trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'investment_cashflows') && !Array.isArray(data.investment_cashflows)) {
+      return c.json({ error: 'Danh sách investment_cashflows trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'investment_cashflow_settings') && data.investment_cashflow_settings !== null &&
+        (!data.investment_cashflow_settings || typeof data.investment_cashflow_settings !== 'object')) {
+      return c.json({ error: 'investment_cashflow_settings trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+
+    const profile = data.profile && typeof data.profile === 'object' ? data.profile : null;
+    if (typeof profile?.email === 'string' && profile.email.trim()) {
+      const conflictingUser = await db
+        .prepare('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1')
+        .bind(profile.email.trim(), userId)
+        .first<any>();
+      if (conflictingUser) {
+        return c.json({ error: 'Email trong bản sao lưu đã thuộc tài khoản khác', code: 'PROFILE_EMAIL_CONFLICT' }, 400);
+      }
+    }
+
+    const hasRawNotifications = Array.isArray(data.raw_notifications);
+    if (!hasRawNotifications) {
+      // Legacy v2 backups did not contain notification rows. Preserve compatibility without restoring orphan refs.
+      for (const tx of Array.isArray(data.transactions) ? data.transactions : []) tx.raw_notification_id = null;
+    }
+
+    // Validate all portable references before either dry-run success or restore mutations.
+    const ids = (key: string) => new Set((Array.isArray(data[key]) ? data[key] : []).map((item: any) => item?.id).filter(Boolean));
+    const accountIds = ids('accounts');
+    const jarIds = ids('jars');
+    const incomeSourceIds = ids('income_sources');
+    const plannedExpenseIds = ids('planned_expenses');
+    const transactionIds = ids('transactions');
+    const assetIds = ids('assets');
+    const rawNotificationIds = ids('raw_notifications');
+    const cashflows = Array.isArray(data.investment_cashflows) ? data.investment_cashflows : [];
+    for (const flow of cashflows) {
+      const occurredAt = parseExternalCashflowDate(flow?.occurred_at ?? flow?.occurredAt);
+      if (!flow || (flow.type !== 'contribution' && flow.type !== 'withdrawal') ||
+          !Number.isSafeInteger(Number(flow.amount_vnd ?? flow.amountVnd)) || Number(flow.amount_vnd ?? flow.amountVnd) <= 0 || !occurredAt) {
+        return c.json({ error: 'Dòng tiền đầu tư ngoài trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
+    }
+    const cashflowSettings = data.investment_cashflow_settings || null;
+    if (cashflowSettings) {
+      const completeFrom = parseExternalCashflowDate(cashflowSettings.complete_from ?? cashflowSettings.completeFrom);
+      if (!completeFrom || completeFrom.slice(0, 10) > new Date().toISOString().slice(0, 10) || cashflows.some((flow: any) =>
+        String(flow.occurred_at ?? flow.occurredAt).slice(0, 10) < completeFrom.slice(0, 10))) {
+        return c.json({ error: 'Mốc lịch sử dòng tiền trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
+    }
+    let brokenReference: string | null = null;
+    const validateReference = (
+      rowType: string,
+      rowId: unknown,
+      field: string,
+      value: unknown,
+      allowedIds: Set<any>,
+      optional = false
+    ) => {
+      if (value === null || value === undefined) {
+        if (optional) return;
+      }
+      if (value === null || value === undefined || !allowedIds.has(value)) {
+        brokenReference = `${rowType} ${String(rowId ?? '(unknown)')} references missing ${field} (${String(value ?? 'null')})`;
+      }
+    };
+    const checkRows = (key: string, rowType: string, checks: Array<[string, Set<any>, boolean?]>) => {
+      for (const row of (Array.isArray(data[key]) ? data[key] : [])) {
+        for (const [field, allowedIds, optional] of checks) {
+          validateReference(rowType, row?.id, field, row?.[field], allowedIds, optional);
+          if (brokenReference) return;
+        }
+      }
+    };
+
+    checkRows('transactions', 'Transaction', [
+      ['account_id', accountIds],
+      ['to_account_id', accountIds, true],
+      ['jar_id', jarIds, true],
+      ['income_source_id', incomeSourceIds, true],
+      ['planned_expense_id', plannedExpenseIds, true],
+      ['raw_notification_id', rawNotificationIds, true],
+      ['original_account_id', accountIds, true],
+      ['original_jar_id', jarIds, true],
+      ['original_income_source_id', incomeSourceIds, true]
+    ]);
+    if (!brokenReference) checkRows('income_sources', 'Income source', [['account_id', accountIds, true]]);
+    if (!brokenReference) checkRows('planned_expenses', 'Planned expense', [['account_id', accountIds, true], ['jar_id', jarIds, true]]);
+    if (!brokenReference) checkRows('ledger_baselines', 'Ledger baseline', [['account_id', accountIds]]);
+    if (!brokenReference) checkRows('ledger_postings', 'Ledger posting', [['account_id', accountIds], ['transaction_id', transactionIds, true]]);
+    if (!brokenReference) checkRows('holdings', 'Holding', [['asset_id', assetIds], ['account_id', accountIds, true]]);
+    if (!brokenReference) checkRows('investment_transactions', 'Investment transaction', [['asset_id', assetIds], ['account_id', accountIds, true], ['linked_transaction_id', transactionIds, true]]);
+
+    if (!brokenReference) {
+      for (const pv of (Array.isArray(data.plan_versions) ? data.plan_versions : [])) {
+        const entityIds = pv?.entity_type === 'income_source' ? incomeSourceIds
+          : pv?.entity_type === 'planned_expense' ? plannedExpenseIds
+            : pv?.entity_type === 'jar' ? jarIds : null;
+        if (!entityIds || !entityIds.has(pv?.entity_id)) {
+          brokenReference = `Plan version ${String(pv?.id ?? '(unknown)')} references missing entity ${String(pv?.entity_type)}:${String(pv?.entity_id)}`;
+          break;
+        }
+      }
+    }
+
+    if (brokenReference) {
+      return c.json({ error: brokenReference, code: 'BROKEN_FOREIGN_KEY' }, 400);
+    }
+
+    if (dryRun) {
+      return c.json({
+        success: true,
+        dryRun: true,
+        valid: true,
+        checksum: computedChecksum
+      });
+    }
+
+    const stmts: D1PreparedStatement[] = [
+      db.prepare('DELETE FROM investment_cashflows WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM investment_cashflow_settings WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM investment_transactions WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM holdings WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM ledger_postings WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM ledger_baselines WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM transactions WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM plan_versions WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM planned_expenses WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM income_sources WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM rules WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM jars WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM accounts WHERE user_id = ?').bind(userId)
+    ];
+    if (hasRawNotifications) stmts.push(db.prepare('DELETE FROM raw_notifications WHERE user_id = ?').bind(userId));
+    if (profile) {
+      const currentUser = await db.prepare('SELECT email, name, phone, avatar FROM users WHERE id = ?').bind(userId).first<any>();
+      if (currentUser) {
+        stmts.push(db.prepare('UPDATE users SET email = ?, name = ?, phone = ?, avatar = ? WHERE id = ?').bind(
+          typeof profile.email === 'string' && profile.email.trim() ? profile.email.trim() : currentUser.email,
+          Object.prototype.hasOwnProperty.call(profile, 'name') ? profile.name : currentUser.name,
+          Object.prototype.hasOwnProperty.call(profile, 'phone') ? profile.phone : currentUser.phone,
+          Object.prototype.hasOwnProperty.call(profile, 'avatar') ? profile.avatar : currentUser.avatar,
+          userId
+        ));
+      }
+    }
+
+    for (const a of data.accounts || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO accounts (
+              id, user_id, name, type, currency, balance, account_number_mask, account_number,
+              bank_code, bank_name, account_holder, branch, aliases_json, include_in_net_worth, is_active, archived_at, revision, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            a.id,
+            userId,
+            a.name,
+            a.type || 'bank',
+            a.currency || 'VND',
+            Number(a.balance || 0),
+            a.account_number_mask || null,
+            a.account_number || null,
+            a.bank_code || null,
+            a.bank_name || null,
+            a.account_holder || null,
+            a.branch || null,
+            a.aliases_json || null,
+            a.include_in_net_worth ?? 1,
+            a.is_active ?? 1,
+            a.archived_at || null,
+            Number(a.revision || 1),
+            a.created_at || new Date().toISOString()
+          )
+      );
+    }
+
+    for (const j of data.jars || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO jars (id, user_id, name, icon, color, target_percent, monthly_limit, rollover_enabled, is_active, revision, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            j.id,
+            userId,
+            j.name,
+            j.icon || 'home',
+            j.color || '#3B82F6',
+            Number(j.target_percent || 0),
+            Number(j.monthly_limit || 0),
+            j.rollover_enabled ? 1 : 0,
+            j.is_active ?? 1,
+            Number(j.revision || 1),
+            Number(j.sort_order || 0)
+          )
+      );
+    }
+
+    for (const s of data.income_sources || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO income_sources (id, user_id, name, expected_amount, cadence, one_time_date, expected_day, account_id, icon, color, is_active, revision)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            s.id,
+            userId,
+            s.name,
+            Number(s.expected_amount || 0),
+            s.cadence || 'monthly',
+            s.one_time_date || null,
+            s.expected_day || 1,
+            s.account_id || null,
+            s.icon || 'payments',
+            s.color || '#10B981',
+            s.is_active ?? 1,
+            Number(s.revision || 1)
+          )
+      );
+    }
+
+    for (const p of data.planned_expenses || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO planned_expenses (id, user_id, name, expected_amount, cadence, one_time_date, due_day, jar_id, account_id, is_active, revision)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            p.id,
+            userId,
+            p.name,
+            Number(p.expected_amount || 0),
+            p.cadence || 'monthly',
+            p.one_time_date || null,
+            p.due_day || 1,
+            p.jar_id || null,
+            p.account_id || null,
+            p.is_active ?? 1,
+            Number(p.revision || 1)
+          )
+      );
+    }
+
+    for (const pv of data.plan_versions || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO plan_versions (id, user_id, entity_type, entity_id, effective_from_month, effective_to_month_exclusive, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            pv.id,
+            userId,
+            pv.entity_type,
+            pv.entity_id,
+            pv.effective_from_month,
+            pv.effective_to_month_exclusive || null,
+            pv.payload_json
+          )
+      );
+    }
+
+    for (const rn of data.raw_notifications || []) {
+      stmts.push(
+        db.prepare(
+          `INSERT INTO raw_notifications (
+            id, user_id, device_id, event_id, app_package, title, text, received_at,
+            original_time_value, time_source, parse_status, parse_error, raw_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          rn.id,
+          userId,
+          rn.device_id || null,
+          rn.event_id || null,
+          rn.app_package,
+          rn.title || null,
+          rn.text,
+          rn.received_at || new Date().toISOString(),
+          rn.original_time_value || null,
+          rn.time_source || 'notification',
+          rn.parse_status || 'pending',
+          rn.parse_error || null,
+          rn.raw_json || null
+        )
+      );
+    }
+
+    for (const tx of data.transactions || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO transactions (
+              id, user_id, occurred_at, time_source, type, amount, currency, account_id, to_account_id,
+              jar_id, income_source_id, planned_expense_id, status, needs_account_review, source,
+              description, counterparty, raw_notification_id, dedupe_hash, transfer_pair_id,
+              suggested_pair_id, is_synthetic, original_type, original_account_id, original_jar_id,
+              original_income_source_id, original_description, original_status, history_hidden, revision, deleted_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            tx.id,
+            userId,
+            tx.occurred_at,
+            tx.time_source || 'user_input',
+            tx.type,
+            Number(tx.amount || 0),
+            tx.currency || 'VND',
+            tx.account_id,
+            tx.to_account_id || null,
+            tx.jar_id || null,
+            tx.income_source_id || null,
+            tx.planned_expense_id || null,
+            tx.status || 'pending',
+            tx.needs_account_review ? 1 : 0,
+            tx.source || 'manual',
+            tx.description || null,
+            tx.counterparty || null,
+            tx.raw_notification_id || null,
+            tx.dedupe_hash || null,
+            tx.transfer_pair_id || null,
+            tx.suggested_pair_id || null,
+            tx.is_synthetic ? 1 : 0,
+            tx.original_type || null,
+            tx.original_account_id || null,
+            tx.original_jar_id || null,
+            tx.original_income_source_id || null,
+            tx.original_description || null,
+            tx.original_status || null,
+            tx.history_hidden ? 1 : 0,
+            Number(tx.revision || 1),
+            tx.deleted_at || null,
+            tx.created_at || new Date().toISOString()
+          )
+      );
+    }
+
+    for (const b of data.ledger_baselines || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO ledger_baselines (account_id, user_id, baseline_amount_vnd, baseline_at, note)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .bind(b.account_id, userId, Number(b.baseline_amount_vnd || 0), b.baseline_at || new Date().toISOString(), b.note || null)
+      );
+    }
+
+    for (const lp of data.ledger_postings || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO ledger_postings (id, user_id, account_id, transaction_id, operation_id, delta_vnd, reason, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            lp.id,
+            userId,
+            lp.account_id,
+            lp.transaction_id || null,
+            lp.operation_id || `op_restored_${lp.id}`,
+            Number(lp.delta_vnd || 0),
+            lp.reason || 'restored',
+            lp.created_at || new Date().toISOString()
+          )
+      );
+    }
+
+    for (const ast of data.assets || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT OR REPLACE INTO assets (id, symbol, name, asset_class, unit, quote_unit, provider, currency, current_price, price_as_of, sync_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            ast.id,
+            ast.symbol,
+            ast.name,
+            ast.asset_class,
+            ast.unit,
+            ast.quote_unit || ast.unit,
+            ast.provider || null,
+            ast.currency || 'VND',
+            Number(ast.current_price || 0),
+            ast.price_as_of || null,
+            ast.sync_status || 'ok'
+          )
+      );
+    }
+
+    for (const h of data.holdings || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO holdings (id, user_id, asset_id, account_id, quantity, holding_unit, avg_cost, note, revision)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            h.id,
+            userId,
+            h.asset_id,
+            h.account_id || null,
+            Number(h.quantity || 0),
+            h.holding_unit || null,
+            Number(h.avg_cost || 0),
+            h.note || null,
+            Number(h.revision || 1)
+          )
+      );
+    }
+
+    for (const it of data.investment_transactions || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO investment_transactions (
+              id, user_id, asset_id, account_id, type, occurred_at, quantity, unit_price, fee, tax, total_amount_vnd, linked_transaction_id, operation_id, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            it.id,
+            userId,
+            it.asset_id,
+            it.account_id || null,
+            it.type,
+            it.occurred_at,
+            Number(it.quantity || 0),
+            Number(it.unit_price || 0),
+            Number(it.fee || 0),
+            Number(it.tax || 0),
+            Number(it.total_amount_vnd || 0),
+            it.linked_transaction_id || null,
+            it.operation_id || null,
+            it.note || null
+          )
+      );
+    }
+
+    for (const flow of cashflows) {
+      const amountVnd = Number(flow.amount_vnd ?? flow.amountVnd);
+      const occurredAt = parseExternalCashflowDate(flow.occurred_at ?? flow.occurredAt)!;
+      stmts.push(db.prepare(`INSERT INTO investment_cashflows (id, user_id, type, amount_vnd, occurred_at, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(flow.id || `cashflow_${crypto.randomUUID()}`, userId, flow.type, amountVnd, occurredAt, flow.note || null,
+          flow.created_at || flow.createdAt || new Date().toISOString()));
+    }
+    if (cashflowSettings) {
+      const completeFrom = parseExternalCashflowDate(cashflowSettings.complete_from ?? cashflowSettings.completeFrom)!.slice(0, 10);
+      stmts.push(db.prepare(`INSERT INTO investment_cashflow_settings (user_id, complete_from, updated_at) VALUES (?, ?, ?)`)
+        .bind(userId, completeFrom, cashflowSettings.updated_at || cashflowSettings.updatedAt || new Date().toISOString()));
+    }
+
+    for (const r of data.rules || []) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO rules (id, user_id, priority, match_field, match_type, pattern, action_type, target_id, confidence, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            r.id,
+            userId,
+            Number(r.priority || 1),
+            r.match_field,
+            r.match_type,
+            r.pattern,
+            r.action_type,
+            r.target_id || null,
+            Number(r.confidence || 1),
+            r.is_active ?? 1
+          )
+      );
+    }
+
+    await db.batch(stmts);
+    return c.json({
+      success: true,
+      restored: true,
+      checksum: computedChecksum
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message, code: 'RESTORE_FAILED' }, 500);
+  }
 });
 
 export default {
   fetch: app.fetch,
-  // Cron Trigger chạy tự động hàng ngày để cập nhật giá Quỹ Fmarket, Vàng, Bạc, Crypto
-  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
-    console.log('Chạy Cron cập nhật giá Fmarket & thị trường tự động...');
-    await syncAllMarketPrices(env.DB);
+  async scheduled(_event: any, env: Bindings, ctx: any) {
+    ctx.waitUntil(syncMarketPrices(env.DB));
   }
 };
+
+// ============================================================================
+// ADDITIONAL COMPATIBILITY ENDPOINTS FOR FRONTEND (JARS, PLANNED EXPENSES, PROFILE, NOTIFICATIONS, FMARKET)
+// ============================================================================
+
+app.get('/api/jars', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const { results } = await db
+    .prepare('SELECT * FROM jars WHERE user_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY sort_order ASC')
+    .bind(userId)
+    .all<any>();
+  return c.json({ jars: results || [] });
+});
+
+app.get('/api/planned-expenses', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const { results } = await db
+    .prepare(
+      `SELECT p.*, j.name as jar_name, j.color as jar_color
+       FROM planned_expenses p
+       LEFT JOIN jars j ON p.jar_id = j.id
+       WHERE p.user_id = ? AND COALESCE(p.is_active, 1) = 1
+       ORDER BY p.due_day ASC, p.created_at ASC`
+    )
+    .bind(userId)
+    .all<any>();
+  return c.json({ plannedExpenses: results || [] });
+});
+
+app.get('/api/notifications/recent', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const limit = Math.min(Number(c.req.query('limit') || 30), 200);
+  const { results } = await db
+    .prepare(
+      `SELECT id, device_id, event_id, app_package, title, text, received_at, original_time_value, time_source, parse_status, parse_error
+       FROM raw_notifications
+       WHERE user_id = ?
+       ORDER BY received_at DESC
+       LIMIT ?`
+    )
+    .bind(userId, limit)
+    .all<any>();
+  return c.json({ notifications: results || [] });
+});
+
+app.get('/api/user/profile', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const user = await db.prepare('SELECT id, email, name, phone, avatar, created_at FROM users WHERE id = ?').bind(userId).first<any>();
+  return c.json({ user: user || { id: userId, email: 'admin@qltc.local', name: 'Chủ tài khoản' } });
+});
+
+app.put('/api/user/profile', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  const userId = principal.userId;
+  const body = await c.req.json().catch(() => ({}));
+  await db
+    .prepare('UPDATE users SET name = COALESCE(?, name), email = COALESCE(?, email), phone = COALESCE(?, phone), avatar = COALESCE(?, avatar) WHERE id = ?')
+    .bind(body.name || null, body.email || null, body.phone ?? null, body.avatar ?? null, userId)
+    .run();
+  return c.json({ success: true });
+});
+
+app.get('/api/market/fmarket-funds', async (c) => {
+  try {
+    // FireAnt's documented Fmarket product list supplies product identity, NAV and NAV date.
+    const upstream = await fetch('https://api.fireant.vn/fmarket/markets/filter-products', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page: 0, page_size: 200 })
+    });
+    if (!upstream.ok) throw new Error(`Fmarket upstream HTTP ${upstream.status}`);
+    const payload: any = await upstream.json();
+    if (!Array.isArray(payload?.items)) throw new Error('Fmarket upstream response invalid');
+    const now = Date.now();
+    const funds = payload.items.flatMap((item: any) => {
+      const shortName = String(item.short_name || '').trim();
+      const nav = Number(item.nav);
+      const navDate = String(item.nav_date || '').trim();
+      const updatedAt = Date.parse(navDate);
+      if (!shortName || !Number.isFinite(nav) || nav <= 0 || !Number.isFinite(updatedAt)) return [];
+      return [{
+        shortName,
+        name: String(item.name || shortName),
+        nav,
+        navDate,
+        updatedAt,
+        issuer: item.issuer_info?.name || null,
+        stale: now - updatedAt > 7 * 24 * 60 * 60 * 1000
+      }];
+    });
+    return c.json({ funds, source: 'FireAnt Fmarket', stale: funds.length === 0 || funds.every((fund: any) => fund.stale), fetchedAt: new Date(now).toISOString() });
+  } catch {
+    return c.json({ funds: [], source: 'FireAnt Fmarket', stale: true, error: 'NAV hiện không khả dụng' }, 503);
+  }
+});
+
+app.post('/api/seed', async (c) => {
+  const db = c.env.DB;
+  const principal = c.get('principal');
+  if (!isAuthorizedRole(principal, ['owner'])) {
+    return c.json({ error: 'Chỉ chủ tài khoản được tạo dữ liệu mẫu', code: 'FORBIDDEN' }, 403);
+  }
+
+  const [accounts, jars, rules] = await Promise.all([
+    db.prepare('SELECT COUNT(*) AS count FROM accounts WHERE user_id = ?').bind(principal.userId).first<any>(),
+    db.prepare('SELECT COUNT(*) AS count FROM jars WHERE user_id = ?').bind(principal.userId).first<any>(),
+    db.prepare('SELECT COUNT(*) AS count FROM rules WHERE user_id = ?').bind(principal.userId).first<any>()
+  ]);
+  if (Number(accounts?.count || 0) || Number(jars?.count || 0) || Number(rules?.count || 0)) {
+    return c.json({ error: 'Tài khoản đã có dữ liệu; không ghi đè bằng dữ liệu mẫu', code: 'SEED_REQUIRES_EMPTY_PROFILE' }, 409);
+  }
+
+  const prefix = principal.userId === 'user_default' ? '' : `${principal.userId}_`;
+  const idMap = new Map<string, string>();
+  for (const item of [...BUNDLED_DEFAULTS.accounts, ...BUNDLED_DEFAULTS.jars, ...BUNDLED_DEFAULTS.rules]) {
+    idMap.set(item.id, `${prefix}${item.id}`);
+  }
+  const stmts: D1PreparedStatement[] = [];
+  for (const jar of BUNDLED_DEFAULTS.jars) {
+    stmts.push(db.prepare(`INSERT INTO jars (id, user_id, name, icon, color, target_percent, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(idMap.get(jar.id), principal.userId, jar.name, jar.icon, jar.color, jar.target_percent, jar.sort_order));
+  }
+  for (const account of BUNDLED_DEFAULTS.accounts) {
+    stmts.push(db.prepare(`INSERT INTO accounts (id, user_id, name, type, balance, account_number_mask, include_in_net_worth, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 1, 1)`).bind(idMap.get(account.id), principal.userId, account.name, account.type, account.balance, account.mask));
+    stmts.push(db.prepare(`INSERT INTO ledger_baselines (account_id, user_id, baseline_amount_vnd, note)
+      VALUES (?, ?, ?, 'Initial explicit sample seed')`).bind(idMap.get(account.id), principal.userId, account.balance));
+  }
+  for (const rule of BUNDLED_DEFAULTS.rules) {
+    const targetId = rule.target.startsWith('jar_') ? idMap.get(rule.target) : rule.target;
+    stmts.push(db.prepare(`INSERT INTO rules (id, user_id, match_field, match_type, pattern, action_type, target_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(idMap.get(rule.id), principal.userId, rule.field, rule.type, rule.pattern, rule.action, targetId));
+  }
+  await db.batch(stmts);
+  return c.json({ success: true, seeded: true, warning: 'Đã tạo dữ liệu mẫu; số dư không phải dữ liệu ngân hàng thật.' });
+});

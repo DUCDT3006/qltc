@@ -3,9 +3,12 @@
   "name": "qltc-app",
   "main": "src/worker.ts",
   "compatibility_date": "2025-02-24",
+  "services": [
+    { "binding": "BACKEND", "service": "qltc-backend" }
+  ],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "run_worker_first": ["/", "/index.html", "/apk", "/download"]
+    "run_worker_first": ["/", "/index.html", "/apk", "/download", "/api/*"]
   }
 }

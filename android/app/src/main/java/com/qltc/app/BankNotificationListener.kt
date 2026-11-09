@@ -1,195 +1,356 @@
 package com.qltc.app
 
 import android.app.Notification
+import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
+import java.security.MessageDigest
+import kotlin.math.min
 
-class BankNotificationListener : NotificationListenerService() {
+private fun redactOtp(input: String): String = input.replace(
+    Regex("(?i)(OTP|mã xác thực|ma xac thuc|code|passcode)([^0-9]{0,15})(\\d{4,8})"),
+    "$1$2[REDACTED]"
+)
 
-    companion object {
-        private const val TAG = "QLTC_Notification"
+private fun computeDeterministicEventId(
+    pkg: String, notiId: Int, postTime: Long, title: String, body: String
+): String {
+    val raw = "$pkg|$notiId|$postTime|$title|$body"
+    val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+    val hex = digest.take(12).joinToString("") { "%02x".format(it) }
+    return "evt_$hex"
+}
 
-        // Danh sách các package ngân hàng, ví điện tử & ứng dụng SMS tại Việt Nam
-        val SUPPORTED_BANK_PACKAGES = setOf(
-            "com.VCB",                         // Vietcombank Digibank
-            "com.vcb.digibank",
-            "com.mbmobile",                     // MB Bank
-            "vn.com.techcombank.bb.app",        // Techcombank
-            "mobile.acb.com.vn",                // ACB ONE
-            "com.tpb.mb.gprsandroid",           // TPBank
-            "com.vnpay.vpbankonline",           // VPBank NEO
-            "com.vnpay.bidv",                   // BIDV SmartBanking
-            "com.vietinbank.ipay",              // VietinBank iPay
-            "com.msb.mb.gprsandroid",           // MSB mBank
-            "vn.shb.mbanking",                  // SHB Mobile
-            "com.vnpay.hdbank",                 // HDBank
-            "com.hdbank.mb",
-            "com.ocb.omni",                     // OCB OMNI
-            "vn.vib.vivid",                     // VIB
-            "vn.com.sacombank.mbanking",        // Sacombank Pay
-            "vn.be.cake",                       // Cake by VPBank
-            "timo.vn.bank",                     // Timo
-            "vn.com.vng.zalopay",               // ZaloPay (loại bỏ com.zing.zalo để tránh cuộc gọi/chat riêng)
-            "com.mservice.momotransfer",        // MoMo
-            "com.viettel.viettelmoney",         // Viettel Money
-            "com.vnpay.bill",                   // VNPAY
-            "com.google.android.apps.messaging",// SMS Google
-            "com.samsung.android.messaging",    // SMS Samsung
-            "com.android.mms"                   // SMS Xiaomi / OPPO / Vivo
+/**
+ * Persistent SQLite Outbox for Bank Notifications (V2-06).
+ * Guarantees every bank notification is durably persisted to disk BEFORE network transmission,
+ * survives process death / reboot, migrates legacy SharedPreferences queue once,
+ * and distinguishes retryable (429/5xx/network) vs auth-paused (401/403) vs permanent (400) errors.
+ */
+class NotificationOutboxDb(context: Context) :
+    SQLiteOpenHelper(context, "qltc_notification_outbox.db", null, 2) {
+
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                event_id TEXT PRIMARY KEY,
+                package_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                text TEXT NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at INTEGER NOT NULL
+            )
+            """.trimIndent()
         )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_outbox_status_retry ON notification_outbox(status, next_retry_at)")
     }
 
-    override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        super.onNotificationPosted(sbn)
-        if (sbn == null) return
-
-        val packageName = sbn.packageName ?: return
-
-        // 1. Chỉ lọc các app nằm trong danh sách ngân hàng / SMS
-        if (!SUPPORTED_BANK_PACKAGES.contains(packageName)) {
-            return
-        }
-
-        val extras = sbn.notification?.extras ?: return
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
-
-        val fullBody = if (bigText.isNotBlank()) bigText else text
-        if (fullBody.isBlank() && title.isBlank()) return
-
-        val combined = "$title $fullBody"
-
-        // 2. Tuyệt đối lọc bỏ mã OTP / mã xác thực để đảm bảo an toàn tuyệt đối
-        if (combined.contains("OTP", ignoreCase = true) ||
-            combined.contains("mã xác nhận", ignoreCase = true) ||
-            combined.contains("ma xac thuc", ignoreCase = true) ||
-            combined.contains("mã kích hoạt", ignoreCase = true)) {
-            Log.d(TAG, "Đã bỏ qua thông báo OTP vì lý do bảo mật.")
-            return
-        }
-
-        // 3. Nhận diện dấu hiệu số tiền (+, -, Unicode minus −, VND, VNĐ, số + đ) ở cả Title lẫn Body
-        val hasMoneySign = combined.contains("+") || combined.contains("-") || combined.contains("−") ||
-                           combined.contains("VND", ignoreCase = true) ||
-                           combined.contains("VNĐ", ignoreCase = true) ||
-                           Regex("""\d+\s*[đd]""").containsMatchIn(combined)
-
-        if (!hasMoneySign) {
-            return
-        }
-
-        Log.i(TAG, "Phát hiện biến động số dư từ $packageName: $title - $fullBody")
-
-        // 4. Gửi lên Cloudflare Worker backend kèm thời gian thực tế xảy ra thông báo và eventId duy nhất (V2-04, V2-06)
-        val postTime = sbn.postTime
-        val eventId = java.util.UUID.randomUUID().toString()
-        sendToBackend(packageName, title, fullBody, postTime, eventId)
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        onCreate(db)
     }
 
-    private fun sendToBackend(
+    @Synchronized
+    fun enqueue(
+        eventId: String,
         packageName: String,
         title: String,
         text: String,
-        postTime: Long = System.currentTimeMillis(),
-        eventId: String = java.util.UUID.randomUUID().toString()
-    ) {
-        val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
-        val backendUrl = prefs.getString("backend_url", "https://qltc-backend.dtd-store.workers.dev") ?: "https://qltc-backend.dtd-store.workers.dev"
+        occurredAt: Long
+    ): Boolean {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put("event_id", eventId)
+            put("package_name", packageName)
+            put("title", title)
+            put("text", text)
+            put("occurred_at", occurredAt)
+            put("status", "queued")
+            put("retry_count", 0)
+            put("next_retry_at", 0L)
+            put("created_at", System.currentTimeMillis())
+        }
+        val rowId = db.insertWithOnConflict(
+            "notification_outbox",
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+        return rowId != -1L
+    }
 
-        CoroutineScope(Dispatchers.IO).launch {
-            // Thử đẩy các thông báo offline tồn đọng trước đó (nếu có)
-            flushOfflineQueue(backendUrl, prefs)
-
-            val payload = JSONObject().apply {
-                put("eventId", eventId)
-                put("packageName", packageName)
-                put("title", title)
-                put("text", text)
-                put("occurredAt", postTime)
-                put("userId", prefs.getString("user_id", "user_default"))
+    @Synchronized
+    fun getDueItems(nowMs: Long, limit: Int = 25): List<OutboxItem> {
+        val db = readableDatabase
+        val list = mutableListOf<OutboxItem>()
+        val cursor = db.query(
+            "notification_outbox",
+            arrayOf("event_id", "package_name", "title", "text", "occurred_at", "status", "retry_count"),
+            "status IN ('queued', 'retry_scheduled') AND next_retry_at <= ?",
+            arrayOf(nowMs.toString()),
+            null,
+            null,
+            "occurred_at ASC",
+            limit.toString()
+        )
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                list.add(
+                    OutboxItem(
+                        eventId = c.getString(0),
+                        packageName = c.getString(1),
+                        title = c.getString(2),
+                        text = c.getString(3),
+                        occurredAt = c.getLong(4),
+                        status = c.getString(5),
+                        retryCount = c.getInt(6)
+                    )
+                )
             }
+        }
+        return list
+    }
 
-            val success = postJsonToBackend("$backendUrl/api/notifications/ingest", payload, prefs)
-            if (!success) {
-                // Nếu mất mạng hoặc gửi thất bại, lưu vào hàng đợi offline trong SharedPreferences (V2-06)
-                enqueueOfflineNotif(prefs, payload)
-            }
+    @Synchronized
+    fun markAckedAndDelete(eventId: String) {
+        writableDatabase.delete("notification_outbox", "event_id = ?", arrayOf(eventId))
+    }
+
+    @Synchronized
+    fun markRetry(eventId: String, currentRetryCount: Int, errorMsg: String, retryAfterMs: Long? = null) {
+        val nextCount = currentRetryCount + 1
+        // Exponential backoff: 5s, 15s, 45s, 120s, max 15m + jitter
+        val baseDelaySec = min(900L, 5L * (1L shl min(nextCount, 8)))
+        val jitterMs = (Math.random() * 2000).toLong()
+        val delayMs = maxOf(baseDelaySec * 1000L + jitterMs, retryAfterMs ?: 0L)
+        val nextRetryAt = System.currentTimeMillis() + delayMs
+
+        val values = ContentValues().apply {
+            put("status", "retry_scheduled")
+            put("retry_count", nextCount)
+            put("next_retry_at", nextRetryAt)
+            put("last_error", errorMsg.take(200))
+        }
+        writableDatabase.update("notification_outbox", values, "event_id = ?", arrayOf(eventId))
+    }
+
+    @Synchronized
+    fun markStatus(eventId: String, status: String, errorMsg: String) {
+        val values = ContentValues().apply {
+            put("status", status)
+            put("last_error", errorMsg.take(200))
+        }
+        writableDatabase.update("notification_outbox", values, "event_id = ?", arrayOf(eventId))
+    }
+
+    @Synchronized
+    fun resumeAuthPausedItems() {
+        val values = ContentValues().apply {
+            put("status", "queued")
+            put("next_retry_at", 0L)
+        }
+        writableDatabase.update("notification_outbox", values, "status = 'auth_paused'", null)
+    }
+
+    @Synchronized
+    fun pausePendingForAuth(errorMsg: String) {
+        val values = ContentValues().apply {
+            put("status", "auth_paused")
+            put("last_error", errorMsg.take(200))
+        }
+        writableDatabase.update(
+            "notification_outbox", values,
+            "status IN ('queued', 'retry_scheduled')", null
+        )
+    }
+
+    @Synchronized
+    fun nextPendingAt(): Long? {
+        readableDatabase.rawQuery(
+            "SELECT MIN(next_retry_at) FROM notification_outbox WHERE status IN ('queued', 'retry_scheduled')",
+            null
+        ).use { cursor ->
+            return if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
         }
     }
 
-    private fun postJsonToBackend(endpoint: String, payload: JSONObject, prefs: android.content.SharedPreferences): Boolean {
-        return try {
-            val url = URL(endpoint)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json; utf-8")
-            conn.setRequestProperty("Accept", "application/json")
-            
-            // Đính kèm device token nếu có (V2-01)
-            val deviceToken = prefs.getString("device_token", null)
-            if (!deviceToken.isNullOrBlank()) {
-                conn.setRequestProperty("Authorization", "Bearer $deviceToken")
-                conn.setRequestProperty("X-Device-Token", deviceToken)
-            }
-
-            conn.doOutput = true
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
-
-            OutputStreamWriter(conn.outputStream).use { writer ->
-                writer.write(payload.toString())
-                writer.flush()
-            }
-
-            val responseCode = conn.responseCode
-            conn.disconnect()
-            responseCode in 200..299
-        } catch (e: Exception) {
-            Log.e(TAG, "Lỗi gửi thông báo: ${e.message}")
-            false
-        }
+    @Synchronized
+    fun contains(eventId: String): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM notification_outbox WHERE event_id = ? LIMIT 1", arrayOf(eventId)
+        ).use { return it.moveToFirst() }
     }
 
-    private fun enqueueOfflineNotif(prefs: android.content.SharedPreferences, payload: JSONObject) {
+    @Synchronized
+    fun migrateLegacyQueue(context: Context) {
+        val prefs = context.getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("legacy_migrated_v2", false)) return
         try {
-            val existing = prefs.getString("offline_notif_queue", "[]") ?: "[]"
-            val jsonArray = org.json.JSONArray(existing)
-            jsonArray.put(payload)
-            prefs.edit().putString("offline_notif_queue", jsonArray.toString()).apply()
-            Log.w(TAG, "Đã lưu thông báo vào hàng đợi offline (Tổng: ${jsonArray.length()})")
-        } catch (e: Exception) {
-            Log.e(TAG, "Lỗi lưu offline: ${e.message}")
-        }
-    }
-
-    private fun flushOfflineQueue(backendUrl: String, prefs: android.content.SharedPreferences) {
-        val existing = prefs.getString("offline_notif_queue", null) ?: return
-        try {
-            val jsonArray = org.json.JSONArray(existing)
-            if (jsonArray.length() == 0) return
-
-            Log.i(TAG, "Đang gửi lại ${jsonArray.length()} thông báo offline...")
-            val remaining = org.json.JSONArray()
-            for (i in 0 until jsonArray.length()) {
-                val item = jsonArray.getJSONObject(i)
-                val ok = postJsonToBackend("$backendUrl/api/notifications/ingest", item, prefs)
-                if (!ok) {
-                    remaining.put(item)
+            val queue = JSONArray(prefs.getString("offline_notif_queue", "[]") ?: "[]")
+            val importedIds = mutableListOf<String>()
+            for (i in 0 until queue.length()) {
+                val item = queue.getJSONObject(i)
+                val pkg = item.optString("packageName", "unknown")
+                val title = redactOtp(item.optString("title", ""))
+                val body = redactOtp(item.optString("text", ""))
+                val occurredAt = item.optLong("timestamp", System.currentTimeMillis())
+                val eventId = item.optString("eventId").takeIf { it.isNotBlank() }
+                    ?: computeDeterministicEventId(pkg, i, occurredAt, title, body)
+                if (body.isNotBlank()) {
+                    enqueue(eventId, pkg, title, body, occurredAt)
+                    importedIds.add(eventId)
                 }
             }
-            prefs.edit().putString("offline_notif_queue", remaining.toString()).apply()
+            check(importedIds.all(::contains)) { "Legacy queue verification failed" }
+            check(prefs.edit().remove("offline_notif_queue")
+                .putBoolean("legacy_migrated_v2", true).commit()) { "Legacy queue marker failed" }
         } catch (e: Exception) {
-            Log.e(TAG, "Lỗi flush offline queue: ${e.message}")
+            Log.e("QLTC_Noti", "Legacy queue migration failed; source queue retained", e)
         }
     }
+
+    @Synchronized
+    fun getQueueStats(): JSONObject {
+        val db = readableDatabase
+        val stats = JSONObject()
+        var queued = 0
+        var authPaused = 0
+        var failedValidation = 0
+        val cursor = db.rawQuery(
+            "SELECT status, COUNT(*) FROM notification_outbox GROUP BY status",
+            null
+        )
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                val st = c.getString(0)
+                val cnt = c.getInt(1)
+                when (st) {
+                    "queued", "retry_scheduled" -> queued += cnt
+                    "auth_paused" -> authPaused += cnt
+                    "failed_validation" -> failedValidation += cnt
+                }
+            }
+        }
+        stats.put("queuedCount", queued)
+        stats.put("authPausedCount", authPaused)
+        stats.put("failedValidationCount", failedValidation)
+        return stats
+    }
+}
+
+data class OutboxItem(
+    val eventId: String,
+    val packageName: String,
+    val title: String,
+    val text: String,
+    val occurredAt: Long,
+    val status: String,
+    val retryCount: Int
+)
+
+class BankNotificationListener : NotificationListenerService() {
+    private lateinit var outboxDb: NotificationOutboxDb
+
+    private val SUPPORTED_PACKAGES = setOf(
+        "com.VCB",
+        "com.vietcombank",
+        "vn.com.techcombank.bb.app",
+        "com.techcombank",
+        "com.mbmobile",
+        "com.vnpay.bidv",
+        "com.vietinbank.ipay",
+        "com.ACB",
+        "com.tpb.mb.gprsandroid",
+        "com.vnpay.vpbankonline",
+        "com.mservice.momotransfer",
+        "vn.zalopay",
+        "com.Sacombank.ewallet",
+        "com.shinhan.global.vn.bank",
+        "com.vib.myvib2",
+        "com.hdbank.mobilebanking",
+        "com.google.android.apps.messaging",
+        "com.samsung.android.messaging",
+        "com.android.mms"
+    )
+
+    private val FINANCIAL_KEYWORDS = listOf(
+        "số dư", "so du", "sd:", "sd ", "vnd", "vnđ", "gd:", "ps:", "tk ", "tài khoản", "tai khoan", "biến động"
+    )
+
+    private val OTP_KEYWORDS = listOf(
+        "mã otp", "ma otp", "smart otp", "mã xác thực", "ma xac thuc", "verification code", "passcode"
+    )
+
+    override fun onCreate() {
+        super.onCreate()
+        outboxDb = NotificationOutboxDb(applicationContext)
+        outboxDb.migrateLegacyQueue(applicationContext)
+        OutboxSyncScheduler.ensurePeriodic(applicationContext)
+        OutboxSyncScheduler.scheduleNext(applicationContext, outboxDb)
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putLong("last_listener_connected_at", System.currentTimeMillis()).apply()
+        OutboxSyncScheduler.scheduleNow(applicationContext)
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        if (sbn == null) return
+        val packageName = sbn.packageName ?: return
+
+        val extras = sbn.notification.extras
+        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
+        val fullBody = if (bigText.length > text.length) bigText else text
+        if (fullBody.isBlank()) return
+
+        val combinedLower = "$title $fullBody".lowercase()
+
+        // Filter out pure OTP notifications before persisting or sending (V2-04)
+        val hasOtp = OTP_KEYWORDS.any { combinedLower.contains(it) }
+        val hasBalance = combinedLower.contains("số dư") || combinedLower.contains("so du") || combinedLower.contains("sd:")
+        if (hasOtp && !hasBalance) {
+            return
+        }
+
+        val isSupportedApp = SUPPORTED_PACKAGES.any { packageName.contains(it, ignoreCase = true) }
+        val hasFinancialKeyword = FINANCIAL_KEYWORDS.any { combinedLower.contains(it) }
+        if (!isSupportedApp && !hasFinancialKeyword) return
+
+        val postTime = if (sbn.postTime > 100_000_000_000L) sbn.postTime else System.currentTimeMillis()
+        val redactedTitle = redactOtp(title)
+        val redactedBody = redactOtp(fullBody)
+        val eventId = computeDeterministicEventId(packageName, sbn.id, postTime, redactedTitle, redactedBody)
+
+        // V2-04: Do NOT log sensitive notification body/amounts to logcat!
+        Log.i("QLTC_Noti", "Queued bank notification event=$eventId pkg=$packageName")
+
+        try {
+            // Persist synchronously before asking the OS to deliver it. No in-memory queue.
+            outboxDb.enqueue(
+                eventId = eventId,
+                packageName = packageName,
+                title = redactedTitle,
+                text = redactedBody,
+                occurredAt = postTime
+            )
+            OutboxSyncScheduler.scheduleNow(applicationContext)
+        } catch (e: Exception) {
+            Log.e("QLTC_Noti", "Could not persist notification event=$eventId", e)
+        }
+    }
+
 }

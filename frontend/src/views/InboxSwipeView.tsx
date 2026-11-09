@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Transaction, Jar, IncomeSource, BankAccount } from '../types';
-import { formatVND } from '../utils/financeMath';
+import { formatPrivacyVND, formatPrivacyText } from '../utils/financeMath';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { useManagedOverlay } from '../utils/overlayManager';
 import {
   Check,
   X,
@@ -27,13 +28,23 @@ import {
 
 interface InboxSwipeViewProps {
   pendingTransactions: Transaction[];
+  privacyMode?: boolean;
   confirmedTransactions: Transaction[];
   onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string, incomeSourceId?: string) => void;
   onReject: (id: string) => void;
   onDeleteConfirmed?: (id: string) => void;
   onUpdateConfirmed?: (
     id: string,
-    updates: { jarId?: string; jarCode?: string; category?: string; description?: string; incomeSourceId?: string | null }
+    updates: {
+      jarId?: string;
+      jarCode?: string;
+      category?: string;
+      description?: string;
+      incomeSourceId?: string | null;
+      amount?: number;
+      accountId?: string;
+      occurredAt?: string;
+    }
   ) => void;
   onBack: () => void;
   jars?: Jar[];
@@ -45,6 +56,7 @@ interface InboxSwipeViewProps {
 
 export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   pendingTransactions,
+  privacyMode = false,
   confirmedTransactions,
   onConfirm,
   onReject,
@@ -57,6 +69,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   onUnpair,
   onPairTransfer
 }) => {
+  const formatVND = (amount: number) => formatPrivacyVND(amount, privacyMode);
   // Main subTab: Chờ duyệt vs Lịch sử
   const [subTab, setSubTab] = useState<'pending' | 'history'>('pending');
 
@@ -88,6 +101,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   const [editConfirmedDesc, setEditConfirmedDesc] = useState('');
   const [editConfirmedJarId, setEditConfirmedJarId] = useState('');
   const [editConfirmedIncomeSourceId, setEditConfirmedIncomeSourceId] = useState('');
+  const [editConfirmedAmount, setEditConfirmedAmount] = useState<number>(0);
+  const [editConfirmedAccountId, setEditConfirmedAccountId] = useState<string>('');
+  const [editConfirmedDate, setEditConfirmedDate] = useState<string>('');
 
   // Confirm sheet state
   const [confirmSheet, setConfirmSheet] = useState<{
@@ -103,6 +119,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
     description: '',
     onConfirm: () => {}
   });
+
+  const pickerDialogProps = useManagedOverlay(Boolean(pickerTxn), () => setPickerTxn(null), 'Chọn hũ hoặc nguồn thu');
+  const editTransactionDialogProps = useManagedOverlay(Boolean(editingConfirmedTxn), () => setEditingConfirmedTxn(null), 'Chi tiết giao dịch');
 
   // Hũ mặc định an toàn
   const defaultJar = useMemo(() => jars.find(j => j.isDefault) || jars[0], [jars]);
@@ -247,22 +266,6 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
     onReject(id);
   };
 
-  // Duyệt tất cả giao dịch trong danh sách chờ
-  const handleConfirmAll = () => {
-    if (pendingTransactions.length === 0) return;
-    setConfirmSheet({
-      isOpen: true,
-      title: `Duyệt tất cả ${pendingTransactions.length} giao dịch`,
-      description: `Anh có chắc muốn duyệt đồng loạt ${pendingTransactions.length} giao dịch theo các hũ và nguồn thu đã được đề xuất tự động không?`,
-      confirmText: 'Duyệt tất cả ngay',
-      isDanger: false,
-      onConfirm: () => {
-        // Duyệt từng khoản
-        pendingTransactions.forEach(t => handleConfirmSingle(t));
-      }
-    });
-  };
-
   // Filter danh sách chờ duyệt
   const filteredPending = useMemo(() => {
     return pendingTransactions.filter(t => {
@@ -276,10 +279,32 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
         t.description.toLowerCase().includes(q) ||
         (t.suggestedCategory || '').toLowerCase().includes(q) ||
         t.bankCode.toLowerCase().includes(q) ||
-        t.accountName.toLowerCase().includes(q)
+        t.accountName.toLowerCase().includes(q) ||
+        String(t.amount).includes(q)
       );
     });
   }, [pendingTransactions, pendingFilter, pendingSearch]);
+
+  // V2-25: Duyệt hàng loạt chỉ áp dụng cho danh sách đang lọc (filteredPending) và bỏ qua các giao dịch mơ hồ cần chọn tài khoản
+  const handleConfirmAll = () => {
+    const eligibleToConfirm = filteredPending.filter(t => !t.needsAccountReview && t.accountId !== 'acc_unassigned');
+    const skippedCount = filteredPending.length - eligibleToConfirm.length;
+    if (eligibleToConfirm.length === 0) return;
+
+    setConfirmSheet({
+      isOpen: true,
+      title: `Duyệt ${eligibleToConfirm.length} giao dịch đang hiển thị`,
+      description:
+        skippedCount > 0
+          ? `Sẽ duyệt ${eligibleToConfirm.length} giao dịch hợp lệ trong bộ lọc hiện tại (bỏ qua ${skippedCount} giao dịch cần xác nhận tài khoản thủ công).`
+          : `Anh có chắc muốn duyệt đồng loạt ${eligibleToConfirm.length} giao dịch trong bộ lọc hiện tại không?`,
+      confirmText: `Duyệt ${eligibleToConfirm.length} khoản`,
+      isDanger: false,
+      onConfirm: () => {
+        eligibleToConfirm.forEach(t => handleConfirmSingle(t));
+      }
+    });
+  };
 
   // Filter lịch sử
   const filteredHistory = useMemo(() => {
@@ -1028,6 +1053,10 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       setEditConfirmedDesc(txn.description);
                       setEditConfirmedJarId(txn.jarId || jarObj?.id || '');
                       setEditConfirmedIncomeSourceId(txn.incomeSourceId || '');
+                      setEditConfirmedAmount(txn.amount);
+                      setEditConfirmedAccountId(txn.accountId || accounts[0]?.id || '');
+                      const isoStr = txn.occurredAtIso || '';
+                      setEditConfirmedDate(isoStr.length >= 10 ? isoStr.slice(0, 10) : new Date().toISOString().slice(0, 10));
                     }}
                     className="py-3 px-2 flex items-center justify-between gap-3 hover:bg-[#232E31]/40 rounded-xl cursor-pointer transition-colors"
                   >
@@ -1075,7 +1104,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
       {/* ======================= MODAL / SHEET CHỌN HŨ CHI HOẶC NGUỒN THU ======================= */}
       {pickerTxn && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...pickerDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
@@ -1361,7 +1390,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
       {/* ======================= SHEET CHỈNH SỬA GIAO DỊCH ĐÃ DUYỆT ======================= */}
       {editingConfirmedTxn && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...editTransactionDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -1376,20 +1405,50 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
               </button>
             </div>
 
-            <div className="bg-[#0E1314] p-3.5 rounded-2xl border border-[#8BA5AA]/15 space-y-1">
-              <div className="text-xs text-[#869699]">Số tiền</div>
-              <div
-                className={`num text-2xl font-bold ${
-                  editingConfirmedTxn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
-                }`}
-              >
-                {editingConfirmedTxn.type === 'income' ? '+' : editingConfirmedTxn.type === 'transfer' ? '⇄ ' : '−'}
-                {formatVND(editingConfirmedTxn.amount)}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                  Số tiền (₫)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={editConfirmedAmount || ''}
+                  onChange={(e) => setEditConfirmedAmount(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs font-bold num text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]/50"
+                />
               </div>
-              <div className="text-xs text-[#869699] pt-1">
-                Tài khoản: <b className="text-[#D5E1E3]">{editingConfirmedTxn.accountName}</b>
+              <div>
+                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                  Ngày giao dịch
+                </label>
+                <input
+                  type="date"
+                  value={editConfirmedDate}
+                  onChange={(e) => setEditConfirmedDate(e.target.value)}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]/50"
+                />
               </div>
             </div>
+
+            {accounts.length > 0 && (
+              <div>
+                <label className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block mb-1">
+                  Tài khoản / Ví
+                </label>
+                <select
+                  value={editConfirmedAccountId}
+                  onChange={(e) => setEditConfirmedAccountId(e.target.value)}
+                  className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3.5 py-2 text-xs text-[#F2F5F5] focus:outline-none focus:border-[#8CC7AE]/50"
+                >
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id} className="bg-[#161C1E] text-white">
+                      {acc.name} ({formatVND(acc.balance)})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* Sửa nội dung ghi chú */}
             <div>
@@ -1476,10 +1535,19 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 type="button"
                 onClick={() => {
                   if (onUpdateConfirmed && editingConfirmedTxn) {
+                    const updatedOccurredAt = editConfirmedDate
+                      ? new Date(`${editConfirmedDate}T12:00:00+07:00`).toISOString()
+                      : editingConfirmedTxn.occurredAtIso;
+                    const commonUpdates = {
+                      description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                      amount: editConfirmedAmount > 0 ? editConfirmedAmount : editingConfirmedTxn.amount,
+                      accountId: editConfirmedAccountId || editingConfirmedTxn.accountId,
+                      occurredAt: updatedOccurredAt
+                    };
                     if (editingConfirmedTxn.type === 'expense') {
                       const targetJar = jars.find(j => j.id === editConfirmedJarId);
                       onUpdateConfirmed(editingConfirmedTxn.id, {
-                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                        ...commonUpdates,
                         jarId: targetJar?.id,
                         jarCode: targetJar?.code,
                         category: targetJar?.name
@@ -1487,14 +1555,12 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     } else if (editingConfirmedTxn.type === 'income') {
                       const targetSrc = incomeSources.find(s => s.id === editConfirmedIncomeSourceId);
                       onUpdateConfirmed(editingConfirmedTxn.id, {
-                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description,
+                        ...commonUpdates,
                         incomeSourceId: editConfirmedIncomeSourceId || null,
                         category: targetSrc ? targetSrc.name : 'Thu ngoài dự kiến'
                       });
                     } else {
-                      onUpdateConfirmed(editingConfirmedTxn.id, {
-                        description: editConfirmedDesc.trim() || editingConfirmedTxn.description
-                      });
+                      onUpdateConfirmed(editingConfirmedTxn.id, commonUpdates);
                     }
                   }
                   setEditingConfirmedTxn(null);

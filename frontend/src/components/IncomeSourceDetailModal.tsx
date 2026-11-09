@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { IncomeSource, Transaction } from '../types';
 import { formatVND, normalizeToMonthlyAmount } from '../utils/financeMath';
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
+import { useManagedOverlay } from '../utils/overlayManager';
 import {
   X,
   Edit2,
@@ -82,6 +83,11 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
     });
   }, [allSourceTransactions, filterPeriod, periodMode, activeYear, activeMonth, activeQuarter]);
 
+  const dialogProps = useManagedOverlay(
+    isOpen && (Boolean(incomeSource) || isUnassigned),
+    onClose,
+    isUnassigned ? 'Chi tiết thu ngoài dự kiến' : `Chi tiết nguồn thu ${incomeSource?.name || ''}`
+  );
   if (!isOpen || (!incomeSource && !isUnassigned)) return null;
 
   const totalActual = sourceTransactions.reduce((sum, t) => sum + t.amount, 0);
@@ -105,7 +111,7 @@ export const IncomeSourceDetailModal: React.FC<IncomeSourceDetailModalProps> = (
     : incomeSource?.color || '#8CC7AE';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
       <div className="w-full max-w-md max-h-[88vh] bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl flex flex-col no-scrollbar">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-[#8BA5AA]/15">

@@ -3,6 +3,7 @@ import { BankAccount } from '../types';
 import { findBankByCode, generateVietQrUrl } from '../utils/vietnamBanks';
 import { formatVND } from '../utils/financeMath';
 import { CurrencyInput } from './CurrencyInput';
+import { useManagedOverlay } from '../utils/overlayManager';
 import {
   X,
   Copy,
@@ -34,6 +35,7 @@ export const AccountQrModal: React.FC<AccountQrModalProps> = ({
   const [description, setDescription] = useState<string>('');
   const [copiedType, setCopiedType] = useState<'number' | 'full' | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const dialogProps = useManagedOverlay(isOpen && Boolean(account), onClose, 'Mã QR chuyển khoản');
 
   const bank = useMemo(() => {
     if (!account?.bankCode) return undefined;
@@ -111,7 +113,7 @@ export const AccountQrModal: React.FC<AccountQrModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
       <div className="w-full max-w-md max-h-[90vh] flex flex-col bg-[#161C1E] border-t sm:border border-[#8BA5AA]/25 rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="p-4 border-b border-[#8BA5AA]/15 flex items-center justify-between shrink-0">

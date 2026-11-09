@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-02-24",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "FRONTEND_ORIGIN": "https://qltc-app.dtd-store.workers.dev"
+  },
   "d1_databases": [
     {
       "binding": "DB",

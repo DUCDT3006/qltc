@@ -1,17 +1,22 @@
-import React, { useState } from 'react';
-import { Holding, AssetClass, FmarketFund } from '../types';
-import { formatVND } from '../utils/financeMath';
+import React, { useEffect, useState } from 'react';
+import { Holding, AssetClass, FmarketFund, InvestmentCashflowsResponse } from '../types';
+import { formatPrivacyVND } from '../utils/financeMath';
+import { FmarketFeedStatus } from '../utils/fmarketFunds';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { ConfirmSheet } from '../components/ConfirmSheet';
-import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Check, Zap } from 'lucide-react';
+import { useManagedOverlay } from '../utils/overlayManager';
+import { addInvestmentCashflow, deleteInvestmentCashflow, getInvestmentCashflows, setInvestmentHistoryCompleteFrom } from '../utils/investmentCashflows';
+import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Zap } from 'lucide-react';
 
 interface InvestmentsViewProps {
   holdings: Holding[];
+  privacyMode?: boolean;
   fmarketFunds: FmarketFund[];
+  fmarketFeedStatus: FmarketFeedStatus;
   isSyncingPrices?: boolean;
   onAddHolding: (holding: Holding) => Promise<void> | void;
   onDeleteHolding: (symbol: string) => Promise<void> | void;
-  onSyncMarketPrices: () => Promise<void>;
+  onSyncMarketPrices: () => Promise<boolean>;
 }
 
 const ASSET_LABELS: Record<AssetClass, string> = {
@@ -34,17 +39,21 @@ const ASSET_COLORS: Record<AssetClass, string> = {
 
 export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   holdings,
+  privacyMode = false,
   fmarketFunds,
+  fmarketFeedStatus,
   isSyncingPrices = false,
   onAddHolding,
   onDeleteHolding,
   onSyncMarketPrices
 }) => {
+  const formatVND = (amount: number) => formatPrivacyVND(amount, privacyMode);
   const [filter, setFilter] = useState<string>('all');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const addHoldingDialogProps = useManagedOverlay(showAddModal, () => setShowAddModal(false), 'Thêm hoặc cập nhật tài sản');
 
   // Form thêm / sửa tài sản
+  const [editingHoldingId, setEditingHoldingId] = useState<string | undefined>(undefined);
   const [editingSymbol, setEditingSymbol] = useState<string | null>(null);
   const [assetClass, setAssetClass] = useState<AssetClass>('fund');
   const [symbol, setSymbol] = useState('');
@@ -56,11 +65,72 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   const [autoSync, setAutoSync] = useState<boolean>(true);
   const [fundSearch, setFundSearch] = useState('');
   const [confirmDeleteSymbol, setConfirmDeleteSymbol] = useState<string | null>(null);
+  const [cashflowData, setCashflowData] = useState<InvestmentCashflowsResponse | null>(null);
+  const [cashflowLoading, setCashflowLoading] = useState(true);
+  const [cashflowError, setCashflowError] = useState('');
+  const [cashflowNotice, setCashflowNotice] = useState('');
+  const [cashflowType, setCashflowType] = useState<'contribution' | 'withdrawal'>('contribution');
+  const [cashflowAmount, setCashflowAmount] = useState('');
+  const [cashflowDate, setCashflowDate] = useState('');
+  const [cashflowNote, setCashflowNote] = useState('');
+  const [completeFromInput, setCompleteFromInput] = useState('');
+  const [cashflowAction, setCashflowAction] = useState<
+    | { type: 'add'; value: { type: 'contribution' | 'withdrawal'; amountVnd: number; occurredAt: string; note?: string } }
+    | { type: 'delete'; id: string }
+    | { type: 'completeness'; date: string }
+    | null
+  >(null);
+  const [cashflowBusy, setCashflowBusy] = useState(false);
 
-  const totalValue = holdings.reduce((sum, h) => sum + h.quantity * h.currentPrice, 0);
-  const totalCost = holdings.reduce((sum, h) => sum + h.quantity * h.avgCost, 0);
+  const refreshCashflows = async (showLoading = true) => {
+    if (showLoading) setCashflowLoading(true);
+    try {
+      const response = await getInvestmentCashflows();
+      setCashflowData(response);
+      setCashflowError('');
+    } catch (error) {
+      setCashflowError(error instanceof Error ? error.message : 'Không tải được lịch sử góp/rút.');
+    } finally {
+      setCashflowLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    getInvestmentCashflows().then((response) => {
+      if (active) { setCashflowData(response); setCashflowError(''); }
+    }).catch((error) => {
+      if (active) setCashflowError(error instanceof Error ? error.message : 'Không tải được lịch sử góp/rút.');
+    }).finally(() => { if (active) setCashflowLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const confirmCashflowAction = async () => {
+    if (!cashflowAction) return;
+    setCashflowBusy(true);
+    setCashflowError('');
+    setCashflowNotice('');
+    try {
+      if (cashflowAction.type === 'add') await addInvestmentCashflow(cashflowAction.value);
+      else if (cashflowAction.type === 'delete') await deleteInvestmentCashflow(cashflowAction.id);
+      else await setInvestmentHistoryCompleteFrom(cashflowAction.date);
+      const response = await getInvestmentCashflows();
+      setCashflowData(response);
+      setCashflowNotice('Đã cập nhật lịch sử XIRR. Thao tác này chỉ ghi lịch sử, không làm thay đổi số dư.');
+      if (cashflowAction.type === 'add') { setCashflowAmount(''); setCashflowDate(''); setCashflowNote(''); }
+      if (cashflowAction.type === 'completeness') setCompleteFromInput('');
+      setCashflowAction(null);
+    } catch (error) {
+      setCashflowError(error instanceof Error ? error.message : 'Không cập nhật được lịch sử XIRR.');
+    } finally {
+      setCashflowBusy(false);
+    }
+  };
+
+  const totalValue = holdings.reduce((sum, h) => sum + Math.round(h.quantity * h.currentPrice), 0);
+  const totalCost = holdings.reduce((sum, h) => sum + Math.round(h.quantity * h.avgCost), 0);
   const profit = totalValue - totalCost;
-  const profitPct = totalCost > 0 ? (profit / totalCost) * 100 : 0;
+  const profitPct = totalCost > 0 ? (profit / totalCost) * 100 : null;
 
   const filteredHoldings = filter === 'all'
     ? holdings
@@ -79,6 +149,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   };
 
   const handleOpenAddModal = (defaultClass: AssetClass = 'fund') => {
+    setEditingHoldingId(undefined);
     setEditingSymbol(null);
     setAssetClass(defaultClass);
     setSymbol('');
@@ -99,26 +170,30 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   };
 
   const handleOpenEditHolding = (h: Holding) => {
+    setEditingHoldingId(h.id);
     setEditingSymbol(h.symbol);
     setAssetClass(h.assetClass);
     setSymbol(h.symbol);
     setName(h.name);
     setQuantityStr(String(h.quantity));
-    setAvgCost(Math.round(h.avgCost));
-    setCurrentPrice(Math.round(h.currentPrice));
+    // V2-18: Keep exact decimal NAV/price precision (do not Math.round before multiplying by quantity!)
+    setAvgCost(Number(h.avgCost));
+    setCurrentPrice(Number(h.currentPrice));
     setUnit(h.unit || 'CCQ');
     setAutoSync(h.autoSync !== undefined ? h.autoSync : getDefaultAutoSync(h.assetClass));
     setShowAddModal(true);
   };
 
   const handleSelectFmarketFund = (fund: FmarketFund) => {
+    if (!fund.navAvailable || fund.stale || !fund.nav) return;
     setSymbol(fund.shortName);
     setName(fund.name);
     setUnit('CCQ');
     setAutoSync(true);
-    setCurrentPrice(Math.round(fund.nav));
+    // Seed the field only when blank; keep any price the user has already entered.
+    if (currentPrice <= 0) setCurrentPrice(fund.nav);
     if (!avgCost) {
-      setAvgCost(Math.round(fund.nav));
+      setAvgCost(fund.nav);
     }
   };
 
@@ -127,9 +202,11 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     if (!symbol.trim() || !name.trim()) return;
 
     const quantity = parseFloat(quantityStr.replace(/,/g, '.')) || 0;
+    if (quantity <= 0) return;
     const finalCurrentPrice = currentPrice > 0 ? currentPrice : avgCost;
 
     await onAddHolding({
+      id: editingHoldingId,
       symbol: symbol.trim().toUpperCase(),
       name: name.trim(),
       assetClass,
@@ -151,8 +228,6 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
 
   const handleTriggerSync = async () => {
     await onSyncMarketPrices();
-    setSyncMessage('Đã cập nhật NAV Fmarket & giá Vàng/Bạc/Crypto mới nhất!');
-    setTimeout(() => setSyncMessage(null), 3500);
   };
 
   // Thống kê tỷ trọng từng nhóm tài sản
@@ -193,12 +268,6 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
         </div>
       </div>
 
-      {syncMessage && (
-        <div className="bg-[#8CC7AE]/15 border border-[#8CC7AE]/35 rounded-2xl px-3.5 py-2 text-xs text-[#8CC7AE] flex items-center gap-2">
-          <Check size={14} /> {syncMessage}
-        </div>
-      )}
-
       {/* Filter Tabs */}
       <div className="flex gap-1.5 overflow-x-auto py-1 no-scrollbar">
         {[
@@ -231,7 +300,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
             Tổng giá trị tài sản đầu tư & tích lũy
           </span>
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold bg-[#7EB89E]/15 text-[#8CC7AE] border border-[#7EB89E]/25">
-            <TrendingUp size={11} /> Fmarket Live NAV
+            <TrendingUp size={11} /> Giá theo dữ liệu đã lưu
           </span>
         </div>
 
@@ -245,12 +314,12 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
             <span className="text-[11px] text-[#869699]">
               Lãi/lỗ chưa thực hiện theo giá vốn:
             </span>
-            <span className={`num font-semibold ${totalCost <= 0 ? 'text-[#869699]' : profit >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
-              {totalCost <= 0 ? (
-                'Chưa có giá vốn'
+            <span className={`num font-semibold ${totalCost <= 0 || profitPct === null ? 'text-[#869699]' : profit >= 0 ? 'text-[#8CC7AE]' : 'text-[#E07A5F]'}`}>
+              {totalCost <= 0 || profitPct === null ? (
+                'Chưa đủ dữ liệu giá vốn'
               ) : (
                 <>
-                  {profit >= 0 ? '▲ +' : '▼ −'}{formatVND(Math.abs(profit))} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(1)}%)
+                  {profit >= 0 ? '▲ +' : '▼ −'}{formatVND(Math.abs(profit))} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(2)}%)
                 </>
               )}
             </span>
@@ -261,14 +330,14 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           </div>
         </div>
 
-        {/* Thanh phân bổ tài sản thực tế */}
+        {/* Thanh phân bổ tài sản thực tế (V2-24: Không ép min 3% làm sai lệch tỷ trọng thật!) */}
         {classSummary.length > 0 && (
           <div className="mt-3.5 pt-3 border-t border-[#8BA5AA]/15 space-y-2">
             <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#141A1C]">
               {classSummary.map(item => (
                 <div
                   key={item.cls}
-                  style={{ width: `${Math.max(3, item.pct)}%`, backgroundColor: item.color }}
+                  style={{ width: `${item.pct}%`, backgroundColor: item.color }}
                   className="h-full"
                 />
               ))}
@@ -289,6 +358,61 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           </div>
         )}
       </div>
+
+      <section className="bg-[#1C2426]/85 border border-[#8BA5AA]/15 rounded-3xl p-4 space-y-3" aria-labelledby="xirr-heading">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 id="xirr-heading" className="text-sm font-bold text-[#F2F5F5]">Tỷ suất XIRR</h2>
+            <p className="text-[10px] text-[#869699] mt-1">Tính theo giá tài sản đang lưu và các lần góp/rút anh ghi.</p>
+          </div>
+          <button type="button" onClick={() => void refreshCashflows()} disabled={cashflowLoading} className="text-[10px] text-[#8CC7AE] disabled:opacity-50">{cashflowLoading ? 'Đang tải…' : 'Làm mới'}</button>
+        </div>
+        {cashflowLoading && !cashflowData ? <p className="text-xs text-[#869699]">Đang tải dữ liệu XIRR…</p> : cashflowError && !cashflowData ? <p role="alert" className="text-xs text-[#E0B782]">{cashflowError}</p> : (
+          <>
+            {cashflowData?.xirr?.annualizedPct !== null && cashflowData?.xirr?.annualizedPct !== undefined ? (
+              <div className="text-2xl font-bold text-[#8CC7AE]">{privacyMode ? '••••' : `${cashflowData.xirr.annualizedPct.toFixed(2)}%`}<span className="ml-2 text-[10px] font-normal text-[#869699]">/ năm · XIRR</span></div>
+            ) : <div className="text-xs text-[#D5E1E3]">{cashflowData?.xirr?.message || 'Chưa đủ dữ liệu để tính XIRR. Ghi đầy đủ các lần góp/rút và xác nhận mốc lịch sử.'}</div>}
+            {cashflowData?.xirr?.terminalValueVnd != null && <p className="text-[10px] text-[#869699]">Giá trị cuối kỳ: {formatVND(cashflowData.xirr.terminalValueVnd)}{cashflowData.xirr.valuationDate ? ` · ${cashflowData.xirr.valuationDate}` : ''}</p>}
+            {cashflowData?.xirr?.priceAsOfOldest && Number.isFinite(Date.parse(cashflowData.xirr.priceAsOfOldest)) && <p className="text-[10px] text-[#869699]">Giá tài sản cũ nhất: {new Date(cashflowData.xirr.priceAsOfOldest).toLocaleDateString('vi-VN')}</p>}
+            <p className="text-[10px] text-[#869699]">Thời điểm giá theo dữ liệu đang lưu; không phải giá realtime.</p>
+            {cashflowData?.historyCompleteFrom && <p className="text-[10px] text-[#869699]">Lịch sử được xác nhận đầy đủ từ {cashflowData.historyCompleteFrom}.</p>}
+          </>
+        )}
+        {cashflowError && cashflowData && <p role="alert" className="text-xs text-[#E0B782]">{cashflowError}</p>}
+        {cashflowNotice && <p role="status" className="text-[10px] text-[#8CC7AE]">{cashflowNotice}</p>}
+        <p className="text-[10px] leading-relaxed text-[#D4B27C]">Chỉ ghi lịch sử, không làm thay đổi số dư. Chỉ xác nhận mốc đầy đủ nếu anh chắc chắn đã ghi đủ mọi dòng góp/rút trong toàn bộ khoảng thời gian từ ngày đó.</p>
+
+        <form className="grid grid-cols-2 gap-2" onSubmit={(event) => {
+          event.preventDefault();
+          const amount = Number(cashflowAmount.replace(/,/g, ''));
+          if (!cashflowDate || !Number.isSafeInteger(amount) || amount <= 0) { setCashflowError('Nhập ngày và số tiền nguyên VND hợp lệ.'); return; }
+          setCashflowAction({ type: 'add', value: { type: cashflowType, amountVnd: amount, occurredAt: cashflowDate, ...(cashflowNote.trim() ? { note: cashflowNote.trim() } : {}) } });
+        }}>
+          <select aria-label="Loại dòng tiền" value={cashflowType} onChange={(event) => setCashflowType(event.target.value as 'contribution' | 'withdrawal')} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]">
+            <option value="contribution">Góp vốn</option><option value="withdrawal">Rút vốn</option>
+          </select>
+          <input aria-label="Số tiền dòng tiền" inputMode="numeric" placeholder="Số tiền (₫)" value={cashflowAmount} onChange={(event) => setCashflowAmount(event.target.value)} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]" />
+          <input aria-label="Ngày dòng tiền" type="date" value={cashflowDate} onChange={(event) => setCashflowDate(event.target.value)} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]" />
+          <input aria-label="Ghi chú dòng tiền" placeholder="Ghi chú (không bắt buộc)" value={cashflowNote} onChange={(event) => setCashflowNote(event.target.value)} className="bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]" />
+          <button type="submit" className="col-span-2 rounded-xl bg-[#657D81] py-2 text-xs font-semibold text-white">Ghi dòng góp/rút</button>
+        </form>
+
+        <div className="flex flex-col gap-2 border-t border-[#8BA5AA]/10 pt-3">
+          <label className="text-[10px] text-[#869699]">Ngày bắt đầu có đầy đủ lịch sử</label>
+          <div className="flex gap-2">
+            <input aria-label="Ngày đầu đủ lịch sử" type="date" value={completeFromInput} onChange={(event) => setCompleteFromInput(event.target.value)} className="min-w-0 flex-1 bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-2 py-2 text-xs text-[#F2F5F5]" />
+            <button type="button" disabled={!completeFromInput} onClick={() => setCashflowAction({ type: 'completeness', date: completeFromInput })} className="rounded-xl border border-[#8CC7AE]/30 px-3 text-[10px] font-semibold text-[#8CC7AE] disabled:opacity-40">Xác nhận đủ</button>
+          </div>
+        </div>
+
+        <div className="divide-y divide-[#8BA5AA]/10">
+          {(cashflowData?.cashflows || []).map((flow) => <div key={flow.id} className="flex items-center justify-between gap-2 py-2">
+            <div className="min-w-0"><div className="text-[11px] font-semibold text-[#D5E1E3]">{flow.type === 'contribution' ? 'Góp vốn' : 'Rút vốn'} · {formatVND(flow.amountVnd)}</div><div className="truncate text-[10px] text-[#869699]">{flow.occurredAt}{flow.note ? ` · ${flow.note}` : ''}</div></div>
+            <button type="button" aria-label={`Xóa dòng ${flow.id}`} onClick={() => setCashflowAction({ type: 'delete', id: flow.id })} className="shrink-0 text-[10px] text-[#E07A5F]">Xóa</button>
+          </div>)}
+          {!cashflowLoading && cashflowData?.cashflows.length === 0 && <p className="py-2 text-[10px] text-[#869699]">Chưa có dòng góp/rút được ghi.</p>}
+        </div>
+      </section>
 
       {/* Holdings List */}
       <div className="bg-[#1C2426]/80 backdrop-blur-md border border-[#8BA5AA]/12 rounded-3xl p-3.5 divide-y divide-[#8BA5AA]/10">
@@ -359,7 +483,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
 
       {/* MODAL: Thêm / Cập nhật tài sản đầu tư (Hỗ trợ chọn nhanh Quỹ Fmarket & công tắc AutoSync L-10) */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in">
+        <div {...addHoldingDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in">
           <div className="w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-3.5 no-scrollbar">
             <div className="flex items-center justify-between">
               <span className="text-base font-bold text-[#F2F5F5]">
@@ -425,14 +549,17 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               </div>
 
               {/* Nếu là Quỹ Fmarket -> Hiển thị bộ chọn trực tiếp từ Fmarket API */}
-              {assetClass === 'fund' && fmarketFunds.length > 0 && (
+              {assetClass === 'fund' && (
                 <div className="bg-[#20292B] border border-[#8CC7AE]/25 rounded-2xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-bold text-[#8CC7AE]">
-                      Chọn nhanh Quỹ trên Fmarket ({fmarketFunds.length} quỹ)
+                      Chọn nhanh Quỹ Fmarket ({fmarketFunds.length} quỹ)
                     </span>
-                    <span className="text-[10px] text-[#869699]">Tự lấy giá NAV hôm nay</span>
+                    <span className="text-[10px] text-[#869699]">
+                      {fmarketFeedStatus === 'available' ? 'NAV đã xác minh' : fmarketFeedStatus === 'stale' ? 'Dữ liệu cũ hoặc thiếu NAV' : 'Nguồn NAV không khả dụng'}
+                    </span>
                   </div>
+                  {fmarketFeedStatus === 'unavailable' && <p className="text-[10px] text-[#E0B782]">Không tải được danh sách/NAV Fmarket. Anh vẫn có thể nhập mã và giá thủ công.</p>}
                   <div className="relative">
                     <Search size={13} className="absolute left-2.5 top-2.5 text-[#869699]" />
                     <input
@@ -449,16 +576,20 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                         type="button"
                         key={f.shortName}
                         onClick={() => handleSelectFmarketFund(f)}
+                        disabled={!f.navAvailable || f.stale}
                         className={`px-2.5 py-1.5 rounded-xl text-left shrink-0 border transition-all ${
-                          symbol.toUpperCase() === f.shortName
+                          !f.navAvailable || f.stale
+                            ? 'bg-[#161C1E] border-[#8BA5AA]/10 text-[#869699] opacity-60 cursor-not-allowed'
+                            : symbol.toUpperCase() === f.shortName
                             ? 'bg-[#8CC7AE]/20 border-[#8CC7AE] text-[#F2F5F5]'
                             : 'bg-[#161C1E] border-[#8BA5AA]/15 text-[#C4D0D2]'
                         }`}
                       >
                         <div className="text-[11px] font-bold text-[#8CC7AE]">{f.shortName}</div>
                         <div className="text-[10px] num text-[#D5E1E3]">
-                          NAV: {new Intl.NumberFormat('vi-VN').format(Math.round(f.nav))} ₫
+                          {f.navAvailable && f.nav ? `NAV: ${new Intl.NumberFormat('vi-VN').format(f.nav)} ₫` : 'NAV chưa xác minh'}
                         </div>
+                        {f.navDate && <div className="text-[9px] text-[#869699]">{new Date(f.navDate).toLocaleDateString('vi-VN')}</div>}
                       </button>
                     ))}
                   </div>
@@ -611,6 +742,14 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           }
         }}
         onCancel={() => setConfirmDeleteSymbol(null)}
+      />
+      <ConfirmSheet
+        isOpen={Boolean(cashflowAction)}
+        title={cashflowAction?.type === 'delete' ? 'Xóa dòng lịch sử đầu tư?' : cashflowAction?.type === 'completeness' ? 'Xác nhận lịch sử đã đầy đủ?' : 'Xác nhận ghi dòng góp/rút?'}
+        description={cashflowAction?.type === 'completeness' ? `Anh xác nhận đã bao gồm mọi dòng góp/rút kể từ ${cashflowAction.date}. Việc này chỉ đánh dấu độ đầy đủ lịch sử, không làm thay đổi số dư.` : cashflowAction?.type === 'delete' ? 'Dòng lịch sử sẽ bị xóa và XIRR được tính lại. Số dư không thay đổi.' : 'Dòng này chỉ được lưu vào lịch sử dùng để tính XIRR; không làm thay đổi số dư hoặc sổ giao dịch.'}
+        confirmText={cashflowBusy ? 'Đang lưu…' : 'Xác nhận'}
+        onConfirm={() => { if (!cashflowBusy) void confirmCashflowAction(); }}
+        onCancel={() => { if (!cashflowBusy) setCashflowAction(null); }}
       />
     </div>
   );

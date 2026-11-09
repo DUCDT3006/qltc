@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { VIETNAM_BANKS, POPULAR_BANK_CODES, VietnamBank } from '../utils/vietnamBanks';
 import { Search, X, Check, Building2 } from 'lucide-react';
+import { useManagedOverlay } from '../utils/overlayManager';
 
 interface BankPickerModalProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export const BankPickerModal: React.FC<BankPickerModalProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogProps = useManagedOverlay(isOpen, onClose, 'Chọn ngân hàng', inputRef);
 
   useEffect(() => {
     if (isOpen) {
@@ -58,7 +60,7 @@ export const BankPickerModal: React.FC<BankPickerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
       <div className="w-full max-w-lg max-h-[88vh] flex flex-col bg-[#161C1E] border-t sm:border border-[#8BA5AA]/25 rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="p-4 border-b border-[#8BA5AA]/15 flex items-center justify-between shrink-0">

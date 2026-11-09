@@ -2,11 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { Sparkline } from '../components/Sparkline';
 import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
 import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from '../utils/financeMath';
-import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
+import { isTxnInPeriod, getVietnamDate, periodBoundsUtc } from '../utils/dateUtils';
+import { API_BASE } from '../services/apiClient';
+import { resolvePlannedValue, SummaryRequestState } from '../utils/plannedSummary';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { JarDetailModal } from '../components/JarDetailModal';
 import { IncomeSourceDetailModal } from '../components/IncomeSourceDetailModal';
 import { AccountQrModal } from '../components/AccountQrModal';
+import { useManagedOverlay } from '../utils/overlayManager';
 import { findBankByCode } from '../utils/vietnamBanks';
 import {
   RefreshCw,
@@ -40,7 +43,7 @@ interface DashboardViewProps {
   pendingCount: number;
   privacyMode: boolean;
   isSyncingPrices?: boolean;
-  onSyncMarketPrices: () => Promise<void>;
+  onSyncMarketPrices: () => Promise<boolean>;
   onUpdateAccountBalance: (accountId: string, newBalance: number, name?: string, type?: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings') => Promise<void>;
   onAddAccount: (acc: BankAccount) => void;
   onOpenInbox: () => void;
@@ -89,6 +92,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [selectedJarForDetail, setSelectedJarForDetail] = useState<Jar | null>(null);
   const [selectedIncomeSourceForDetail, setSelectedIncomeSourceForDetail] = useState<IncomeSource | null>(null);
   const [isUnassignedIncomeDetail, setIsUnassignedIncomeDetail] = useState(false);
+  const quickCashDialogProps = useManagedOverlay(showQuickCashModal, () => setShowQuickCashModal(false), 'Cập nhật số dư tài khoản');
 
   // Điều hướng kỳ thống kê
   const handlePrevPeriod = () => {
@@ -141,30 +145,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   // L-11: Tải thống kê tổng hợp từ D1 cho kỳ Quý / Năm (hoặc khi vượt quá bộ nhớ đệm client)
   const [serverSummary, setServerSummary] = useState<{
-    totalIncome: number;
-    totalExpense: number;
-    jarBreakdown: Array<{ id: string; spent: number }>;
-    incomeBreakdown: Array<{ source_id: string; total_amount: number }>;
+    totals: { actualIncome: number; actualExpense: number; plannedIncome: number | null; plannedExpense: number | null };
+    jarBuckets: Array<{ id: string; actualSpent: number }>;
+    incomeBuckets: Array<{ id: string; actualReceived: number; expectedAmount: number }>;
+    unassigned: { income: number; expense: number };
+    orphaned: { income: number; expense: number };
   } | null>(null);
+  const [summaryRequestState, setSummaryRequestState] = useState<SummaryRequestState>('loading');
 
   useEffect(() => {
     let cancelled = false;
-    if (periodMode !== 'month' || confirmedTransactions.length >= 450) {
-      fetch(
-        `https://qltc-backend.dtd-store.workers.dev/api/analytics/summary?period=${periodMode}&year=${selectedYear}&month=${selectedMonth}&quarter=${selectedQuarter}`
-      )
-        .then(r => (r.ok ? r.json() : null))
-        .then(data => {
-          if (!cancelled && data) setServerSummary(data);
-        })
-        .catch(() => {});
-    } else {
-      setServerSummary(null);
-    }
+    setServerSummary(null);
+    setSummaryRequestState('loading');
+    const { fromInclusiveUtc, toExclusiveUtc } = periodBoundsUtc(periodMode, { year: selectedYear, month: selectedMonth, quarter: selectedQuarter });
+    fetch(
+      `${API_BASE}/analytics/summary?period=${periodMode}&startDate=${encodeURIComponent(fromInclusiveUtc)}&toExclusive=${encodeURIComponent(toExclusiveUtc)}`
+    )
+      .then(async response => {
+        if (!response.ok) throw new Error(`Summary API HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        if (cancelled) return;
+        if (!data || typeof data !== 'object' || !data.totals || !Array.isArray(data.jarBuckets) || !Array.isArray(data.incomeBuckets)) {
+          throw new Error('Summary API response is invalid');
+        }
+        setServerSummary(data);
+        setSummaryRequestState('loaded');
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setServerSummary(null);
+          setSummaryRequestState('error');
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [periodMode, selectedYear, selectedMonth, selectedQuarter, confirmedTransactions.length]);
+  }, [periodMode, selectedYear, selectedMonth, selectedQuarter, confirmedTransactions, jars, incomeSources, plannedExpenses]);
 
   // Lọc các giao dịch đã duyệt nằm trong kỳ được chọn (chuẩn múi giờ UTC+7, đọc từ occurredAtIso)
   const periodTransactions = confirmedTransactions.filter(t =>
@@ -230,25 +248,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     (sum, s) => sum + normalizeToMonthlyAmount(s.expectedAmount, s.recurrence),
     0
   );
-  const expectedIncomeForPeriod = baseMonthlyExpectedIncome * periodMultiplier;
+  const selectedPeriodStartMonth = periodMode === 'year' ? 1 : periodMode === 'quarter' ? (selectedQuarter - 1) * 3 + 1 : selectedMonth;
+  const selectedPeriodMonthCount = periodMode === 'year' ? 12 : periodMode === 'quarter' ? 3 : 1;
+  const isOneTime = (recurrence?: string) => /một lần|one[_ -]?time/i.test(recurrence || '');
+  const plannedForPeriod = (amount: number | undefined, recurrence: string | undefined, date: string | null | undefined) => {
+    if (!isOneTime(recurrence)) return normalizeToMonthlyAmount(amount, recurrence) * periodMultiplier;
+    if (!date || !/^\d{4}-\d{2}-\d{2}/.test(date)) return 0;
+    const [year, month] = date.slice(0, 10).split('-').map(Number);
+    return year === selectedYear && month >= selectedPeriodStartMonth && month < selectedPeriodStartMonth + selectedPeriodMonthCount
+      ? Math.round(amount || 0)
+      : 0;
+  };
+  const isSelectedMonthCurrent = periodMode === 'month' && selectedYear === nowVN.getFullYear() && selectedMonth === nowVN.getMonth() + 1;
+  const localPlannedIncomeForPeriod = incomeSources.reduce(
+    (sum, source) => sum + plannedForPeriod(source.expectedAmount, source.recurrence, source.oneTimeDate),
+    0
+  );
+  const plannedIncomeResolution = resolvePlannedValue(
+    serverSummary?.totals.plannedIncome,
+    summaryRequestState,
+    localPlannedIncomeForPeriod,
+    isSelectedMonthCurrent
+  );
+  const expectedIncomeForPeriod = plannedIncomeResolution.amount;
 
   const actualIncomeTxns = periodTransactions.filter(t => t.type === 'income');
   // V2-12, V2-14: Tính tổng thu trực tiếp từ các giao dịch đã duyệt, không lấy Math.max giả
-  const actualIncomeForPeriod = actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
+  const actualIncomeForPeriod = serverSummary?.totals.actualIncome ?? actualIncomeTxns.reduce((sum, t) => sum + t.amount, 0);
 
-  const incomeAchievedPct = expectedIncomeForPeriod > 0
+  const incomeAchievedPct = expectedIncomeForPeriod !== null && expectedIncomeForPeriod > 0
     ? Math.round((actualIncomeForPeriod / expectedIncomeForPeriod) * 100)
     : 0;
 
   // V2-12: Phân loại nguồn thu duy nhất theo incomeSourceId, tuyệt đối KHÔNG dò tên theo includes để cộng trùng!
   const incomeSourceComparison = incomeSources.map(src => {
     const monthlyExpected = normalizeToMonthlyAmount(src.expectedAmount, src.recurrence);
-    const expected = monthlyExpected * periodMultiplier;
+    const expected = plannedIncomeResolution.source === 'none'
+      ? null
+      : plannedForPeriod(src.expectedAmount, src.recurrence, src.oneTimeDate);
     // Khớp duy nhất theo ID nguồn thu
-    const matchedActual = actualIncomeTxns
+    const matchedActual = serverSummary?.incomeBuckets.find(b => b.id === src.id)?.actualReceived ?? actualIncomeTxns
       .filter(t => t.incomeSourceId === src.id)
       .reduce((s, t) => s + t.amount, 0);
-    const pct = expected > 0 ? Math.round((matchedActual / expected) * 100) : 0;
+    const pct = expected !== null && expected > 0 ? Math.round((matchedActual / expected) * 100) : 0;
     return {
       ...src,
       monthlyExpected,
@@ -266,15 +308,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   // 3. SO SÁNH CÁC HŨ THỰC TẾ VS DỰ KIẾN (THEO THÁNG / QUÝ / NĂM) - V2-13
   const actualExpenseTxns = periodTransactions.filter(t => t.type === 'expense');
-  const actualExpenseForPeriod = actualExpenseTxns.reduce((s, t) => s + t.amount, 0);
+  const actualExpenseForPeriod = serverSummary?.totals.actualExpense ?? actualExpenseTxns.reduce((s, t) => s + t.amount, 0);
 
   const jarActualAmounts = jars.map(jar => {
-    return actualExpenseTxns
+    return serverSummary?.jarBuckets.find(b => b.id === jar.id)?.actualSpent ?? actualExpenseTxns
       .filter(t => (t.jarId ? t.jarId === jar.id : t.suggestedJarCode === jar.code))
       .reduce((s, t) => s + t.amount, 0);
   });
 
-  const unassignedExpenses = actualExpenseTxns
+  const unassignedExpenses = serverSummary ? serverSummary.unassigned.expense + serverSummary.orphaned.expense : actualExpenseTxns
     .filter(t => !t.jarId && (!t.suggestedJarCode || !jars.some(j => j.code === t.suggestedJarCode)))
     .reduce((s, t) => s + t.amount, 0);
 
@@ -300,14 +342,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ? Math.round((totalActualSpentForPeriod / totalExpectedJarLimitForPeriod) * 100)
     : 0;
 
-  const totalPlannedExpensesForPeriod =
-    plannedExpenses.reduce((s, e) => s + normalizeToMonthlyAmount(e.expectedAmount, e.recurrence), 0) * periodMultiplier;
+  const localPlannedExpensesForPeriod = plannedExpenses.reduce(
+    (sum, expense) => sum + plannedForPeriod(expense.expectedAmount, expense.recurrence, expense.oneTimeDate),
+    0
+  );
+  const plannedExpenseResolution = resolvePlannedValue(
+    serverSummary?.totals.plannedExpense,
+    summaryRequestState,
+    localPlannedExpensesForPeriod,
+    isSelectedMonthCurrent
+  );
+  const totalPlannedExpensesForPeriod = plannedExpenseResolution.amount;
 
   const handleSyncPricesClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    await onSyncMarketPrices();
-    setSyncDone(true);
-    setTimeout(() => setSyncDone(false), 3000);
+    const updated = await onSyncMarketPrices();
+    if (updated) {
+      setSyncDone(true);
+      setTimeout(() => setSyncDone(false), 3000);
+    }
   };
 
   const handleSaveQuickAccount = async (e: React.FormEvent) => {
@@ -654,14 +707,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <span
             className={`px-2.5 py-1 rounded-full text-xs font-bold num border ${
-              incomeAchievedPct >= 100
+              expectedIncomeForPeriod === null
+                ? 'bg-[#232E31] text-[#869699] border-[#8BA5AA]/20'
+                : incomeAchievedPct >= 100
                 ? 'bg-[#8CC7AE]/15 text-[#8CC7AE] border-[#8CC7AE]/35'
                 : incomeAchievedPct >= 50
                 ? 'bg-[#657D81]/25 text-[#D5E1E3] border-[#8BA5AA]/30'
-                : 'bg-[#D4A373]/15 text-[#DEB48A] border-[#D4A373]/30'
+                : 'bg-[#D4A373]/15 text-[#DEB48B] border-[#D4A373]/30'
             }`}
           >
-            Đạt {incomeAchievedPct}% dự kiến
+            {expectedIncomeForPeriod === null ? 'Chưa có kế hoạch kỳ này' : `Đạt ${incomeAchievedPct}% dự kiến`}
           </span>
         </div>
 
@@ -675,13 +730,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="text-right">
             <span className="text-[10.5px] text-[#869699] block">Thu Dự Kiến ({periodLabel})</span>
             <span className="num text-[17px] font-bold text-[#F2F5F5] mt-0.5 block">
-              {privacyMode ? '••••••' : formatVND(expectedIncomeForPeriod)}
+              {expectedIncomeForPeriod === null
+                ? 'Chưa có kế hoạch kỳ này'
+                : privacyMode ? '••••••' : formatVND(expectedIncomeForPeriod)}
             </span>
+            {plannedIncomeResolution.source === 'local-unsynced' && (
+              <span className="text-[9.5px] text-[#DEB48A] mt-0.5 block">Ước tính từ kế hoạch trên thiết bị · chưa đồng bộ</span>
+            )}
           </div>
         </div>
 
         {/* Thanh tiến độ đạt thu nhập dự kiến */}
-        <div className="space-y-1">
+        {expectedIncomeForPeriod !== null ? <div className="space-y-1">
           <div className="h-2 rounded-full bg-[#141A1C] overflow-hidden">
             <div
               className="h-full rounded-full bg-gradient-to-r from-[#657D81] to-[#8CC7AE] transition-all duration-500"
@@ -700,7 +760,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Plus size={11} /> Thêm / Sửa khoản thu ›
             </button>
           </div>
-        </div>
+        </div> : <p className="text-[11px] text-[#869699]">Chưa có kế hoạch kỳ này nên chưa tính phần trăm đạt thu.</p>}
 
         {/* Chi tiết từng nguồn thu dự kiến */}
         <div className="pt-2 border-t border-[#8BA5AA]/12 space-y-2">
@@ -726,15 +786,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </div>
                 <div className="num text-right shrink-0">
                   <b className="text-[#8CC7AE]">+{formatVND(item.actual)}</b>
-                  {item.expected > 0 && <span className="text-[#869699]"> / {formatVND(item.expected)}</span>}{' '}
-                  {item.expected > 0 && (
+                  {item.expected !== null && item.expected > 0 && <span className="text-[#869699]"> / {formatVND(item.expected)}</span>}{' '}
+                  {item.expected !== null && item.expected > 0 && (
                     <span className={`font-bold ml-1 ${item.pct >= 100 ? 'text-[#8CC7AE]' : 'text-[#DEB48A]'}`}>
                       ({item.pct}%)
                     </span>
                   )}
                 </div>
               </div>
-              {item.expected > 0 && (
+              {item.expected !== null && item.expected > 0 && (
                 <div className="h-1 rounded-full bg-[#141A1C] overflow-hidden">
                   <div
                     className="h-full rounded-full bg-[#8CC7AE]"
@@ -802,13 +862,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {totalPlannedExpensesForPeriod > 0 && (
+        {totalPlannedExpensesForPeriod === null ? (
+          <div className="text-[11px] text-[#869699] px-1">Chưa có kế hoạch kỳ này.</div>
+        ) : totalPlannedExpensesForPeriod > 0 && (
           <div className="text-[11px] text-[#869699] flex items-center justify-between px-1">
             <span>Khoản chi cố định dự kiến ({periodLabel}):</span>
             <b className="num text-[#D5E1E3]">
               {formatVND(totalPlannedExpensesForPeriod)} (Đạt{' '}
               {Math.round((totalActualSpentForPeriod / totalPlannedExpensesForPeriod) * 100)}%)
             </b>
+            {plannedExpenseResolution.source === 'local-unsynced' && <span className="text-[#DEB48A]">Ước tính trên thiết bị · chưa đồng bộ</span>}
           </div>
         )}
 
@@ -902,7 +965,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* MODAL CẬP NHẬT NHANH SỐ DƯ TÀI KHOẢN NGÂN HÀNG & TIỀN MẶT */}
       {showQuickCashModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...quickCashDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <span className="text-base font-bold text-[#F2F5F5]">

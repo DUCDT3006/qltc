@@ -37,6 +37,9 @@ import { ConfirmSheet } from './ConfirmSheet';
 import { BankPickerModal } from './BankPickerModal';
 import { AccountQrModal } from './AccountQrModal';
 import { findBankByCode, VietnamBank } from '../utils/vietnamBanks';
+import { API_BASE } from '../services/apiClient';
+import { getBackupPreviewCounts, isVerifiedBackupDryRun } from '../utils/backupPreview';
+import { useManagedOverlay } from '../utils/overlayManager';
 
 interface RawLog {
   id: string;
@@ -219,7 +222,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v1.2.9';
+  const CURRENT_VERSION = 'v2.0.0';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<{
     tagName: string;
@@ -227,8 +230,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     hasUpdate: boolean;
     body?: string;
   } | null>({
-    tagName: 'v1.2.9',
-    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk',
+    tagName: 'v2.0.0',
+    apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
     hasUpdate: true
   });
   const [updateCheckedMsg, setUpdateCheckedMsg] = useState('');
@@ -245,7 +248,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const fetchLogs = async () => {
     setIsLoadingLogs(true);
     try {
-      const res = await fetch('https://qltc-backend.dtd-store.workers.dev/api/notifications/recent?limit=25');
+      const res = await fetch(`${API_BASE}/notifications/recent?limit=25`);
       if (res.ok) {
         const data = await res.json();
         setLogs(data.notifications || []);
@@ -267,7 +270,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsReprocessing(true);
     setReprocessMsg('');
     try {
-      const res = await fetch('https://qltc-backend.dtd-store.workers.dev/api/notifications/reprocess', {
+      const res = await fetch(`${API_BASE}/notifications/reprocess`, {
         method: 'POST'
       });
       const data = await res.json();
@@ -285,40 +288,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // Kiểm tra phiên bản mới từ GitHub Release & Fallback Cloudflare Worker
+  // Kiểm tra phiên bản mới từ Backend Worker & GitHub Release
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true);
     setUpdateCheckedMsg('');
     try {
-      let latestTag = 'v1.2.9';
-      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk';
+      let latestTag = 'v2.0.0';
+      let apkUrl = 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk';
       let releaseBody = '';
 
+      // 1. Ưu tiên đọc từ Backend API (nguồn chuẩn xác nhất của phiên bản máy chủ)
+      try {
+        const bRes = await fetch(`${API_BASE}/version`);
+        if (bRes.ok) {
+          const bData = await bRes.json();
+          const verStr = String(bData.versionName || bData.version || '2.0.0').trim();
+          latestTag = verStr.startsWith('v') ? verStr : `v${verStr}`;
+          apkUrl = bData.latestApkUrl || bData.downloadUrl || apkUrl;
+          if (bData.changelog) releaseBody = bData.changelog;
+        }
+      } catch (err) {
+        console.warn('Không thể lấy version từ backend:', err);
+      }
+
+      // 2. Kiểm tra thêm GitHub Releases nếu có asset APK phát hành
       try {
         const res = await fetch('https://api.github.com/repos/DUCDT3006/qltc/releases/latest');
         if (res.ok) {
           const data = await res.json();
-          latestTag = data.tag_name || 'v1.2.9';
-          const apkAsset = Array.isArray(data.assets)
-            ? data.assets.find((a: any) => a.name.endsWith('.apk'))
-            : null;
-          apkUrl = apkAsset ? apkAsset.browser_download_url : `https://github.com/DUCDT3006/qltc/releases/download/${latestTag}/qltc-${latestTag}.apk`;
-          releaseBody = data.body || '';
-        } else {
-          const bRes = await fetch('https://qltc-backend.dtd-store.workers.dev/api/version');
-          if (bRes.ok) {
-            const bData = await bRes.json();
-            latestTag = bData.version.startsWith('v') ? bData.version : `v${bData.version}`;
-            apkUrl = bData.latestApkUrl;
+          const ghTag = String(data.tag_name || '').trim();
+          if (ghTag && ghTag >= latestTag) {
+            latestTag = ghTag;
+            const apkAsset = Array.isArray(data.assets)
+              ? data.assets.find((a: any) => a.name.endsWith('.apk'))
+              : null;
+            if (apkAsset) apkUrl = apkAsset.browser_download_url;
+            if (data.body) releaseBody = data.body;
           }
         }
       } catch {
-        const bRes = await fetch('https://qltc-backend.dtd-store.workers.dev/api/version');
-        if (bRes.ok) {
-          const bData = await bRes.json();
-          latestTag = bData.version.startsWith('v') ? bData.version : `v${bData.version}`;
-          apkUrl = bData.latestApkUrl;
-        }
+        // Nếu GitHub bị chặn/rate-limit thì giữ nguyên thông tin từ backend
       }
 
       // Lấy version native nếu chạy trong Android app
@@ -342,11 +351,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch {
       setLatestRelease({
-        tagName: 'v1.2.9',
-        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk',
+        tagName: 'v2.0.0',
+        apkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk',
         hasUpdate: true
       });
-      setUpdateCheckedMsg('Phiên bản mới nhất: v1.2.9. Anh có thể tải trực tiếp file APK bên dưới.');
+      setUpdateCheckedMsg('Phiên bản mới nhất: v2.0.0. Anh có thể tải trực tiếp file APK bên dưới.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -361,7 +370,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v1.2.9/qltc-v1.2.9.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.0/qltc-v2.0.0.apk');
       return;
     }
 
@@ -369,7 +378,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v1.2.9'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v2.0.0'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -388,7 +397,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setDownloadError('');
 
     try {
-      const downloadEndpoint = 'https://qltc-backend.dtd-store.workers.dev/api/download-apk';
+      const downloadEndpoint = `${API_BASE}/download-apk`;
       const response = await fetch(downloadEndpoint);
 
       if (!response.ok) {
@@ -463,6 +472,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     startDownload();
   };
 
+  const [backupMsg, setBackupMsg] = useState<string>('');
+  const [pairCode, setPairCode] = useState('');
+  const [pairError, setPairError] = useState('');
+  const [isRestoringBackup, setIsRestoringBackup] = useState<boolean>(false);
+  const [pendingRestore, setPendingRestore] = useState<any | null>(null);
+
+  const isAndroidWebView = typeof window !== 'undefined' && Boolean((window as any).AndroidBridge);
+  const androidDiagnostics = React.useMemo(() => {
+    try {
+      if (isAndroidWebView && typeof (window as any).AndroidBridge.getListenerDiagnostics === 'function') {
+        return JSON.parse((window as any).AndroidBridge.getListenerDiagnostics());
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }, [isAndroidWebView, isOpen, settingsTab]);
+
+  const dialogProps = useManagedOverlay(isOpen, onClose, 'Cài đặt');
   if (!isOpen) return null;
 
   const openCreateAccountForm = () => {
@@ -484,7 +512,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setAccName(acc.name);
     setAccBankCode(acc.bankCode || 'VCB');
     setAccBankBin(acc.bankBin || findBankByCode(acc.bankCode)?.bin || '970436');
-    setAccNumber(acc.accountNumber || (acc.accountNumberMask ? `*${acc.accountNumberMask}` : ''));
+    // V2-08: Không gán số đuôi mask ('*6789') vào ô nhập số tài khoản đầy đủ để tránh ghi đè 4 số cuối thành STK đầy đủ!
+    setAccNumber(acc.accountNumber || '');
     setAccHolder(acc.accountHolder || '');
     setAccBranch(acc.branch || '');
     setAccType(acc.type || 'bank');
@@ -515,11 +544,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       return;
     }
 
-    const cleanNumber = accNumber.replace(/\D/g, '');
-    let cleanMask = cleanNumber ? cleanNumber.slice(-4) : undefined;
-    if (!cleanMask && editingAccount?.accountNumberMask) {
-      cleanMask = editingAccount.accountNumberMask;
-    }
+    const rawTrimmed = accNumber.trim();
+    const isMaskedPlaceholder = rawTrimmed.startsWith('*');
+    const cleanDigits = isMaskedPlaceholder ? '' : rawTrimmed.replace(/\D/g, '');
+    const fullAccountNumber = cleanDigits.length >= 6 ? cleanDigits : editingAccount?.accountNumber;
+    const cleanMask =
+      cleanDigits.length >= 4
+        ? cleanDigits.slice(-4)
+        : editingAccount?.accountNumberMask || (cleanDigits.length > 0 ? cleanDigits : undefined);
 
     if (editingAccount) {
       const updated: BankAccount = {
@@ -527,9 +559,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         name: accName.trim(),
         bankCode: accType === 'cash' ? undefined : accBankCode,
         bankBin: accType === 'cash' ? undefined : accBankBin,
-        accountNumber: accType === 'cash' ? undefined : (cleanNumber || undefined),
-        accountHolder: accType === 'cash' ? undefined : (accHolder.trim().toUpperCase() || undefined),
-        branch: accType === 'cash' ? undefined : (accBranch.trim() || undefined),
+        accountNumber: accType === 'cash' ? undefined : fullAccountNumber,
+        accountHolder: accType === 'cash' ? undefined : accHolder.trim().toUpperCase() || undefined,
+        branch: accType === 'cash' ? undefined : accBranch.trim() || undefined,
         accountNumberMask: accType === 'cash' ? undefined : cleanMask,
         balance: Math.round(accBalance || 0),
         type: accType
@@ -546,9 +578,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         name: accName.trim(),
         bankCode: accType === 'cash' ? undefined : accBankCode,
         bankBin: accType === 'cash' ? undefined : accBankBin,
-        accountNumber: accType === 'cash' ? undefined : (cleanNumber || undefined),
-        accountHolder: accType === 'cash' ? undefined : (accHolder.trim().toUpperCase() || undefined),
-        branch: accType === 'cash' ? undefined : (accBranch.trim() || undefined),
+        accountNumber: accType === 'cash' ? undefined : fullAccountNumber,
+        accountHolder: accType === 'cash' ? undefined : accHolder.trim().toUpperCase() || undefined,
+        branch: accType === 'cash' ? undefined : accBranch.trim() || undefined,
         accountNumberMask: accType === 'cash' ? undefined : cleanMask,
         balance: Math.round(accBalance || 0),
         type: accType
@@ -576,23 +608,93 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTimeout(() => setCopiedAccountId(null), 2500);
   };
 
-  const handleExportData = () => {
-    const data = {
-      accounts,
-      exportedAt: new Date().toISOString(),
-      app: 'QLTC',
-      version: CURRENT_VERSION
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `qltc_backup_${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
+  const handleExportData = async () => {
+    setBackupMsg('');
+    try {
+      const res = await fetch(`${API_BASE}/backup/export`);
+      if (res.ok) {
+        const backupPayload = await res.json();
+        const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `qltc_backup_v2_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        setBackupMsg('Đã xuất bản sao lưu đầy đủ (v2) kèm checksum bảo vệ.');
+        return;
+      }
+    } catch {
+      // Backend export failed. A local account snapshot is not a full ledger backup.
+    }
+    setBackupMsg('Không xuất được bản sao lưu đầy đủ từ máy chủ. Không tạo file thay thế thiếu giao dịch; vui lòng thử lại khi kết nối ổn định.');
   };
 
+  const handleImportBackupFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsRestoringBackup(true);
+    setPendingRestore(null);
+    setBackupMsg('');
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed || parsed.schemaVersion !== 2 || !parsed.data) {
+        setBackupMsg('Lỗi: File sao lưu không đúng định dạng schemaVersion 2.');
+        return;
+      }
+      const res = await fetch(`${API_BASE}/backup/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...parsed, dryRun: true })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBackupMsg(`Không thể xem trước bản sao lưu: ${data.error || 'Dữ liệu hoặc checksum không hợp lệ'}`);
+        return;
+      }
+      if (!isVerifiedBackupDryRun(data)) {
+        setBackupMsg('Máy chủ không xác nhận bản sao lưu ở chế độ xem trước; dữ liệu chưa được khôi phục.');
+        return;
+      }
+      setPendingRestore(parsed);
+      setBackupMsg('Đã kiểm tra checksum và cấu trúc. Xem số lượng bên dưới rồi xác nhận để thay thế dữ liệu hiện tại.');
+    } catch (err: any) {
+      setBackupMsg(`Lỗi đọc file sao lưu: ${err?.message || 'File JSON bị hỏng'}`);
+    } finally {
+      setIsRestoringBackup(false);
+      e.target.value = '';
+    }
+  };
+
+  const confirmRestoreBackup = async () => {
+    if (!pendingRestore || isRestoringBackup) return;
+    setIsRestoringBackup(true);
+    setBackupMsg('');
+    try {
+      const res = await fetch(`${API_BASE}/backup/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingRestore)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBackupMsg(`Lỗi khôi phục: ${data.error || 'Không thể khôi phục bản sao lưu'}`);
+        return;
+      }
+      setPendingRestore(null);
+      setBackupMsg('Khôi phục dữ liệu thành công. Đang tải lại dữ liệu...');
+      if (onReprocessSuccess) void onReprocessSuccess();
+    } catch (err: any) {
+      setBackupMsg(`Lỗi kết nối khi khôi phục: ${err?.message || 'Không thể kết nối máy chủ'}`);
+    } finally {
+      setIsRestoringBackup(false);
+    }
+  };
+
+  const restorePreviewCounts = getBackupPreviewCounts(pendingRestore?.data);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t border-[#8BA5AA]/20 rounded-t-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -846,15 +948,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <Smartphone size={16} className="text-[#8CC7AE]" />
               <span className="text-xs font-semibold text-[#F2F5F5]">Tự động đọc thông báo Android</span>
             </div>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#7EB89E]/20 text-[#8CC7AE] border border-[#7EB89E]/30">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#8CC7AE] animate-ping"></span>
-              Đang hoạt động
-            </span>
+            {isAndroidWebView ? (
+              !androidDiagnostics?.permissionGranted || !androidDiagnostics?.hasDeviceToken ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#E07A7A]/20 text-[#E07A7A] border border-[#E07A7A]/30">
+                  {!androidDiagnostics?.permissionGranted ? 'Chưa cấp quyền thông báo' : 'Chưa ghép thiết bị'}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#7EB89E]/20 text-[#8CC7AE] border border-[#7EB89E]/30">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#8CC7AE] animate-ping"></span>
+                  Đang hoạt động trên Android
+                </span>
+              )
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#232E31] text-[#869699] border border-[#8BA5AA]/20">
+                Trình duyệt Web (Chỉ xem nhật ký)
+              </span>
+            )}
           </div>
 
           <div className="text-[11.5px] text-[#869699] leading-relaxed">
             Hỗ trợ Vietcombank, Techcombank, HDBank, MB, ACB, TPBank, VPBank, BIDV, Cake, SMS... và tự động lọc bỏ OTP an toàn tuyệt đối.
           </div>
+
+          {isAndroidWebView && (
+            <div className="space-y-2 text-xs">
+              <button type="button" onClick={async () => {
+                setPairError('');
+                try {
+                  const res = await fetch(`${API_BASE}/devices/pair-code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceName: 'Android Listener' }) });
+                  const data = await res.json();
+                  if (!res.ok || !data.code) throw new Error(data.error || 'Không tạo được mã ghép');
+                  setPairCode(data.code);
+                } catch (err) { setPairError(err instanceof Error ? err.message : 'Không tạo được mã ghép'); }
+              }} className="w-full rounded-xl bg-[#232E31] p-2.5 text-[#D5E1E3]">Tạo mã ghép thiết bị (10 phút)</button>
+              {pairCode && <div>Mã ghép: <strong className="tracking-widest">{pairCode}</strong>
+                <button type="button" onClick={() => (window as any).AndroidBridge?.openDevicePairing?.()} className="ml-2 rounded-lg bg-[#8CC7AE] text-[#0E1314] p-2">Nhập mã trong Android</button>
+              </div>}
+              {pairError && <p role="alert" className="text-[#E06D6D]">{pairError}</p>}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button
@@ -991,7 +1123,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="flex items-center justify-between text-xs font-bold text-[#F2F5F5]">
                 <span className="flex items-center gap-2 text-[#8CC7AE]">
                   <RefreshCw size={14} className="animate-spin text-[#8CC7AE]" />
-                  Đang tải gói cập nhật {latestRelease?.tagName || 'v1.2.9'}...
+                  Đang tải gói cập nhật {latestRelease?.tagName || 'v2.0.0'}...
                 </span>
                 <span className="font-mono text-sm font-bold text-[#8CC7AE]">{downloadPercent}%</span>
               </div>
@@ -1026,7 +1158,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <div>
                   <div className="text-xs font-bold text-[#F2F5F5]">
-                    Đã tải hoàn tất 100% ({latestRelease?.tagName || 'v1.2.9'})!
+                    Đã tải hoàn tất 100% ({latestRelease?.tagName || 'v2.0.0'})!
                   </div>
                   <div className="text-[10.5px] text-[#869699]">
                     Kích thước: {(downloadTotalBytes / (1024 * 1024)).toFixed(1)} MB · Sẵn sàng nâng cấp
@@ -1037,7 +1169,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {downloadBlobUrl && (
                 <a
                   href={downloadBlobUrl}
-                  download={`qltc-${latestRelease?.tagName || 'v1.2.9'}.apk`}
+                  download={`qltc-${latestRelease?.tagName || 'v2.0.0'}.apk`}
                   className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-2 shadow active:scale-95 transition-transform"
                 >
                   <Download size={15} /> 1. Bấm vào đây để Cài Đặt File APK
@@ -1094,17 +1226,61 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             {/* Sao lưu & Thiết lập lại tài chính */}
-            <button
-              type="button"
-              onClick={handleExportData}
-              className="w-full p-3.5 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center justify-between text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
-            >
-              <span className="flex items-center gap-2.5">
-                <Download size={16} className="text-[#8CC7AE]" />
-                <span>Sao lưu dữ liệu ra file JSON</span>
-              </span>
-              <span className="text-[11px] text-[#8CC7AE] font-semibold">Tải về ›</span>
-            </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={handleExportData}
+                className="w-full p-3.5 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center justify-between text-xs font-medium text-[#C4D0D2] active:bg-[#232D30]"
+              >
+                <span className="flex items-center gap-2">
+                  <Download size={16} className="text-[#8CC7AE]" />
+                  <span>Sao lưu JSON (v2)</span>
+                </span>
+                <span className="text-[11px] text-[#8CC7AE] font-semibold">Tải về ›</span>
+              </button>
+
+              <label className="w-full p-3.5 rounded-2xl bg-[#1C2426] border border-[#8BA5AA]/15 flex items-center justify-between text-xs font-medium text-[#C4D0D2] active:bg-[#232D30] cursor-pointer">
+                <span className="flex items-center gap-2">
+                  <ArrowUpCircle size={16} className="text-[#DEB48A]" />
+                  <span>{isRestoringBackup ? 'Đang kiểm tra...' : 'Chọn bản sao lưu để xem trước'}</span>
+                </span>
+                <span className="text-[11px] text-[#DEB48A] font-semibold">Chọn file ›</span>
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={handleImportBackupFile}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {pendingRestore && (
+              <div className="rounded-2xl border border-[#DEB48A]/30 bg-[#DEB48A]/[0.08] p-3 space-y-2.5" role="region" aria-label="Xem trước bản sao lưu">
+                <div>
+                  <div className="text-xs font-bold text-[#DEB48A]">Xem trước bản sao lưu</div>
+                  <p className="text-[11px] text-[#C4D0D2] mt-1">
+                    Xác nhận sẽ thay thế dữ liệu hiện tại trên máy chủ bằng bản sao lưu này. Máy chủ đã kiểm tra checksum; chưa có thay đổi nào được áp dụng.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-[#D5E1E3]">
+                  {restorePreviewCounts.map(({ key, count }) => (
+                    <div key={key} className="flex justify-between gap-2"><span>{key.replaceAll('_', ' ')}</span><b>{count}</b></div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setPendingRestore(null)} disabled={isRestoringBackup} className="flex-1 rounded-xl bg-[#232E31] py-2 text-xs text-[#C4D0D2] disabled:opacity-50">Hủy</button>
+                  <button type="button" onClick={() => void confirmRestoreBackup()} disabled={isRestoringBackup} className="flex-1 rounded-xl bg-[#8F3D3D] py-2 text-xs font-bold text-white disabled:opacity-50">
+                    {isRestoringBackup ? 'Đang khôi phục...' : 'Xác nhận thay thế dữ liệu'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {backupMsg && (
+              <div className="text-[11px] text-[#8CC7AE] bg-[#8CC7AE]/10 border border-[#8CC7AE]/20 rounded-xl p-2.5 text-center">
+                {backupMsg}
+              </div>
+            )}
 
             <button
               type="button"

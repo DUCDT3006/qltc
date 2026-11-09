@@ -70,6 +70,16 @@ export interface PeriodTargetSpec {
   quarter?: number; // 1..4
 }
 
+export function periodBoundsUtc(period: 'month' | 'quarter' | 'year', target: PeriodTargetSpec): { fromInclusiveUtc: string; toExclusiveUtc: string } {
+  const firstMonth = period === 'year' ? 1 : period === 'quarter' ? ((target.quarter ?? 1) - 1) * 3 + 1 : (target.month ?? 1);
+  const months = period === 'year' ? 12 : period === 'quarter' ? 3 : 1;
+  const startMs = Date.UTC(target.year, firstMonth - 1, 1) - 7 * 3600000;
+  const endExclusiveMs = Date.UTC(target.year, firstMonth - 1 + months, 1) - 7 * 3600000;
+  const fromInclusiveUtc = new Date(startMs).toISOString();
+  const toExclusiveUtc = new Date(endExclusiveMs).toISOString();
+  return { fromInclusiveUtc, toExclusiveUtc };
+}
+
 // Kiểm tra giao dịch có nằm trong tháng, quý, hoặc năm đang chọn (tính theo giờ Việt Nam UTC+7)
 export function isTxnInPeriod(
   isoDate: string | undefined,

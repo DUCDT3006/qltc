@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Jar, Transaction } from '../types';
 import { formatVND } from '../utils/financeMath';
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
+import { useManagedOverlay } from '../utils/overlayManager';
 import {
   X,
   Edit2,
@@ -76,6 +77,7 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
     });
   }, [allJarTransactions, filterPeriod, periodMode, activeYear, activeMonth, activeQuarter]);
 
+  const dialogProps = useManagedOverlay(isOpen && Boolean(jar), onClose, jar?.name ? `Chi tiết hũ ${jar.name}` : 'Chi tiết hũ');
   if (!isOpen || !jar) return null;
 
   // Tính tổng chi tiêu của hũ
@@ -89,7 +91,7 @@ export const JarDetailModal: React.FC<JarDetailModalProps> = ({
   const isOverBudget = pctUsed > 100;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+    <div {...dialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
       <div className="w-full max-w-md max-h-[88vh] bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl flex flex-col no-scrollbar">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-[#8BA5AA]/15">

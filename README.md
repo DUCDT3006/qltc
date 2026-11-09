@@ -51,7 +51,7 @@ cd frontend
 npm install
 npm run dev
 ```
-Mở trình duyệt tại: `http://localhost:3000` (hoặc mở trên điện thoại cùng mạng Wi-Fi).
+Mở trình duyệt tại `http://localhost:3000`. Với đăng nhập web, dùng đúng `localhost`; truy cập bằng IP/LAN qua HTTP không hỗ trợ cookie `Secure`.
 
 ### 2. Khởi chạy Backend (Cloudflare Worker Local)
 ```bash
@@ -61,16 +61,21 @@ npm run dev
 ```
 Backend sẽ khởi chạy tại: `http://localhost:8787`.
 
-Để nạp dữ liệu mẫu ban đầu:
-```bash
-curl -X POST http://localhost:8787/api/seed
+Để đăng nhập local, tạo file `backend/.dev.vars` (không commit file này) với một secret tự chọn:
+```dotenv
+FRONTEND_ORIGIN=http://localhost:3000
+OWNER_API_TOKEN=<secret-local-do-anh-tu-tao>
 ```
+Chạy cả backend và frontend cùng lúc. Frontend Vite chuyển tiếp `/api` tới Worker local; backend tạo phiên cookie HttpOnly. Wrangler nạp biến local từ `.dev.vars`; xem [Cloudflare Workers: environment variables](https://developers.cloudflare.com/workers/local-development/environment-variables/).
 
 ### 3. Cài đặt lên điện thoại Android
 1. Push mã nguồn lên repository GitHub của anh (`master` branch).
 2. GitHub Actions sẽ tự động biên dịch file `.apk` trong tab **Actions** -> Tải về và cài vào điện thoại Android.
 3. Khi mở app lần đầu, bấm **"1. Bật Quyền Truy Cập Thông Báo"** và gạt bật cho **QLTC**.
 4. Bấm **"2. Tắt Tối Ưu Pin"** để đảm bảo app nhận thông báo liên tục kể cả khi màn hình tắt.
+
+### 4. Cấu hình triển khai Cloudflare
+Với D1 mới, khởi tạo schema từ `backend/schema.sql`. Với database hiện hữu, hãy backup trước, rà soát thay đổi schema và thử migration trên bản sao trước khi cập nhật production; không chạy schema/migration mù lên dữ liệu thật. Trước khi dùng đăng nhập web production, đặt secret `OWNER_API_TOKEN` cho Worker `qltc-backend`, rồi deploy backend và frontend. Frontend Worker cần Service Binding `BACKEND` trỏ tới service `qltc-backend` và route `/api/*` chạy qua Worker; cấu hình này đã có trong `frontend/wrangler.jsonc`. Backend `FRONTEND_ORIGIN` phải khớp chính xác origin frontend production. Không đặt owner token trong frontend hoặc commit secret.
 
 ---
 

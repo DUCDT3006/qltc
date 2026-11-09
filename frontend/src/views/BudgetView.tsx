@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Jar, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
-import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages, RECURRENCE_PRESETS } from '../utils/financeMath';
+import { formatPrivacyVND, normalizeToMonthlyAmount, computeExact100Percentages, allocateVndExact, RECURRENCE_PRESETS, plannedAmountForMonth } from '../utils/financeMath';
 import { isTxnInPeriod, getVietnamDate } from '../utils/dateUtils';
 import { CurrencyInput } from '../components/CurrencyInput';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { useManagedOverlay } from '../utils/overlayManager';
 import { JarDetailModal } from '../components/JarDetailModal';
 import { IncomeSourceDetailModal } from '../components/IncomeSourceDetailModal';
 import {
@@ -31,6 +32,7 @@ interface BudgetViewProps {
   plannedExpenses: PlannedExpense[];
   confirmedTransactions: Transaction[];
   accounts?: BankAccount[];
+  privacyMode?: boolean;
   onAddIncomeSource: (source: IncomeSource) => void;
   onUpdateIncomeSource?: (id: string, source: Partial<IncomeSource>) => void;
   onDeleteIncomeSource: (id: string) => void;
@@ -65,6 +67,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   plannedExpenses,
   confirmedTransactions,
   accounts = [],
+  privacyMode = false,
   onAddIncomeSource,
   onUpdateIncomeSource,
   onDeleteIncomeSource,
@@ -80,6 +83,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   onOpenQuickAddExpense,
   onAddTransaction
 }) => {
+  const formatVND = (amount: number) => formatPrivacyVND(amount, privacyMode);
   const [subTab, setSubTab] = useState<'planned' | 'actual'>('planned');
   const [allocatedSuccess, setAllocatedSuccess] = useState(false);
 
@@ -89,6 +93,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [sourceName, setSourceName] = useState('');
   const [sourceAmount, setSourceAmount] = useState<number>(0);
   const [sourceRecurrence, setSourceRecurrence] = useState('Hàng tháng');
+  const [sourceOneTimeDate, setSourceOneTimeDate] = useState('');
   const [sourceKind, setSourceKind] = useState<'fixed' | 'irregular' | 'passive'>('fixed');
   const [sourceKeywords, setSourceKeywords] = useState('');
   const [sourceColor, setSourceColor] = useState('#8CC7AE');
@@ -110,6 +115,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
   const [expAmount, setExpAmount] = useState<number>(0);
   const [expJarCode, setExpJarCode] = useState(jars[0]?.code || 'NEC');
   const [expRecurrence, setExpRecurrence] = useState('Hàng tháng');
+  const [expOneTimeDate, setExpOneTimeDate] = useState('');
   const [expenseError, setExpenseError] = useState('');
 
   // Modal Thêm / Sửa Hũ
@@ -149,16 +155,17 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     onConfirm: () => {}
   });
 
-  // --- TÍNH TOÁN DỰ KIẾN (Quy đổi toàn bộ nguồn thu về chuẩn hàng tháng) ---
-  const totalExpectedIncome = incomeSources.reduce(
-    (sum, s) => sum + normalizeToMonthlyAmount(s.expectedAmount, s.recurrence),
-    0
-  );
+  const cashIncomeDialogProps = useManagedOverlay(showCashIncomeModal, () => setShowCashIncomeModal(false), 'Ghi nhận khoản thu tiền mặt');
+  const incomeDialogProps = useManagedOverlay(showIncomeModal, () => setShowIncomeModal(false), 'Nguồn thu dự kiến');
+  const plannedExpenseDialogProps = useManagedOverlay(showPlannedExpModal, () => setShowPlannedExpModal(false), 'Khoản chi dự kiến');
+  const jarEditDialogProps = useManagedOverlay(Boolean(selectedJarForEdit), () => setSelectedJarForEdit(null), 'Chỉnh sửa hũ');
+  const addJarDialogProps = useManagedOverlay(showAddJarModal, () => setShowAddJarModal(false), 'Thêm hũ mới');
+  const balanceDialogProps = useManagedOverlay(showBalanceModal, () => setShowBalanceModal(false), 'Cân bằng tỷ lệ hũ');
 
-  const totalPlannedExpenses = plannedExpenses.reduce(
-    (sum, e) => sum + normalizeToMonthlyAmount(e.expectedAmount, e.recurrence),
-    0
-  );
+  // --- TÍNH TOÁN DỰ KIẾN (Quy đổi toàn bộ nguồn thu về chuẩn hàng tháng) ---
+  const currentMonth = getVietnamDate().toISOString().slice(0, 7);
+  const totalExpectedIncome = incomeSources.reduce((sum, s) => sum + plannedAmountForMonth(s, currentMonth), 0);
+  const totalPlannedExpenses = plannedExpenses.reduce((sum, e) => sum + plannedAmountForMonth(e, currentMonth), 0);
 
   const totalLimit = jars.reduce((sum, j) => sum + j.monthlyLimit, 0);
   const totalTargetPercent = Math.round(jars.reduce((sum, j) => sum + j.targetPercent * 100, 0));
@@ -196,6 +203,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setSourceName('');
     setSourceAmount(0);
     setSourceRecurrence('Hàng tháng');
+    setSourceOneTimeDate('');
     setSourceKind('fixed');
     setSourceKeywords('');
     setSourceColor('#8CC7AE');
@@ -208,6 +216,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setSourceName(source.name);
     setSourceAmount(source.expectedAmount || 0);
     setSourceRecurrence(source.recurrence || 'Hàng tháng');
+    setSourceOneTimeDate(source.oneTimeDate || '');
     setSourceKind(source.kind || 'fixed');
     setSourceKeywords(source.keywords || '');
     setSourceColor(source.color || '#8CC7AE');
@@ -221,6 +230,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       setSourceError('Vui lòng nhập tên nguồn thu (ví dụ: Lương chính, Cho thuê nhà...)');
       return;
     }
+    if (sourceRecurrence.startsWith('Một lần') && !sourceOneTimeDate) {
+      setSourceError('Vui lòng chọn ngày nhận khoản thu một lần');
+      return;
+    }
     setSourceError('');
 
     const cleanKeywords = sourceKeywords.trim();
@@ -228,6 +241,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       name: sourceName.trim(),
       expectedAmount: sourceAmount || 0,
       recurrence: sourceRecurrence,
+      oneTimeDate: sourceRecurrence.startsWith('Một lần') ? sourceOneTimeDate : null,
       kind: sourceKind,
       color: sourceColor,
       keywords: cleanKeywords || undefined
@@ -243,6 +257,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
           name: sourceName.trim(),
           expectedAmount: sourceAmount || 0,
           recurrence: sourceRecurrence,
+          oneTimeDate: sourceRecurrence.startsWith('Một lần') ? sourceOneTimeDate : null,
           kind: sourceKind,
           color: sourceColor,
           keywords: cleanKeywords || undefined
@@ -254,6 +269,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         name: sourceName.trim(),
         expectedAmount: sourceAmount || 0,
         recurrence: sourceRecurrence,
+        oneTimeDate: sourceRecurrence.startsWith('Một lần') ? sourceOneTimeDate : null,
         kind: sourceKind,
         color: sourceColor,
         keywords: cleanKeywords || undefined
@@ -263,12 +279,13 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setShowIncomeModal(false);
   };
 
-  // --- HANDLERS KHOẢN THU TIỀN MẶT THỰC TẾ (Thu tiền mặt vào ví & phân bổ vào nguồn thu) ---
+  // --- HANDLERS KHOẢN THU TIỀN MẶT THỰC TẾ (Thu tiền mặt vào ví & phân bổ vào nguồn thu - V2-20) ---
   const handleOpenAddCashIncome = () => {
-    const cashAcc = (accounts || []).find(
+    const activeAccounts = (accounts || []).filter(a => a.isActive !== false);
+    const cashAcc = activeAccounts.find(
       a => a.type === 'cash' || (a.name || '').toLowerCase().includes('tiền mặt') || (a.name || '').toLowerCase().includes('ví')
     );
-    setCashAccountId(cashAcc?.id || accounts?.[0]?.id || 'acc_cash');
+    setCashAccountId(cashAcc?.id || activeAccounts[0]?.id || '');
     setCashAmount(0);
     setCashDescription('');
     setCashIncomeSourceId(incomeSources[0]?.id || '');
@@ -286,9 +303,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       setCashError('Vui lòng nhập nội dung khoản thu (VD: Khách trả tiền mặt, Bán đồ lẻ...)');
       return;
     }
-    const targetAccId = cashAccountId || accounts?.[0]?.id || 'acc_cash';
+    const activeAccounts = (accounts || []).filter(a => a.isActive !== false);
+    const targetAccId = cashAccountId || activeAccounts[0]?.id || '';
     if (!targetAccId) {
-      setCashError('Vui lòng chọn tài khoản nhận tiền');
+      setCashError('Vui lòng tạo ít nhất 1 tài khoản/ví nhận tiền trước khi ghi chép');
       return;
     }
 
@@ -321,6 +339,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setExpAmount(0);
     setExpJarCode(jars[0]?.code || 'NEC');
     setExpRecurrence('Hàng tháng');
+    setExpOneTimeDate('');
     setExpenseError('');
     setShowPlannedExpModal(true);
   };
@@ -331,6 +350,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     setExpAmount(exp.expectedAmount);
     setExpJarCode(exp.jarCode);
     setExpRecurrence(exp.recurrence || 'Hàng tháng');
+    setExpOneTimeDate(exp.oneTimeDate || '');
     setExpenseError('');
     setShowPlannedExpModal(true);
   };
@@ -345,6 +365,10 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       setExpenseError('Vui lòng nhập số tiền dự kiến lớn hơn 0 ₫');
       return;
     }
+    if (expRecurrence.startsWith('Một lần') && !expOneTimeDate) {
+      setExpenseError('Vui lòng chọn ngày chi khoản một lần');
+      return;
+    }
     setExpenseError('');
 
     if (editingExpId) {
@@ -353,7 +377,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
           name: expName.trim(),
           expectedAmount: expAmount,
           jarCode: expJarCode,
-          recurrence: expRecurrence
+          recurrence: expRecurrence,
+          oneTimeDate: expRecurrence.startsWith('Một lần') ? expOneTimeDate : null
         });
       } else {
         onDeletePlannedExpense(editingExpId);
@@ -362,7 +387,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
           name: expName.trim(),
           expectedAmount: expAmount,
           jarCode: expJarCode,
-          recurrence: expRecurrence
+          recurrence: expRecurrence,
+          oneTimeDate: expRecurrence.startsWith('Một lần') ? expOneTimeDate : null
         });
       }
     } else {
@@ -371,7 +397,8 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         name: expName.trim(),
         expectedAmount: expAmount,
         jarCode: expJarCode,
-        recurrence: expRecurrence
+        recurrence: expRecurrence,
+        oneTimeDate: expRecurrence.startsWith('Một lần') ? expOneTimeDate : null
       });
     }
 
@@ -403,17 +430,23 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
     const draftSum = Object.values(draftPercents).reduce((a, b) => a + b, 0);
     if (draftSum !== 100) return;
 
+    const exactLimits = allocateVndExact(
+      Math.round(totalExpectedIncome),
+      jars.map(j => draftPercents[j.id] || 0)
+    );
+
     if (onBatchUpdateJarsPercent) {
-      const updates = jars.map(j => {
+      const updates = jars.map((j, idx) => {
         const pct = (draftPercents[j.id] || 0) / 100;
-        const newLimit = Math.round(totalExpectedIncome * pct);
+        const newLimit = exactLimits[idx] || 0;
         return { id: j.id, targetPercent: pct, monthlyLimit: newLimit };
       });
       await onBatchUpdateJarsPercent(updates);
     } else {
-      for (const j of jars) {
+      for (let idx = 0; idx < jars.length; idx++) {
+        const j = jars[idx];
         const pct = (draftPercents[j.id] || 0) / 100;
-        const newLimit = Math.round(totalExpectedIncome * pct);
+        const newLimit = exactLimits[idx] || 0;
         await onUpdateJar(j.id, { targetPercent: pct, monthlyLimit: newLimit });
       }
     }
@@ -568,7 +601,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {incomeSources.map((s) => {
-                    const monthly = normalizeToMonthlyAmount(s.expectedAmount, s.recurrence);
+                    const monthly = plannedAmountForMonth(s, currentMonth);
                     const hasExpected = monthly > 0;
                     const actualAmt = actualIncomeTxns
                       .filter(t => t.incomeSourceId === s.id)
@@ -668,7 +701,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               <div className="flex flex-wrap gap-1.5 pt-0.5">
                 {plannedExpenses.map(exp => {
                   const jar = jars.find(j => j.code === exp.jarCode);
-                  const monthlyExp = normalizeToMonthlyAmount(exp.expectedAmount, exp.recurrence);
+                  const monthlyExp = plannedAmountForMonth(exp, currentMonth);
                   const isExpMonthly = (exp.recurrence || 'Hàng tháng') === 'Hàng tháng';
                   return (
                     <button
@@ -764,7 +797,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
               const targetPct = Math.round((jar.targetPercent || 0) * 100);
               const plannedForJar = plannedExpenses
                 .filter(e => e.jarCode === jar.code)
-                .reduce((s, e) => s + normalizeToMonthlyAmount(e.expectedAmount, e.recurrence), 0);
+                .reduce((s, e) => s + plannedAmountForMonth(e, currentMonth), 0);
 
               return (
                 <div
@@ -910,7 +943,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                   const actualAmt = actualIncomeTxns
                     .filter(t => t.incomeSourceId === s.id)
                     .reduce((sum, t) => sum + t.amount, 0);
-                  const monthly = normalizeToMonthlyAmount(s.expectedAmount, s.recurrence);
+                  const monthly = plannedAmountForMonth(s, currentMonth);
                   const hasExpected = monthly > 0;
                   const pctActual = hasExpected ? Math.round((actualAmt / monthly) * 100) : 0;
 
@@ -1101,7 +1134,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {/* MODAL 0: GHI NHẬN KHOẢN THU TIỀN MẶT THỰC TẾ (VÀO VÍ & NGUỒN THU)      */}
       {/* ===================================================================== */}
       {showCashIncomeModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...cashIncomeDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
@@ -1282,7 +1315,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         const colorPalette = ['#8CC7AE', '#DEB48A', '#657D81', '#E09F3E', '#A78BFA', '#38BDF8', '#F43F5E'];
 
         return (
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+          <div {...incomeDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
             <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
               <div className="flex items-center justify-between">
                 <div>
@@ -1460,7 +1493,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                       </div>
 
                       {/* Hiển thị kết quả quy đổi hàng tháng tự động */}
-                      {!isMonthly && (
+                      {sourceRecurrence.startsWith('Một lần') && (
+                        <label className="block text-xs text-[#C4D0D2]">Ngày nhận dự kiến
+                          <input type="date" required value={sourceOneTimeDate} onChange={e => setSourceOneTimeDate(e.target.value)} className="mt-1 w-full rounded-xl p-2 bg-[#20292B] text-[#F2F5F5]" />
+                        </label>
+                      )}
+                      {!isMonthly && !sourceRecurrence.startsWith('Một lần') && (
                         <div className="mt-1.5 p-2 bg-[#12191B] rounded-xl border border-[#8CC7AE]/20 flex items-center justify-between text-xs">
                           <span className="text-[#869699]">Quy đổi hàng tháng:</span>
                           <span className="font-bold text-[#8CC7AE] num">
@@ -1526,7 +1564,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         const isExpMonthly = expRecurrence === 'Hàng tháng';
 
         return (
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+          <div {...plannedExpenseDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
             <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
               <div className="flex items-center justify-between">
                 <div>
@@ -1608,7 +1646,12 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
                     })}
                   </div>
 
-                  {expAmount > 0 && !isExpMonthly && (
+                  {expRecurrence.startsWith('Một lần') && (
+                    <label className="block mt-2 text-xs text-[#C4D0D2]">Ngày chi dự kiến
+                      <input type="date" required value={expOneTimeDate} onChange={e => setExpOneTimeDate(e.target.value)} className="mt-1 w-full rounded-xl p-2 bg-[#20292B] text-[#F2F5F5]" />
+                    </label>
+                  )}
+                  {expAmount > 0 && !isExpMonthly && !expRecurrence.startsWith('Một lần') && (
                     <div className="mt-2 p-2.5 bg-[#12191B] rounded-xl border border-[#DEB48A]/25 flex items-center justify-between text-xs">
                       <span className="text-[#869699]">Tự động quy đổi hàng tháng:</span>
                       <span className="font-bold text-[#DEB48A] num">
@@ -1684,7 +1727,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {/* MODAL 3: CHỈNH SỬA / XÓA 1 HŨ                                         */}
       {/* ===================================================================== */}
       {selectedJarForEdit && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...jarEditDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
@@ -1817,7 +1860,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
       {/* MODAL 4: THÊM HŨ MỚI                                                  */}
       {/* ===================================================================== */}
       {showAddJarModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+        <div {...addJarDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
           <div className="w-full max-w-md max-h-[88vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
             <div className="flex items-center justify-between">
               <div>
@@ -1930,7 +1973,7 @@ export const BudgetView: React.FC<BudgetViewProps> = ({
         const isValid = sum === 100;
 
         return (
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
+          <div {...balanceDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
             <div className="w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#161C1E] border-t sm:border border-[#8BA5AA]/20 rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl space-y-4 no-scrollbar">
               <div className="flex items-center justify-between">
                 <div>

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useId, useRef } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { useManagedOverlay } from '../utils/overlayManager';
 
 export interface ConfirmSheetProps {
   isOpen: boolean;
@@ -28,15 +29,24 @@ export const ConfirmSheet: React.FC<ConfirmSheetProps> = ({
   onConfirm,
   onCancel
 }) => {
-  if (!isOpen) return null;
-
   const displayMessage = description || message || '';
   const displayConfirm = confirmText || confirmLabel;
   const isAlert = isDanger !== undefined ? isDanger : isDangerous;
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  const dialogProps = useManagedOverlay(isOpen, onCancel, title, cancelButtonRef);
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-sm bg-[#161C1E] border border-[#8BA5AA]/25 rounded-3xl p-5 shadow-2xl space-y-4">
+      <div
+        {...dialogProps}
+        aria-labelledby={titleId}
+        aria-describedby={displayMessage ? descriptionId : undefined}
+        className="w-full max-w-sm bg-[#161C1E] border border-[#8BA5AA]/25 rounded-3xl p-5 shadow-2xl space-y-4"
+      >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
@@ -44,23 +54,25 @@ export const ConfirmSheet: React.FC<ConfirmSheetProps> = ({
             }`}>
               <AlertTriangle size={18} />
             </div>
-            <div className="text-sm font-bold text-[#F2F5F5]">{title}</div>
+            <div id={titleId} className="text-sm font-bold text-[#F2F5F5]">{title}</div>
           </div>
           <button
             type="button"
             onClick={onCancel}
+            aria-label="Đóng hộp thoại"
             className="w-7 h-7 rounded-full bg-[#20292B] text-[#869699] flex items-center justify-center active:scale-90"
           >
             <X size={15} />
           </button>
         </div>
 
-        <div className="text-xs text-[#C4D0D2] leading-relaxed">
+        <div id={displayMessage ? descriptionId : undefined} className="text-xs text-[#C4D0D2] leading-relaxed">
           {displayMessage}
         </div>
 
         <div className="grid grid-cols-2 gap-2 pt-2">
           <button
+            ref={cancelButtonRef}
             type="button"
             onClick={onCancel}
             className="py-2.5 rounded-xl bg-[#20292B] text-[#D5E1E3] text-xs font-semibold hover:bg-[#283437] active:scale-98 transition-colors"

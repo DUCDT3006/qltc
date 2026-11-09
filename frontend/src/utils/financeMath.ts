@@ -44,6 +44,33 @@ export function normalizeToMonthlyAmount(amount?: number, recurrence?: string): 
   return Math.round(amount);
 }
 
+export function cadenceFromRecurrence(recurrence?: string): 'monthly' | 'quarterly' | 'semiannual' | 'yearly' | 'one_time' | 'weekly' {
+  const value = (recurrence || '').toLowerCase();
+  if (value.includes('một lần') || value.includes('one_time')) return 'one_time';
+  if (value.includes('tuần') || value.includes('weekly')) return 'weekly';
+  if (value.includes('nửa năm') || value.includes('6 tháng') || value.includes('semiannual')) return 'semiannual';
+  if (value.includes('quý') || value.includes('quarterly')) return 'quarterly';
+  if (value.includes('năm') || value.includes('yearly')) return 'yearly';
+  return 'monthly';
+}
+
+export function recurrenceFromCadence(cadence?: string): string {
+  return ({ monthly: 'Hàng tháng', quarterly: 'Hàng quý', semiannual: 'Nửa năm (6 tháng)', yearly: 'Hàng năm', one_time: 'Một lần', weekly: 'Hàng tuần' } as Record<string, string>)[cadence || ''] || 'Hàng tháng';
+}
+
+export function plannedAmountForMonth(item: { expectedAmount?: number; recurrence?: string; cadence?: string; oneTimeDate?: string | null }, month: string): number {
+  const amount = item.expectedAmount || 0;
+  if (amount <= 0) return 0;
+  const cadence = item.cadence || cadenceFromRecurrence(item.recurrence);
+  const monthNumber = Number(month.slice(5, 7));
+  if (cadence === 'one_time') return item.oneTimeDate?.startsWith(month) ? amount : 0;
+  if (cadence === 'quarterly') return monthNumber % 3 === 1 ? amount : 0;
+  if (cadence === 'semiannual') return monthNumber === 1 || monthNumber === 7 ? amount : 0;
+  if (cadence === 'yearly') return monthNumber === 1 ? amount : 0;
+  if (cadence === 'weekly') return Math.round(amount * 52 / 12);
+  return amount;
+}
+
 // Phân bổ số tiền VND chính xác từng đồng theo tỷ trọng (Largest Remainder Method - V2-17)
 export function allocateVndExact(totalVnd: number, weights: (number | { weight: number })[]): number[] {
   if (weights.length === 0) return [];

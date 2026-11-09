@@ -34,26 +34,26 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v1.3.0.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v2.0.0.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v1.3.0.apk
+          path: qltc-v2.0.0.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.3.0
-          name: "QLTC v1.3.0 - Nâng Cấp Toàn Diện Kiến Trúc V2 (Sổ Cái Delta, Phân Bổ VND, XIRR)"
+          tag_name: v2.0.0
+          name: "QLTC v2.0.0 - Nâng Cấp Toàn Diện Kiến Trúc V2 (Sổ Cái Delta, Phân Bổ VND, XIRR)"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v1.3.0 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v2.0.0 - Android APK
 
-            Phiên bản `v1.3.0` đánh dấu hoàn tất kiến trúc nâng cấp V2 với 26 cải tiến cốt lõi:
+            Phiên bản `v2.0.0` đánh dấu hoàn tất kiến trúc nâng cấp V2 với 26 cải tiến cốt lõi:
             - **Sổ cái Delta & Chống lặp (V2-02):** Hạch toán delta hai chiều nguyên tử, bảo đảm bất biến tổng số dư và không nhân đôi khi duyệt/undo.
             - **Bộ phân tích thông báo V2 (V2-04):** Xử lý dấu trừ Unicode, bảo vệ ngày tháng không nhầm thành số tiền, loại bỏ hoàn toàn tin nhắn OTP.
             - **Phân bổ VND chính xác (V2-17):** Thuật toán Largest Remainder Method phân phối từng đồng VND không sai lệch.
@@ -61,6 +61,6 @@ jobs:
             - **Đo lường hiệu quả đầu tư XIRR (V2-19):** Tích hợp công cụ tính tỷ suất sinh lời thực tế nội bộ cho các dòng tiền nạp/rút tài sản.
             - **Chế độ riêng tư (V2-23):** Ẩn hiện số dư nhạy cảm một chạm trên toàn bộ giao diện.
           files: |
-            qltc-v1.3.0.apk
+            qltc-v2.0.0.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -483,6 +483,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [pairError, setPairError] = useState('');
   const [isRestoringBackup, setIsRestoringBackup] = useState<boolean>(false);
   const [pendingRestore, setPendingRestore] = useState<any | null>(null);
+  const [diagnosticsRefresh, setDiagnosticsRefresh] = useState(0);
 
   const isAndroidWebView = typeof window !== 'undefined' && Boolean((window as any).AndroidBridge);
   const androidDiagnostics = React.useMemo(() => {
@@ -494,7 +495,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       // ignore
     }
     return null;
-  }, [isAndroidWebView, isOpen, settingsTab]);
+  }, [isAndroidWebView, isOpen, settingsTab, diagnosticsRefresh]);
 
   const dialogProps = useManagedOverlay(isOpen, onClose, 'Cài đặt');
   if (!isOpen) return null;
@@ -962,7 +963,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               ) : (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#7EB89E]/20 text-[#8CC7AE] border border-[#7EB89E]/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#8CC7AE] animate-ping"></span>
-                  Đang hoạt động trên Android
+                  Đã cấp quyền và ghép thiết bị
                 </span>
               )
             ) : (
@@ -975,6 +976,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="text-[11.5px] text-[#869699] leading-relaxed">
             Hỗ trợ Vietcombank, Techcombank, HDBank, MB, ACB, TPBank, VPBank, BIDV, Cake, SMS... và tự động lọc bỏ OTP an toàn tuyệt đối.
           </div>
+
+          {isAndroidWebView && androidDiagnostics && (
+            <div className="rounded-xl border border-[#8BA5AA]/15 p-3 text-xs space-y-2">
+              <div className="flex justify-between gap-3"><span>Thông báo chờ gửi</span><strong>{Number(androidDiagnostics.queuedCount || 0)}</strong></div>
+              <div className="flex justify-between gap-3"><span>Tạm dừng, cần ghép lại</span><strong>{Number(androidDiagnostics.authPausedCount || 0)}</strong></div>
+              <div className="flex justify-between gap-3"><span>Thông báo bị từ chối</span><strong>{Number(androidDiagnostics.failedValidationCount || 0)}</strong></div>
+              <p className="text-[#869699] leading-relaxed">
+                {androidDiagnostics.lastIngestSuccessAt
+                  ? `Gửi thành công gần nhất: ${new Date(androidDiagnostics.lastIngestSuccessAt).toLocaleString('vi-VN')}.`
+                  : 'Chưa có lần gửi thông báo thành công trên thiết bị này.'}
+                {' '}Thông báo chờ sẽ tự gửi lại khi có mạng. Nút tải lại ở Tổng quan chỉ tải dữ liệu đã có trên máy chủ.
+              </p>
+              <button type="button" onClick={() => setDiagnosticsRefresh(value => value + 1)} className="rounded-lg bg-[#232E31] px-3 py-2 text-[#D5E1E3]">Kiểm tra lại trạng thái</button>
+            </div>
+          )}
 
           {isAndroidWebView && (
             <div className="space-y-2 text-xs">

@@ -79,7 +79,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             onClick={onRefresh}
             disabled={spinning}
-            title="Đồng bộ thông báo từ ngân hàng"
+            title="Tải lại dữ liệu từ máy chủ"
             className="w-9 h-9 rounded-full bg-[#1C2426]/80 border border-[#8BA5AA]/15 flex items-center justify-center text-[#C4D0D2] active:scale-95 transition-transform"
           >
             <RefreshCw size={15} className={spinning ? 'animate-spin text-[#8CC7AE]' : ''} />

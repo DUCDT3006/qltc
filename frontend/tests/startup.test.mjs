@@ -106,7 +106,38 @@ async function browserCase(scriptMode, budget = 4000, authStatus = 401) {
     const safePath = pathname === '/' ? 'index.html' : pathname.slice(1);
     if (safePath.includes('..')) { res.writeHead(400); res.end(); return; }
     if (safePath === 'index.html') {
-      const mock = `<script>window.fetch = async function(input) { if (String(input).indexOf('/api/auth/session') !== -1) return new Response('{}', {status: ${authStatus}}); return new Response('{}', {status: 404}); };</script>`;
+      const refreshCase = scriptMode.startsWith('refresh-');
+      const mock = refreshCase ? `<script>
+        window.fetch = async function(input) {
+          var path = String(input).split('?')[0];
+          var payloads = {
+            '/api/auth/session': {authenticated:true},
+            '/api/accounts': {accounts:[]}, '/api/jars': {jars:[]}, '/api/holdings': {holdings:[]},
+            '/api/income-sources': {incomeSources:[]}, '/api/planned-expenses': {plannedExpenses:[]},
+            '/api/user/profile': {user:{name:'Test user'}},
+            '/api/transactions': {transactions:[],pagination:{totalCount:0,hasMore:false,nextCursor:null,dataRevision:0}}
+          };
+          if (path === '/api/transactions' && ${scriptMode === 'refresh-failure'}) return new Response('{"error":"D1_ERROR: no such column: j.icon"}', {status:500});
+          return new Response(JSON.stringify(payloads[path] || {}), {status:payloads[path] ? 200 : 503});
+        };
+        var clicked = false;
+        var observer = new MutationObserver(function () {
+          if (!clicked) return;
+          var text = document.getElementById('root')?.textContent || '';
+          if (text.includes('Chưa tải đủ dữ liệu từ máy chủ')) document.documentElement.setAttribute('data-refresh-error-seen', 'true');
+          if (text.includes('Đã tải đầy đủ dữ liệu từ máy chủ') || text.includes('Dữ liệu đã được đồng bộ mới nhất')) document.documentElement.setAttribute('data-refresh-success-seen', 'true');
+        });
+        observer.observe(document.documentElement, {childList:true,subtree:true,characterData:true});
+        var clickTimer = setInterval(function () {
+          var button = document.querySelector('button[title="Tải lại dữ liệu từ máy chủ"],button[title="Đồng bộ thông báo từ ngân hàng"]');
+          if (button && !button.disabled) {
+            clicked = true;
+            document.documentElement.setAttribute('data-refresh-clicked', 'true');
+            clearInterval(clickTimer);
+            button.click();
+          }
+        }, 100);
+      </script>` : `<script>window.fetch = async function(input) { if (String(input).indexOf('/api/auth/session') !== -1) return new Response('{}', {status: ${authStatus}}); return new Response('{}', {status: 404}); };</script>`;
       res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
       res.end(html.replace('<script type="module"', mock + '<script type="module"'));
       return;
@@ -128,7 +159,8 @@ async function browserCase(scriptMode, budget = 4000, authStatus = 401) {
       proc.on('error', reject);
       proc.on('close', (code) => code === 0 ? resolveOutput(stdout) : reject(new Error(`Chrome exit ${code}`)));
     });
-    return output.match(/<div id="root">([\s\S]*?)<script>/)?.[1] || '';
+    const root = output.match(/<div id="root">([\s\S]*?)<script>/)?.[1] || '';
+    return (scriptMode.startsWith('refresh-') ? output.match(/<html[^>]*>/)?.[0] || '' : '') + root;
   } finally {
     await new Promise((done) => server.close(done));
     rmSync(profile, { recursive: true, force: true });
@@ -159,4 +191,19 @@ test('Chrome watchdog replaces a silent startup stall', { skip: !existsSync(chro
   const root = await browserCase('silent', 14000);
   assert.match(root, /Không thể tải ứng dụng QLTC/);
   assert.doesNotMatch(root, /data-qltc-startup/);
+});
+
+test('Chrome refresh reports failure without a success toast when transaction loading fails', { skip: !existsSync(chrome) }, async () => {
+  const root = await browserCase('refresh-failure');
+  assert.match(root, /data-refresh-clicked="true"/);
+  assert.match(root, /data-refresh-error-seen="true"/);
+  assert.doesNotMatch(root, /data-refresh-success-seen="true"/);
+  assert.doesNotMatch(root, /D1_ERROR/);
+});
+
+test('Chrome refresh reports success only after every primary collection loads', { skip: !existsSync(chrome) }, async () => {
+  const root = await browserCase('refresh-success');
+  assert.match(root, /data-refresh-clicked="true"/);
+  assert.match(root, /data-refresh-success-seen="true"/);
+  assert.doesNotMatch(root, /data-refresh-error-seen="true"/);
 });

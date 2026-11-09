@@ -421,34 +421,35 @@ function AppContent() {
       ] = await Promise.all([
         fetch(`${API_BASE}/accounts`).catch(() => null),
         fetch(`${API_BASE}/jars`).catch(() => null),
-        fetchAllTransactions().catch((err) => {
-          error(err instanceof Error ? err.message : 'Không tải đủ lịch sử. Hãy tải lại để thử lại.');
-          return null;
-        }),
+        fetchAllTransactions().catch(() => null),
         fetch(`${API_BASE}/holdings`).catch(() => null),
         fetch(`${API_BASE}/income-sources`).catch(() => null),
         fetch(`${API_BASE}/planned-expenses`).catch(() => null),
         fetch(`${API_BASE}/user/profile`).catch(() => null)
       ]);
 
+      let complete = [accountsRes, jarsRes, holdingsRes, incomeRes, plannedExpRes, profileRes].every(res => res?.ok)
+        && Array.isArray(txnsRes);
+
       if (accountsRes && accountsRes.ok) {
         const aData = await accountsRes.json();
         if (Array.isArray(aData.accounts)) {
           setAccounts(aData.accounts.map(mapAccount));
-        }
+        } else complete = false;
       }
 
       if (jarsRes && jarsRes.ok) {
         const jData = await jarsRes.json();
         const serverJars = readServerCollection(jData, 'jars', mapJar);
         if (serverJars !== null) setJars(serverJars);
+        else complete = false;
       }
 
       if (holdingsRes && holdingsRes.ok) {
         const hData = await holdingsRes.json();
         if (Array.isArray(hData.holdings)) {
           setHoldings(hData.holdings.map(mapHolding));
-        }
+        } else complete = false;
       }
 
       if (incomeRes && incomeRes.ok) {
@@ -457,7 +458,7 @@ function AppContent() {
           const mappedIncome = iData.incomeSources.map(mapIncomeSource);
           setIncomeSources(mappedIncome);
           localStorage.setItem('qltc_income_sources', JSON.stringify(mappedIncome));
-        }
+        } else complete = false;
       }
 
       if (plannedExpRes && plannedExpRes.ok) {
@@ -466,7 +467,7 @@ function AppContent() {
           const mappedPe = peData.plannedExpenses.map(mapPlannedExpense);
           setPlannedExpenses(mappedPe);
           localStorage.setItem('qltc_planned_expenses', JSON.stringify(mappedPe));
-        }
+        } else complete = false;
       }
 
       if (txnsRes) {
@@ -488,10 +489,14 @@ function AppContent() {
         if (remoteProfile) {
           setUserProfile(remoteProfile);
           localStorage.setItem('qltc_user_profile', JSON.stringify(remoteProfile));
-        }
+        } else complete = false;
       }
+      if (!complete) error('Chưa tải đủ dữ liệu từ máy chủ. Một phần dữ liệu đang hiển thị có thể là bản đã lưu. Anh thử tải lại.');
+      return complete;
     } catch (e) {
       console.warn('Backend offline, giữ cache local:', e);
+      error('Không thể tải đầy đủ dữ liệu. Dữ liệu đã lưu vẫn được giữ nguyên. Anh thử tải lại.');
+      return false;
     }
   }, [error]);
 
@@ -712,9 +717,11 @@ function AppContent() {
   // Làm mới toàn diện từ Cloudflare
   const handleRefreshAll = async () => {
     setIsSyncing(true);
-    await loadDataFromBackend();
-    setIsSyncing(false);
-    info('Dữ liệu đã được đồng bộ mới nhất');
+    try {
+      if (await loadDataFromBackend()) info('Đã tải đầy đủ dữ liệu từ máy chủ');
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   // Tính tổng số dư và tài sản ròng (bao gồm cả tiền mặt trong TK chứng khoán/crypto theo chuẩn L-04)
@@ -1814,7 +1821,7 @@ function AppContent() {
         accounts={accounts}
         holdings={holdings}
         privacyMode={privacyMode}
-        onRefreshAll={loadDataFromBackend}
+        onRefreshAll={async () => { await loadDataFromBackend(); }}
         onDirectReset={handleDirectReset}
       />
     </div>

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "test": "tsx --test tests/v2_suite.test.ts tests/ledger_race.test.ts tests/auth_regression.test.ts tests/pagination.test.ts tests/backup_foreign_keys.test.ts tests/reset_income_scope.test.ts",
+    "test": "tsx --test tests/v2_suite.test.ts tests/ledger_race.test.ts tests/auth_regression.test.ts tests/pagination.test.ts tests/backup_foreign_keys.test.ts tests/reset_income_scope.test.ts tests/legacy_storage.test.ts",
     "deploy": "wrangler deploy",
     "d1:init": "wrangler d1 execute qltc-db --local --file=./schema.sql",
     "d1:init:prod": "wrangler d1 execute qltc-db --remote --file=./schema.sql"

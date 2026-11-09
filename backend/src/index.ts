@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { migrateLegacyStorage } from './services/legacyStorage';
 import { Bindings, AuthPrincipal, PlanVersion } from './types';
 import {
   parseBankNotification,
@@ -607,6 +608,8 @@ export async function ensureDatabaseSchema(db: D1Database) {
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )`).run();
+
+    await migrateLegacyStorage(db);
 
     const alterColumns = [
       "ALTER TABLE devices ADD COLUMN scopes TEXT NOT NULL DEFAULT 'notifications:ingest'",
@@ -1402,16 +1405,25 @@ app.post('/api/notifications/ingest', async (c) => {
     if (eventId) {
       const existingRaw = await db
         .prepare(
-          'SELECT id, parse_status FROM raw_notifications WHERE user_id = ? AND device_id = ? AND event_id = ? LIMIT 1'
+          'SELECT id, parse_status, app_package, title, text, original_time_value FROM raw_notifications WHERE user_id = ? AND device_id = ? AND event_id = ? LIMIT 1'
         )
         .bind(userId, deviceId, eventId)
-        .first<{ id: string; parse_status: string }>();
+        .first<{ id: string; parse_status: string | null; app_package: string; title: string; text: string; original_time_value: string | null }>();
 
       if (existingRaw) {
         const existingTx = await db
           .prepare('SELECT id, needs_account_review, suggested_pair_id FROM transactions WHERE raw_notification_id = ? AND is_synthetic = 0 LIMIT 1')
           .bind(existingRaw.id)
           .first<any>();
+        if (!existingTx && [null, 'pending', 'failed', 'ambiguous'].includes(existingRaw.parse_status)) {
+          // A previous attempt may have saved the notification and failed before
+          // creating its transaction. Finish the stored event before ACKing it.
+          const recovered = await processNotificationToTransaction(
+            db, userId, existingRaw.id, existingRaw.app_package, existingRaw.title || '',
+            existingRaw.text, existingRaw.original_time_value
+          );
+          return c.json({ ...recovered, status: 'duplicate_event', rawNotificationId: existingRaw.id });
+        }
         return c.json({
           status: 'duplicate_event',
           rawNotificationId: existingRaw.id,
@@ -3308,12 +3320,13 @@ app.post('/api/jars', async (c) => {
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
-        `INSERT INTO jars (id, user_id, name, icon, color, target_percent, monthly_limit, sort_order, is_active, revision)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
+        `INSERT INTO jars (id, user_id, code, name, icon, color, target_percent, monthly_limit, sort_order, is_active, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
       )
       .bind(
         id,
         userId,
+        body.code || id,
         body.name,
         body.icon || 'account_balance_wallet',
         body.color || '#3B82F6',
@@ -5215,12 +5228,13 @@ app.post('/api/backup/restore', async (c) => {
       stmts.push(
         db
           .prepare(
-            `INSERT INTO jars (id, user_id, name, icon, color, target_percent, monthly_limit, rollover_enabled, is_active, revision, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO jars (id, user_id, code, name, icon, color, target_percent, monthly_limit, rollover_enabled, is_active, revision, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
             j.id,
             userId,
+            j.code || j.id,
             j.name,
             j.icon || 'home',
             j.color || '#3B82F6',
@@ -5657,8 +5671,8 @@ app.post('/api/seed', async (c) => {
   }
   const stmts: D1PreparedStatement[] = [];
   for (const jar of BUNDLED_DEFAULTS.jars) {
-    stmts.push(db.prepare(`INSERT INTO jars (id, user_id, name, icon, color, target_percent, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(idMap.get(jar.id), principal.userId, jar.name, jar.icon, jar.color, jar.target_percent, jar.sort_order));
+    stmts.push(db.prepare(`INSERT INTO jars (id, user_id, code, name, icon, color, target_percent, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(idMap.get(jar.id), principal.userId, jar.id.replace('jar_', '').toUpperCase(), jar.name, jar.icon, jar.color, jar.target_percent, jar.sort_order));
   }
   for (const account of BUNDLED_DEFAULTS.accounts) {
     stmts.push(db.prepare(`INSERT INTO accounts (id, user_id, name, type, balance, account_number_mask, include_in_net_worth, is_active)

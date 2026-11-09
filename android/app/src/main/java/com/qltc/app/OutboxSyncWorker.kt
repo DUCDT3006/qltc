@@ -75,10 +75,10 @@ internal object OutboxSyncScheduler {
 }
 
 class OutboxSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result = synchronized(SYNC_LOCK) {
+    override suspend fun doWork(): Result {
         val db = NotificationOutboxDb(applicationContext)
         val prefs = applicationContext.getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
-        try {
+        return try {
             var processed = 0
             while (processed < 100 && !isStopped) {
                 val dueItems = db.getDueItems(System.currentTimeMillis(), 25)
@@ -186,9 +186,5 @@ class OutboxSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 .parse(value)?.time ?: return null
             (parsed - System.currentTimeMillis()).coerceIn(0L, 86_400_000L)
         } catch (_: Exception) { null }
-    }
-
-    companion object {
-        private val SYNC_LOCK = Any()
     }
 }

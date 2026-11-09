@@ -200,7 +200,7 @@ class MainActivity : AppCompatActivity() {
                     if (uriStr.endsWith(".apk") || uri.host?.contains("github.com") == true) {
                         try {
                             val intent = Intent(Intent.ACTION_VIEW, uri)
-                            startActivity(intent)
+                            this@MainActivity.startActivity(intent)
                             return true
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -216,7 +216,7 @@ class MainActivity : AppCompatActivity() {
             setDownloadListener { downloadUrl, _, _, _, _ ->
                 try {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl))
-                    startActivity(intent)
+                    this@MainActivity.startActivity(intent)
                 } catch (e: Exception) {
                     Toast.makeText(this@MainActivity, "Không thể mở liên kết tải: $downloadUrl", Toast.LENGTH_SHORT).show()
                 }

@@ -30,14 +30,7 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
-          gradle assembleDebug --stacktrace 2>&1 | tee ../gradle-build.log
-
-      - name: Upload Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: gradle-build.log
+          gradle assembleDebug --stacktrace
 
       - name: Rename APK
         run: |
@@ -54,16 +47,22 @@ jobs:
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
           tag_name: v2.0.1
-          name: "QLTC v2.0.1 - Sửa Lỗi Khởi Động WebView & Bảo Vệ Khởi Chạy Ứng Dụng Android"
+          name: "QLTC v2.0.1 - Sửa Lỗi Khởi Động App & Cập Nhật Nổi Bật V2"
           draft: false
           prerelease: false
           body: |
             ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v2.0.1 - Android APK
 
-            Bản vá nóng v2.0.1 sửa triệt để lỗi không mở được app trên Android:
-            - **Bảo vệ khởi chạy an toàn (Non-blocking Init):** Chuyển toàn bộ khởi tạo WorkManager và mã hóa thiết bị vào luồng nền độc lập, đảm bảo UI WebView luôn mở tức thì và không bị dừng đột ngột.
-            - **Khôi phục WebViewClient tương thích cao:** Cho phép nạp toàn diện tài nguyên ứng dụng mượt mà, hỗ trợ tải file APK qua trình duyệt máy.
-            - **Cấu hình WorkManager Public:** Đảm bảo WorkManager framework khởi tạo chính xác các tác vụ đồng bộ nền trên mọi dòng máy (Samsung, Xiaomi, Oppo...).
+            Bản vá v2.0.1 sửa triệt để lỗi không mở được app trên Android và cập nhật toàn diện kiến trúc V2:
+
+            ### Các thay đổi đáng chú ý:
+            - **Sửa lỗi khởi chạy ứng dụng Android:** Chuyển toàn bộ khởi tạo WorkManager và mã hóa thiết bị vào luồng nền độc lập, app mở tức thì và hoạt động mượt mà trên mọi dòng máy (Samsung, Xiaomi, Oppo...).
+            - **Sửa xác thực:** Bỏ token mặc định, kiểm tra JWT Cloudflare Access và dùng phiên `HttpOnly` qua Worker cùng nguồn.
+            - **Sửa ghi sổ:** Yêu cầu trùng `operationId` chỉ tác động số dư một lần; tách reset nguồn thu để giữ khoản chi dự kiến, hũ và giao dịch.
+            - **Bổ sung phân trang:** Có phát hiện dữ liệu thay đổi, xử lý kế hoạch theo kỳ và ngày của khoản “Một lần”.
+            - **Kiểm tra sao lưu:** Bổ sung kiểm tra checksum, liên kết dữ liệu và bước xem trước khi khôi phục sao lưu.
+            - **Định giá & XIRR:** Nối lại nguồn dữ liệu quỹ; thêm lịch sử góp/rút để tính XIRR khi anh xác nhận dữ liệu đầy đủ. Trường hợp tiền tệ chưa được hỗ trợ sẽ không trả tỷ suất giả.
+            - **Hoàn thiện giao diện & hàng đợi:** Sửa một số luồng riêng tư, Back/Escape và focus của hộp thoại; Android có hàng đợi gửi lại bằng WorkManager.
           files: |
             qltc-v2.0.1.apk
         env:

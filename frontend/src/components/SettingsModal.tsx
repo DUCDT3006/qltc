@@ -378,7 +378,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v2.0.0'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v2.0.1'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -1212,9 +1212,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>Bản mới nhất: {latestRelease.tagName}</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-[#8CC7AE]/15 text-[#8CC7AE]">Sẵn sàng tải</span>
               </div>
-              <div className="text-[10.5px] text-[#869699] leading-relaxed">
-                Tự động bóc tách Techcombank, HDBank, SMS & hỗ trợ tải cập nhật trực tiếp.
-              </div>
+              {latestRelease.body ? (
+                <div className="text-[11px] text-[#C4D0D2] leading-relaxed whitespace-pre-line bg-[#161D1E] p-2.5 rounded-lg border border-[#8BA5AA]/15 max-h-48 overflow-y-auto">
+                  {latestRelease.body}
+                </div>
+              ) : (
+                <div className="text-[10.5px] text-[#869699] leading-relaxed">
+                  Bản vá v2.0.1: Sửa lỗi mở app Android, sổ cái delta nguyên tử, phân bổ ngân sách VND chính xác và tính XIRR đầu tư.
+                </div>
+              )}
               <button
                 onClick={startDownload}
                 className="w-full py-2.5 rounded-lg bg-[#8CC7AE] text-[#0E1314] text-xs font-bold flex items-center justify-center gap-1.5 shadow active:scale-95 transition-transform"

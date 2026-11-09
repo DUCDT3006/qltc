@@ -853,7 +853,14 @@ app.get('/api/version', (c) => {
     latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk',
     downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     changelog:
-      'Bản vá nóng V2.0.1:\n- Sửa lỗi không mở được ứng dụng Android (bảo vệ khởi chạy an toàn)\n- Khôi phục WebViewClient tương thích cao mọi dòng máy\n- Đảm bảo hàng đợi thông báo chạy nền ổn định'
+      'Các thay đổi đáng chú ý:\n\n' +
+      '• Sửa lỗi khởi chạy ứng dụng Android: Chạy ngầm tiến trình khởi tạo, app mở tức thì và ổn định 100% trên mọi dòng máy.\n' +
+      '• Sửa xác thực: bỏ token mặc định, kiểm tra JWT Cloudflare Access và dùng phiên HttpOnly qua Worker cùng nguồn.\n' +
+      '• Sửa ghi sổ để yêu cầu trùng operationId chỉ tác động số dư một lần; tách reset nguồn thu để giữ khoản chi dự kiến, hũ và giao dịch.\n' +
+      '• Bổ sung phân trang có phát hiện dữ liệu thay đổi, xử lý kế hoạch theo kỳ và ngày của khoản “Một lần”.\n' +
+      '• Bổ sung kiểm tra checksum, liên kết dữ liệu và bước xem trước khi khôi phục sao lưu.\n' +
+      '• Nối lại nguồn dữ liệu quỹ; thêm lịch sử góp/rút để tính XIRR khi anh xác nhận dữ liệu đầy đủ. Trường hợp tiền tệ chưa được hỗ trợ sẽ không trả tỷ suất giả.\n' +
+      '• Sửa một số luồng riêng tư, Back/Escape và focus của hộp thoại; Android có hàng đợi gửi lại bằng WorkManager.'
   });
 });
 

@@ -291,6 +291,10 @@ class BankNotificationListener : NotificationListenerService() {
         "mã otp", "ma otp", "smart otp", "mã xác thực", "ma xac thuc", "verification code", "passcode"
     )
 
+    companion object {
+        private const val TAG = "QLTC_Noti"
+    }
+
     override fun onCreate() {
         super.onCreate()
         try {

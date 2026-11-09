@@ -19,6 +19,7 @@ import {
   LedgerTxState
 } from './services/ledger';
 import {
+  AuthServiceUnavailableError,
   resolveAuthPrincipal,
   isAuthorizedRole,
   sha256Hex,
@@ -812,7 +813,14 @@ app.use('/api/*', async (c, next) => {
     return c.json({ error: 'Nguồn yêu cầu không hợp lệ', code: 'CSRF_ORIGIN_REJECTED' }, 403);
   }
 
-  const principal = await resolveAuthPrincipal(c);
+  let principal: AuthPrincipal | null;
+  try {
+    principal = await resolveAuthPrincipal(c);
+  } catch (err) {
+    if (!(err instanceof AuthServiceUnavailableError)) throw err;
+    c.header('Retry-After', '5');
+    return c.json({ error: 'Máy chủ xác thực đang tạm thời không khả dụng. Vui lòng thử lại.', code: 'AUTH_SERVICE_UNAVAILABLE' }, 503);
+  }
   if (!principal) {
     return c.json(
       {

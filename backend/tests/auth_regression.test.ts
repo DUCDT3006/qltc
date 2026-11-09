@@ -155,6 +155,33 @@ describe('V2-01 auth regressions through worker.fetch and in-memory D1', () => {
     })).status, 401);
   });
 
+  it('returns a retryable error for device auth database failures instead of invalidating the phone credential', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN };
+    const pair = await request(env, '/api/devices/pair-code', { Authorization: `Bearer ${OWNER_TOKEN}` }, {});
+    const exchanged = await request(env, '/api/auth/pair-exchange', {}, { code: pair.data.code });
+    const device = { 'X-Device-Token': exchanged.data.deviceToken };
+    h.setFailOnSqlPattern('SELECT id, user_id, scopes FROM devices');
+    const unavailable = await request(env, '/api/notifications/ingest', device, {});
+    assert.equal(unavailable.status, 503, '401 makes Android erase its valid device token and pause every notification');
+    assert.equal(unavailable.data.code, 'AUTH_SERVICE_UNAVAILABLE');
+    h.setFailOnSqlPattern(null);
+    assert.equal((await request(env, '/api/notifications/ingest', device, {})).status, 400, 'the same token still authenticates after the database recovers');
+  });
+
+  it('preserves the login session when its lookup fails temporarily', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN };
+    const login = await workerApp.fetch(new Request('https://example.test/api/auth/login', {
+      method: 'POST', headers: { Origin: FRONTEND_ORIGIN, 'Content-Type': 'application/json' }, body: JSON.stringify({ token: OWNER_TOKEN })
+    }), env, { waitUntil() {} });
+    const cookie = login.headers.get('Set-Cookie')!.split(';', 1)[0];
+    h.setFailOnSqlPattern('SELECT user_id FROM web_sessions');
+    assert.equal((await request(env, '/api/auth/session', { Cookie: cookie })).status, 503);
+    h.setFailOnSqlPattern(null);
+    assert.equal((await request(env, '/api/auth/session', { Cookie: cookie })).status, 200);
+  });
+
   it('rejects a forged Access JWT and client email header even when a team domain is configured', async () => {
     const env = testEnv({ CF_ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com', OWNER_EMAIL: 'owner@example.com' });
     const claims = { iss: 'https://team.cloudflareaccess.com', aud: ['app-aud'], email: 'owner@example.com', exp: Math.floor(Date.now() / 1000) + 600 };

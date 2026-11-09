@@ -15,6 +15,13 @@ export const OWNER_SESSION_COOKIE = '__Secure-qltc_session';
 export const OWNER_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_FRONTEND_ORIGIN = 'https://qltc-app.dtd-store.workers.dev';
 
+export class AuthServiceUnavailableError extends Error {
+  constructor() {
+    super('Authentication storage is temporarily unavailable');
+    this.name = 'AuthServiceUnavailableError';
+  }
+}
+
 function parseCookie(header: string | undefined, name: string): string {
   if (!header) return '';
   for (const part of header.split(';')) {
@@ -161,7 +168,7 @@ export async function resolveAuthPrincipal(c: AuthContext): Promise<AuthPrincipa
       ).bind(tokenHash, new Date().toISOString()).first<{ user_id: string }>();
       return session ? { userId: session.user_id, role: 'owner' } : null;
     } catch {
-      return null;
+      throw new AuthServiceUnavailableError();
     }
   }
 
@@ -201,7 +208,8 @@ export async function resolveAuthPrincipal(c: AuthContext): Promise<AuthPrincipa
         };
       }
     } catch {
-      // DB error or table not initialized yet
+      // A storage outage is not proof that the caller's credential is invalid.
+      throw new AuthServiceUnavailableError();
     }
   }
 

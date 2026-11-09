@@ -1,4 +1,4 @@
-const CACHE_NAME = 'qltc-shell-v2';
+const CACHE_NAME = 'qltc-shell-v201';
 const APP_SHELL_ASSETS = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {

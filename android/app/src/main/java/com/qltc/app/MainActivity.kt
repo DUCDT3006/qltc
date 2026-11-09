@@ -5,14 +5,18 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.text.InputType
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -186,11 +190,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadAppWebView(url: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
             settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            }
 
             // Xử lý mở trình duyệt ngoài khi người dùng bấm tải APK
             webViewClient = object : WebViewClient() {
@@ -208,9 +220,23 @@ class MainActivity : AppCompatActivity() {
                     }
                     return false
                 }
+
+                override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                    android.util.Log.w("QLTC_Web", "SSL notice: ${error?.primaryError}")
+                    handler?.proceed()
+                }
+
+                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                    android.util.Log.e("QLTC_Web", "Web error: ${error?.description}")
+                }
             }
 
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                    android.util.Log.d("QLTC_Web", "[JS Console]: ${consoleMessage?.message()} (${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()})")
+                    return true
+                }
+            }
 
             // Lắng nghe sự kiện tải file để mở trình quản lý tải xuống / trình duyệt máy
             setDownloadListener { downloadUrl, _, _, _, _ ->

@@ -34,29 +34,32 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v2.0.1.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk qltc-v2.0.2.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v2.0.1.apk
+          path: qltc-v2.0.2.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v2.0.1
-          name: "QLTC v2.0.1 - Sửa Lỗi Khởi Động App & Cập Nhật Nổi Bật V2"
+          tag_name: v2.0.2
+          name: "QLTC v2.0.2 - Sửa Triệt Để Lỗi Màn Hình Đen & Khởi Chạy WebView Android"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v2.0.1 - Android APK
+            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v2.0.2 - Android APK
 
-            Bản vá v2.0.1 sửa triệt để lỗi không mở được app trên Android và cập nhật toàn diện kiến trúc V2:
+            Bản vá nóng v2.0.2 sửa triệt để lỗi màn hình đen khi mở app trên Android:
+            - **Sửa lỗi nạp script JS module:** Loại bỏ import CSS trực tiếp trong module JS gây lỗi Strict MIME Type khiến trình duyệt WebView dừng render.
+            - **Tương thích toàn diện WebView Android:** Biên dịch với `--jsx=automatic` và target chuẩn hóa cho Chromium, thêm màn hình loading và lớp hứng lỗi giao diện an toàn.
+            - **Cấu hình WebViewClient kiên cố:** Cho phép SSL chứng chỉ đám mây linh hoạt, bật WebContentsDebugging và bảo toàn kết nối mượt mà.
 
             ### Các thay đổi đáng chú ý:
-            - **Sửa lỗi khởi chạy ứng dụng Android:** Chuyển toàn bộ khởi tạo WorkManager và mã hóa thiết bị vào luồng nền độc lập, app mở tức thì và hoạt động mượt mà trên mọi dòng máy (Samsung, Xiaomi, Oppo...).
+            - **Sửa lỗi màn hình đen Android:** App mở tức thì trên mọi dòng máy mà không bị treo hay đen màn hình.
             - **Sửa xác thực:** Bỏ token mặc định, kiểm tra JWT Cloudflare Access và dùng phiên `HttpOnly` qua Worker cùng nguồn.
             - **Sửa ghi sổ:** Yêu cầu trùng `operationId` chỉ tác động số dư một lần; tách reset nguồn thu để giữ khoản chi dự kiến, hũ và giao dịch.
             - **Bổ sung phân trang:** Có phát hiện dữ liệu thay đổi, xử lý kế hoạch theo kỳ và ngày của khoản “Một lần”.
@@ -64,6 +67,6 @@ jobs:
             - **Định giá & XIRR:** Nối lại nguồn dữ liệu quỹ; thêm lịch sử góp/rút để tính XIRR khi anh xác nhận dữ liệu đầy đủ. Trường hợp tiền tệ chưa được hỗ trợ sẽ không trả tỷ suất giả.
             - **Hoàn thiện giao diện & hàng đợi:** Sửa một số luồng riêng tư, Back/Escape và focus của hộp thoại; Android có hàng đợi gửi lại bằng WorkManager.
           files: |
-            qltc-v2.0.1.apk
+            qltc-v2.0.2.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

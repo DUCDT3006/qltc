@@ -15,7 +15,7 @@ execSync('npx @tailwindcss/cli -i src/index.css -o dist/assets/index.css', { cwd
 
 console.log('3. Bundling JavaScript with esbuild...');
 execSync(
-  'npx esbuild src/main.tsx --bundle --minify --format=esm --target=es2022 --external:*.css --outfile=dist/assets/index.js --loader:.png=dataurl --loader:.svg=dataurl --define:import.meta.env.MODE=\'"production"\' --define:import.meta.env.PROD=true --define:import.meta.env.DEV=false --define:import.meta.env.BASE_URL=\'"/"\'',
+  'npx esbuild src/main.tsx --bundle --minify --format=esm --target=es2020,chrome80 --jsx=automatic --loader:.css=empty --outfile=dist/assets/index.js --loader:.png=dataurl --loader:.svg=dataurl --define:import.meta.env.MODE=\'"production"\' --define:import.meta.env.PROD=true --define:import.meta.env.DEV=false --define:import.meta.env.BASE_URL=\'"/"\'',
   { cwd: rootDir, stdio: 'inherit' }
 );
 
@@ -32,7 +32,7 @@ const htmlSrc = path.join(rootDir, 'index.html');
 let htmlContent = fs.readFileSync(htmlSrc, 'utf8');
 htmlContent = htmlContent.replace(
   '<script type="module" src="/src/main.tsx"></script>',
-  '<script type="module" crossorigin src="/assets/index.js"></script>\n    <link rel="stylesheet" crossorigin href="/assets/index.css">'
+  '<script type="module" src="/assets/index.js"></script>\n    <link rel="stylesheet" href="/assets/index.css">'
 );
 fs.writeFileSync(path.join(distDir, 'index.html'), htmlContent, 'utf8');
 

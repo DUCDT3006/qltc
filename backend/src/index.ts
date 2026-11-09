@@ -847,14 +847,14 @@ app.get('/api/health', (c) =>
 
 app.get('/api/version', (c) => {
   return c.json({
-    versionCode: 23,
-    versionName: '2.0.1',
-    version: '2.0.1',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk',
+    versionCode: 24,
+    versionName: '2.0.2',
+    version: '2.0.2',
+    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.2/qltc-v2.0.2.apk',
     downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
     changelog:
       'Các thay đổi đáng chú ý:\n\n' +
-      '• Sửa lỗi khởi chạy ứng dụng Android: Chạy ngầm tiến trình khởi tạo, app mở tức thì và ổn định 100% trên mọi dòng máy.\n' +
+      '• Sửa lỗi màn hình đen khi mở app Android: Khắc phục triệt để lỗi nạp gói JS module, hỗ trợ JSX tự động và hiển thị loading/báo lỗi trực quan.\n' +
       '• Sửa xác thực: bỏ token mặc định, kiểm tra JWT Cloudflare Access và dùng phiên HttpOnly qua Worker cùng nguồn.\n' +
       '• Sửa ghi sổ để yêu cầu trùng operationId chỉ tác động số dư một lần; tách reset nguồn thu để giữ khoản chi dự kiến, hũ và giao dịch.\n' +
       '• Bổ sung phân trang có phát hiện dữ liệu thay đổi, xử lý kế hoạch theo kỳ và ngày của khoản “Một lần”.\n' +
@@ -865,7 +865,7 @@ app.get('/api/version', (c) => {
 });
 
 app.get('/api/download-apk', (c) => {
-  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.1/qltc-v2.0.1.apk', 302);
+  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.2/qltc-v2.0.2.apk', 302);
 });
 
 // ============================================================================

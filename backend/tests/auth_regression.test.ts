@@ -96,6 +96,41 @@ describe('V2-01 auth regressions through worker.fetch and in-memory D1', () => {
     assert.equal((await request(env, '/api/auth/session', { Cookie: cookie })).status, 401);
   });
 
+  it('upgrades the legacy device table before exchanging a pair code without replacing existing devices', async () => {
+    const harness = createSqliteD1();
+    harness.rawDb.exec(`CREATE TABLE devices (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      token_hash TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      revoked_at DATETIME
+    );
+    INSERT INTO devices (id, user_id, device_name, token_hash, status, revoked_at)
+    VALUES ('legacy-active', 'user_default', 'Existing phone', 'retained-active-hash', 'active', NULL),
+      ('legacy-revoked', 'user_default', 'Old phone', 'retained-revoked-hash', 'revoked', '2026-01-01');`);
+    const env = { DB: harness.db, OWNER_API_TOKEN: OWNER_TOKEN };
+    const owner = { Authorization: `Bearer ${OWNER_TOKEN}` };
+    const pair = await request(env, '/api/devices/pair-code', owner, { deviceName: 'New phone' });
+    assert.equal(pair.status, 200);
+    const exchanged = await request(env, '/api/auth/pair-exchange', {}, { code: pair.data.code, deviceId: 'new-phone' });
+    assert.equal(exchanged.status, 200, 'a valid code must work against the old production schema');
+    assert.match(exchanged.data.deviceToken, /^qltc_dev_/);
+    const columns = harness.rawDb.prepare('PRAGMA table_info(devices)').all() as any[];
+    assert.ok(columns.some(column => column.name === 'scopes'));
+    assert.ok(columns.some(column => column.name === 'last_seen_at'));
+    assert.deepEqual(
+      harness.rawDb.prepare("SELECT id, device_name, token_hash, status, revoked_at, scopes, last_seen_at FROM devices WHERE id LIKE 'legacy-%' ORDER BY id").all().map(row => ({ ...row })),
+      [
+        { id: 'legacy-active', device_name: 'Existing phone', token_hash: 'retained-active-hash', status: 'active', revoked_at: null, scopes: 'notifications:ingest', last_seen_at: null },
+        { id: 'legacy-revoked', device_name: 'Old phone', token_hash: 'retained-revoked-hash', status: 'revoked', revoked_at: '2026-01-01', scopes: 'notifications:ingest', last_seen_at: null }
+      ]
+    );
+    assert.equal((harness.rawDb.prepare('SELECT COUNT(*) AS n FROM devices').get() as any).n, 3);
+    assert.equal((await request(env, '/api/auth/pair-exchange', {}, { code: pair.data.code })).status, 401, 'the code remains single-use');
+  });
+
   it('keeps a paired device limited to ingest and rejects it after revocation', async () => {
     const harness = createSqliteD1();
     const env = { DB: harness.db, OWNER_API_TOKEN: OWNER_TOKEN };

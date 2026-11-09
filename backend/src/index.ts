@@ -609,6 +609,8 @@ export async function ensureDatabaseSchema(db: D1Database) {
     )`).run();
 
     const alterColumns = [
+      "ALTER TABLE devices ADD COLUMN scopes TEXT NOT NULL DEFAULT 'notifications:ingest'",
+      'ALTER TABLE devices ADD COLUMN last_seen_at DATETIME',
       'ALTER TABLE transactions ADD COLUMN transfer_pair_id TEXT',
       'ALTER TABLE transactions ADD COLUMN suggested_pair_id TEXT',
       'ALTER TABLE transactions ADD COLUMN original_type TEXT',

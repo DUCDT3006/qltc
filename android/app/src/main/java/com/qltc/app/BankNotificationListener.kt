@@ -293,6 +293,7 @@ class BankNotificationListener : NotificationListenerService() {
 
     companion object {
         private const val TAG = "QLTC_Noti"
+        private const val FMARKET_PACKAGE = "com.fincorp.fmarket"
     }
 
     override fun onCreate() {
@@ -313,6 +314,10 @@ class BankNotificationListener : NotificationListenerService() {
             val prefs = getSharedPreferences("qltc_prefs", Context.MODE_PRIVATE)
             prefs.edit().putLong("last_listener_connected_at", System.currentTimeMillis()).apply()
             OutboxSyncScheduler.scheduleNow(applicationContext)
+            // Pick up Fmarket confirmations still visible when QLTC is updated or reconnects.
+            for (notification in activeNotifications.orEmpty()) {
+                if (notification.packageName.equals(FMARKET_PACKAGE, ignoreCase = true)) onNotificationPosted(notification)
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "BankNotificationListener onListenerConnected warning", t)
         }
@@ -321,12 +326,18 @@ class BankNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
         val packageName = sbn.packageName ?: return
+        val isFmarketApp = packageName.equals(FMARKET_PACKAGE, ignoreCase = true)
+        if (isFmarketApp && sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
 
         val extras = sbn.notification.extras
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
-        val fullBody = if (bigText.length > text.length) bigText else text
+        val fullBody = when {
+            bigText.length > text.length -> bigText
+            text.isBlank() && isFmarketApp -> title
+            else -> text
+        }
         if (fullBody.isBlank()) return
 
         val combinedLower = "$title $fullBody".lowercase()
@@ -338,7 +349,7 @@ class BankNotificationListener : NotificationListenerService() {
             return
         }
 
-        val isSupportedApp = SUPPORTED_PACKAGES.any { packageName.contains(it, ignoreCase = true) }
+        val isSupportedApp = isFmarketApp || SUPPORTED_PACKAGES.any { packageName.contains(it, ignoreCase = true) }
         val hasFinancialKeyword = FINANCIAL_KEYWORDS.any { combinedLower.contains(it) }
         if (!isSupportedApp && !hasFinancialKeyword) return
 

@@ -34,29 +34,29 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk qltc-v2.0.3.apk
+          cp android/app/build/outputs/apk/release/app-release.apk qltc-v2.0.4.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v2.0.3.apk
+          path: qltc-v2.0.4.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v2.0.3
-          name: "QLTC v2.0.3 - Cải thiện khởi động Android"
+          tag_name: v2.0.4
+          name: "QLTC v2.0.4 - Nhận thông báo mua quỹ Fmarket"
           draft: false
           prerelease: false
           body: |
-            ## 📱 Ứng dụng Quản lý Tài chính Cá nhân (QLTC) v2.0.3 - Android APK
+            ## QLTC v2.0.4 cho Android
 
-            - Cải thiện xử lý lỗi khi ứng dụng Android khởi động hoặc mất kết nối.
-            - Làm mới bộ nhớ đệm giao diện khi cập nhật.
-            - Bổ sung thông báo và khả năng thử tải lại khi ứng dụng không khởi động được.
+            - Nhận lệnh mua đã được xác nhận từ app Fmarket vào Chờ duyệt.
+            - Chọn tài khoản đã thanh toán trước khi ghi chi đầu tư.
+            - Bỏ qua email Fmarket để tránh tạo khoản chờ duyệt trùng.
           files: |
-            qltc-v2.0.3.apk
+            qltc-v2.0.4.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -37,6 +37,18 @@ export default {
       });
     }
 
+    // Cache dài hạn và cho phép tải tức thì các tệp tài nguyên tĩnh (/assets/*)
+    if (url.pathname.startsWith('/assets/')) {
+      const headers = new Headers(response.headers);
+      headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      headers.set('Access-Control-Allow-Origin', '*');
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      });
+    }
+
     return response;
   }
 };

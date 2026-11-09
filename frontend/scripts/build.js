@@ -32,7 +32,7 @@ const htmlSrc = path.join(rootDir, 'index.html');
 let htmlContent = fs.readFileSync(htmlSrc, 'utf8');
 htmlContent = htmlContent.replace(
   '<script type="module" src="/src/main.tsx"></script>',
-  '<script type="module" src="/assets/index.js"></script>\n    <link rel="stylesheet" href="/assets/index.css">'
+  '<link rel="preload" href="/assets/index.css" as="style">\n    <link rel="modulepreload" href="/assets/index.js">\n    <link rel="stylesheet" href="/assets/index.css">\n    <script type="module" src="/assets/index.js"></script>'
 );
 fs.writeFileSync(path.join(distDir, 'index.html'), htmlContent, 'utf8');
 

@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600;700;800&display=swap');
 @import "tailwindcss";
 
 :root {
@@ -16,7 +15,7 @@
 
 body {
   margin: 0;
-  font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Be Vietnam Pro', system-ui, sans-serif;
   background-color: #0E1314;
   color: #F2F5F5;
   letter-spacing: -0.01em;

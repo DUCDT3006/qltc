@@ -26,6 +26,7 @@ export interface BankAccount {
   branch?: string;
   bankBin?: string;
   balance: number;
+  currency?: string;
   type: 'bank' | 'cash' | 'ewallet' | 'securities' | 'crypto' | 'savings';
   isActive?: boolean;
   archivedAt?: string | null;
@@ -97,6 +98,40 @@ export interface PlannedExpense {
   revision?: number;
 }
 
+export type CashFlowType = 'income' | 'expense';
+
+export interface TransactionApproval {
+  type?: CashFlowType;
+  accountId?: string;
+  jarId?: string;
+  jarCode?: string;
+  incomeSourceId?: string;
+  categoryName?: string;
+  note?: string;
+}
+
+export interface FundPurchaseLink {
+  symbol: string;
+  holdingId: string;
+  quantity: number | null;
+  unitPrice: number | null;
+  alreadyRecorded: boolean;
+}
+
+export interface BankFundPurchaseRequest {
+  symbol: string;
+  type: 'expense';
+  accountId: string;
+  quantity: number | null;
+  unitPrice: number | null;
+  expectedTransactionRevision: number;
+  expectedHoldingRevision: number | null;
+  operationId: string;
+  alreadyRecorded: boolean;
+  confirmAmountDifference: boolean;
+  note?: string;
+}
+
 export interface Transaction {
   id: string;
   accountId?: string;
@@ -107,6 +142,8 @@ export interface Transaction {
   amount: number;
   description: string;
   note?: string;
+  source?: string;
+  debtPaymentId?: string | null;
   rawQuote?: string;
   suggestedCategory: string;
   suggestedJarCode: string;
@@ -122,6 +159,8 @@ export interface Transaction {
   occurredAtIso?: string;
   status: 'pending' | 'confirmed' | 'rejected' | 'paired_hidden' | 'draft';
   needsAccountReview?: boolean;
+  review?: { type: CashFlowType | null; accountId: string | null; bankCode: string | null };
+  fundPurchase?: FundPurchaseLink;
   parseStatus?: string;
   suggestedPairId?: string | null;
   transferPairId?: string | null;
@@ -155,6 +194,82 @@ export interface Holding {
   unrealizedPnlVnd?: number;
   simpleRoiPct?: number | null;
   revision?: number;
+  landDetails?: LandDetails | null;
+}
+
+export interface LandPosition { lat: number; lng: number }
+export interface LandValuation {
+  source: 'dulieu.dev';
+  kind: 'asking';
+  surveyedAt: string;
+  newestSampleOn: string | null;
+  radiusKm: number;
+  sampleCount: number;
+  lowPerM2: number;
+  medianPerM2: number;
+  highPerM2: number;
+  scope?: 'ward' | 'district';
+  locationLabel?: string;
+}
+export interface LandDetails extends LandPosition {
+  address: string;
+  parcel: string;
+  landUse: 'residential' | 'agricultural' | 'mixed' | null;
+  access: 'frontage' | 'alley' | null;
+  valuation: LandValuation | null;
+}
+export interface LandComparison {
+  title: string;
+  area: number;
+  perM2: number;
+  distanceM: number | null;
+  source: string;
+  observedOn: string | null;
+  url: string | null;
+}
+export interface LandSurvey {
+  valuation: LandValuation | null;
+  sampleCount: number;
+  scope?: 'ward' | 'district';
+  locationLabel?: string;
+  comparisons: LandComparison[];
+  reference?: { scope: 'ward' | 'district'; locationLabel: string; comparisons: LandComparison[] };
+}
+
+export type DebtKind = 'payable' | 'receivable';
+export interface Debt {
+  id: string;
+  name: string;
+  creditor: string;
+  kind?: DebtKind;
+  principal_vnd: number;
+  charges_vnd: number;
+  due_on: string | null;
+  due_vnd: number;
+  collateral_holding_id: string | null;
+  has_payment_history: number;
+  revision: number;
+}
+export interface DebtPayment {
+  id: string;
+  debt_id: string;
+  account_id: string | null;
+  account_name: string | null;
+  principal_vnd: number;
+  charges_vnd: number;
+  debt_revision_after: number;
+  account_revision_after: number;
+  occurred_at: string;
+  note?: string | null;
+}
+export interface DebtSnapshot { debts: Debt[]; payments: DebtPayment[] }
+export interface LoanReceiptDraft { transaction: Transaction; note?: string }
+
+export interface FundPurchaseRequest {
+  quantity: number;
+  unitPrice: number;
+  expectedRevision: number;
+  operationId: string;
 }
 
 export interface InvestmentTransaction {

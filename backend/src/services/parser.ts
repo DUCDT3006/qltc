@@ -1,22 +1,38 @@
 import { ParsedTransaction } from '../types';
 
+const EMAIL_PACKAGES = new Set([
+  'com.google.android.gm',
+  'com.samsung.android.email.provider',
+  'com.microsoft.office.outlook',
+  'com.android.email'
+]);
+const FMARKET_APP_PACKAGE = 'com.fincorp.fmarket';
+
+export function isFmarketEmailNotification(appPackage: string, title: string, text: string): boolean {
+  if (!EMAIL_PACKAGES.has(appPackage.trim().toLowerCase())) return false;
+  // A bank can mention Fmarket in a payment memo. Look for the sender or subject instead.
+  return /\bfmarket\b/i.test(title) || /@(?:[a-z0-9-]+\.)*fmarket\.vn\b/i.test(text);
+}
+
 const BANK_PACKAGES: Record<string, string> = {
-  'com.VCB': 'VCB',
+  'com.vcb': 'VCB',
   'com.vietcombank': 'VCB',
   'vn.com.techcombank.bb.app': 'TCB',
   'com.techcombank': 'TCB',
   'com.mbmobile': 'MB',
   'com.vnpay.bidv': 'BIDV',
   'com.vietinbank.ipay': 'CTG',
-  'com.ACB': 'ACB',
+  'com.acb': 'ACB',
   'com.tpb.mb.gprsandroid': 'TPB',
   'com.vnpay.vpbankonline': 'VPB',
   'com.mservice.momotransfer': 'MOMO',
   'vn.zalopay': 'ZALOPAY',
-  'com.Sacombank.ewallet': 'STB',
+  'com.sacombank.ewallet': 'STB',
   'com.shinhan.global.vn.bank': 'SHBVN',
   'com.vib.myvib2': 'VIB',
-  'com.hdbank.mobilebanking': 'HDB'
+  'com.hdbank.mobilebanking': 'HDB',
+  'com.vnpay.hdbank': 'HDB',
+  'com.vnpay.coopbank': 'COOPBANK'
 };
 
 const BANK_KEYWORDS: Record<string, string> = {
@@ -26,6 +42,7 @@ const BANK_KEYWORDS: Record<string, string> = {
   'TECHCOMBANK': 'TCB',
   'TCB': 'TCB',
   'MBBANK': 'MB',
+  'MB': 'MB',
   'MB BANK': 'MB',
   'QUAN DOI': 'MB',
   'BIDV': 'BIDV',
@@ -44,6 +61,12 @@ const BANK_KEYWORDS: Record<string, string> = {
   'STB': 'STB',
   'VIB': 'VIB',
   'HDBANK': 'HDB',
+  'HDB': 'HDB',
+  'COOPBANK': 'COOPBANK',
+  'CO-OPBANK': 'COOPBANK',
+  'CO-OP BANK': 'COOPBANK',
+  'CO OP BANK': 'COOPBANK',
+  'NGAN HANG HOP TAC XA VIET NAM': 'COOPBANK',
   'AGRIBANK': 'VBA',
   'LPBANK': 'LPB',
   'SEABANK': 'SSB',
@@ -55,6 +78,69 @@ const BANK_KEYWORDS: Record<string, string> = {
 
 const UNICODE_MINUS_REGEX = /[\u2212\u2013\u2014\uFE63\uFF0D]/g;
 const UNICODE_SPACES_REGEX = /[\u00A0\u202F\u2007\u2009]/g;
+const BANK_NAME = new RegExp(
+  `(?<![a-z0-9])(?:${Object.keys(BANK_KEYWORDS).sort((a, b) => b.length - a.length).join('|')})(?![a-z0-9])`,
+  'gi'
+);
+const ACCOUNT_REFERENCE = /\b(?:(tu|vao|den|toi|ve|tru)\s+)?(?:so\s+(?:tai khoan|tk)|stk|tk|tai khoan|the)\b(?:\s+(nguoi\s+(?:gui|nhan)|thu huong|nhan|dich|gui|chuyen|nguon))?\s*[:#]?\s*([\d*x•]{4,24})(?![\d*x•]|[.,]\d)/gi;
+const MONEY = String.raw`(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{1,15})(?!\d|[.,]\d)`;
+const CURRENCY = String.raw`(?:vnd|₫|dong|d)(?![a-z0-9])`;
+const PREFIXED_CURRENCY_MONEY = new RegExp(String.raw`(?<![a-z0-9])(${CURRENCY})\s*(${MONEY})`, 'gi');
+const FMARKET_CONFIRMED_BUY = new RegExp(String.raw`\blenh mua\s*:?\s*(${MONEY})\s*${CURRENCY}\s+quy\s+([a-z0-9][a-z0-9._-]{0,23})\s+da (?:duoc )?xac nhan\b`, 'g');
+const BALANCE = new RegExp(String.raw`\b(sd\s*(?:tt|kd)?|so du)\b(?!\s*(?:tk|tai khoan)\b)(?:\s+(truoc|sau|cuoi|kha dung|thuc te|con lai|hien tai)(?:\s+(?:giao dich|gd))?)?\s*[:=]?\s*([+-]?)\s*(${MONEY})(?:\s*${CURRENCY})?`, 'gi');
+const SIGNED_MONEY = new RegExp(String.raw`(?:^|[\s:=;(])([+-])\s*(${MONEY})(?=\s*(?:${CURRENCY}|[.,;()\[]|$)|\s+[a-z])`, 'gi');
+const LABELLED_MONEY = new RegExp(String.raw`\b(?:p\s*/\s*s|ps|phat sinh(?:\s+(?:co|no))?|so tien(?:\s+giao dich)?|gd|bien dong|tien vao|tien ra|thanh toan|nhan tien|ghi co|ghi no)\s*[:=]?\s*([+-]?)\s*(${MONEY})(?:\s*${CURRENCY})?`, 'i');
+const CURRENCY_MONEY = new RegExp(String.raw`(?:^|[^\d.,])(${MONEY})\s*${CURRENCY}`, 'i');
+const INCOMING = /\b(?:bao co|ghi co|tien vao|nhan (?:duoc )?tien|nhan duoc|chuyen den|chuyen vao|cong (?:tien|vao)|hoan tien|phat sinh co|tang so du|credited|incoming transfer|received)\b/;
+const OUTGOING = /\b(?:bao no|ghi no|tien ra|bi tru|tru (?:tien|tu)|thanh toan|chuyen (?:tien )?di|rut tien|phat sinh no|giam so du|debited|outgoing transfer)\b/;
+
+function fold(text: string): string {
+  return normalizeNotificationText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/đ/g, 'd');
+}
+
+function parseFmarketPurchase(title: string, text: string, occurredAtOverride?: string | number): ParsedTransaction | null {
+  const header = fold(title);
+  const body = fold(text);
+  const message = body.includes(header) ? body : header.includes(body) ? header : `${header} ${body}`;
+  if (/\b(?:huy|that bai|tu choi|chua thanh toan|cho thanh toan|hoan tien)\b/.test(message)) return null;
+
+  const matches = [...message.matchAll(FMARKET_CONFIRMED_BUY)];
+  if (matches.length !== 1) return null;
+  const [, amountText, fund] = matches[0];
+  const amount = parseVndAmountString(amountText);
+  if (!amount) return null;
+
+  const externalRef = /\bma lenh\s*[:#]\s*([a-z0-9][a-z0-9-]{3,39})\b/.exec(message)?.[1];
+  const { occurredAt, timeSource } = canonicalizeOccurredAt(occurredAtOverride);
+  return {
+    type: 'expense', amount, bankCode: 'FMARKET', occurredAt, timeSource, externalRef,
+    description: `Fmarket · Lệnh mua quỹ ${fund.toUpperCase()} đã được xác nhận`,
+    parseStatus: 'parsed'
+  };
+}
+
+function singleBankIn(text: string): string | undefined {
+  const banks = new Set(Array.from(text.matchAll(BANK_NAME), match => BANK_KEYWORDS[match[0].toUpperCase()]));
+  return banks.size === 1 ? banks.values().next().value : undefined;
+}
+
+function readAccountReference(details: string, direction: ParsedTransaction['type'] | null) {
+  const references = Array.from(details.matchAll(ACCOUNT_REFERENCE), ([, prefix, role, number]) => ({
+    number,
+    side: /nhan|thu huong|dich/.test(role || '') || /^(vao|den|toi|ve)$/.test(prefix || '')
+      ? 'income'
+      : /gui|chuyen|nguon/.test(role || '') || /^(tu|tru)$/.test(prefix || '') ? 'expense' : null
+  })).filter(ref => /\d{3,}$/.test(ref.number));
+  const directional = direction ? references.filter(ref => ref.side === direction) : [];
+  const candidates = directional.length ? directional : references.filter(ref => ref.side === null);
+  const numbers = [...new Set(candidates.map(ref => ref.number))];
+  const number = numbers.length === 1 ? numbers[0] : undefined;
+  return {
+    accountNumber: number && /^\d{6,}$/.test(number) ? number : undefined,
+    accountNumberMask: number?.match(/\d{3,4}$/)?.[0],
+    ambiguous: numbers.length > 1 || (!number && references.length > 0)
+  };
+}
 
 /**
  * Normalizes text before parsing: NFC, Unicode minus -> '-', non-breaking spaces -> ' '
@@ -64,6 +150,7 @@ export function normalizeNotificationText(input: string): string {
   return input
     .normalize('NFC')
     .replace(UNICODE_MINUS_REGEX, '-')
+    .replace(/\uFF0B/g, '+')
     .replace(UNICODE_SPACES_REGEX, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -184,114 +271,85 @@ export function parseBankNotification(
   text: string,
   occurredAtOverride?: string | number
 ): ParsedTransaction | null {
-  if (isOtpNotification(title, text)) {
+  if (isOtpNotification(title, text) || isFmarketEmailNotification(appPackage, title, text)) {
     return null;
   }
+  const sourcePackage = appPackage.trim().toLowerCase();
+  if (sourcePackage === FMARKET_APP_PACKAGE) return parseFmarketPurchase(title, text, occurredAtOverride);
 
   const fullText = normalizeNotificationText(`${title} ${text}`);
 
-  // 1. Identify Bank Code
-  let bankCode = BANK_PACKAGES[appPackage] || 'UNKNOWN';
-  if (bankCode === 'UNKNOWN') {
-    const upperText = fullText.toUpperCase();
-    for (const [kw, code] of Object.entries(BANK_KEYWORDS)) {
-      if (upperText.includes(kw)) {
-        bankCode = code;
-        break;
+  // The bank of the app or notification header outranks banks mentioned by the sender.
+  const header = fold(title);
+  const details = fold(text).split(/\b(?:nd|noi dung|ly do|loi nhan|mo ta)\s*(?:[:=]|\s)/, 1)[0];
+  const bankCode = BANK_PACKAGES[sourcePackage] || singleBankIn(header) || singleBankIn(details) || 'UNKNOWN';
+
+  let balanceAfter: number | undefined;
+  let balanceBefore: number | undefined;
+  let explicitBalanceAfter: number | undefined;
+  const textForAmount = (header + ' ' + details)
+    .replace(PREFIXED_CURRENCY_MONEY, '$2 $1')
+    .replace(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/g, ' ')
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+    .replace(/\bbien dong so du\b/g, 'bien dong')
+    .replace(BALANCE, (_match, _label, qualifier, sign, value) => {
+      const parsedBalance = parseVndAmountString(value);
+      if (parsedBalance !== null) {
+        const balance = sign === '-' ? -parsedBalance : parsedBalance;
+        if (qualifier === 'truoc') balanceBefore = balance;
+        else if (qualifier === 'sau') explicitBalanceAfter = balance;
+        else if (balanceAfter === undefined) balanceAfter = balance;
       }
-    }
+      return ' ';
+    })
+    .replace(ACCOUNT_REFERENCE, ' ');
+  balanceAfter = explicitBalanceAfter ?? balanceAfter;
+
+  const signed = Array.from(textForAmount.matchAll(SIGNED_MONEY));
+  const labelled = textForAmount.match(LABELLED_MONEY);
+  const currency = textForAmount.match(CURRENCY_MONEY);
+  const amount = parseVndAmountString(labelled?.[2] ?? signed[0]?.[2] ?? currency?.[1] ?? '');
+  if (!amount) return null;
+
+  const directions = new Set<ParsedTransaction['type']>();
+  const signedValues = new Set<number>();
+  for (const [, sign, value] of signed) {
+    const signedAmount = parseVndAmountString(value);
+    if (!signedAmount) continue;
+    signedValues.add(signedAmount);
+    if (signedAmount === amount) directions.add(sign === '+' ? 'income' : 'expense');
   }
-
-  // Strip dates/times and phone/account patterns from amount candidate scanning
-  const textWithoutDates = fullText
-    .replace(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, ' [DATE] ')
-    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' [TIME] ');
-
-  // Extract Balance After first so we can exclude its span from transaction amount matching
-  let balanceAfter: number | undefined = undefined;
-  const balanceRegex = /\b(?:SD|Số dư|So du|SD cuối|SD khả dụng|Số dư cuối)(?!\s*TK\b)[:\s]+(\d[\d.,]*)\s*(?:VND|đ|d|₫|VNĐ)?/i;
-  const balanceMatch = textWithoutDates.match(balanceRegex);
-  let textForAmount = textWithoutDates;
-  if (balanceMatch && balanceMatch[1]) {
-    const parsedBal = parseVndAmountString(balanceMatch[1].replace(/[+-]\s*/, ''));
-    if (parsedBal !== null) {
-      balanceAfter = parsedBal;
-    }
-    textForAmount = textWithoutDates.replace(balanceMatch[0], ' [BALANCE] ');
+  if (labelled?.[1]) directions.add(labelled[1] === '+' ? 'income' : 'expense');
+  // The name in "Thông báo Co-opBank" is not a credit instruction.
+  const directionText = (header + ' ' + details).replace(/\bco[\s-]*op\s*bank\b/g, ' ');
+  if (INCOMING.test(directionText)) directions.add('income');
+  if (OUTGOING.test(directionText)) directions.add('expense');
+  if (balanceBefore !== undefined && explicitBalanceAfter !== undefined) {
+    const delta = explicitBalanceAfter - balanceBefore;
+    if (Math.abs(delta) === amount) directions.add(delta > 0 ? 'income' : 'expense');
   }
-
-  // Detect multiple conflicting signed/currency amounts in the notification (AT2-09)
-  const allSignedCurrencyMatches = Array.from(
-    textForAmount.matchAll(/([+-])\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,15})\s*(?:VND|đ|d|₫|VNĐ)?/gi)
-  );
-  const distinctSignedAmounts: { sign: string; val: number }[] = [];
-  for (const m of allSignedCurrencyMatches) {
-    const v = parseVndAmountString(m[2]);
-    if (v !== null && v > 0) {
-      if (!distinctSignedAmounts.some((x) => x.val === v && x.sign === m[1])) {
-        distinctSignedAmounts.push({ sign: m[1], val: v });
-      }
-    }
-  }
-
-  let isAmbiguousAmount = false;
-  if (distinctSignedAmounts.length >= 2) {
-    // Two distinct signed amounts in the same message (outside of balance) -> ambiguous!
-    isAmbiguousAmount = true;
-  }
-
-  // 2. Extract Amount & Type (Income vs Expense)
-  let amount = 0;
-  let type: 'income' | 'expense' = 'expense';
-
-  const signedAmountRegex = /([+-])\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,15})\s*(?:VND|đ|d|₫|VNĐ)?/i;
-  const keywordAmountRegex = /(?:PS|GD|Số tiền|So tien|Thanh toán|Thanh toan|Chuyển|Chuyen|Nhận|Nhan|Biến động|Bien dong)[:\s]*([+-]?)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,15})\s*(?:VND|đ|d|₫|VNĐ)/i;
-  const currencyAmountRegex = /(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,15})\s*(?:VND|đ|₫|VNĐ)\b/i;
-
-  const signedMatch = textForAmount.match(signedAmountRegex);
-  const keywordMatch = textForAmount.match(keywordAmountRegex);
-  const currencyMatch = textForAmount.match(currencyAmountRegex);
-
-  if (signedMatch) {
-    const sign = signedMatch[1];
-    const parsed = parseVndAmountString(signedMatch[2]);
-    if (parsed !== null) {
-      amount = parsed;
-      type = sign === '+' ? 'income' : 'expense';
-    }
-  } else if (keywordMatch) {
-    const sign = keywordMatch[1];
-    const parsed = parseVndAmountString(keywordMatch[2]);
-    if (parsed !== null) {
-      amount = parsed;
-      if (sign === '+') {
-        type = 'income';
-      } else if (sign === '-') {
-        type = 'expense';
-      } else {
-        const lower = fullText.toLowerCase();
-        type = /(?:nhận|nhan|cộng|cong| tiền vào|tien vao|hoàn tiền|hoan tien)/i.test(lower) ? 'income' : 'expense';
-      }
-    }
-  } else if (currencyMatch) {
-    const parsed = parseVndAmountString(currencyMatch[1]);
-    if (parsed !== null) {
-      amount = parsed;
-      const lower = fullText.toLowerCase();
-      type = /(?:nhận|nhan|cộng|cong|tiền vào|tien vao|hoàn tiền|hoan tien|\+)/i.test(lower) ? 'income' : 'expense';
-    }
-  }
-
-  if (!amount || amount <= 0) {
+  const multipleAmounts = signedValues.size > 1 || (signedValues.size === 1 && !signedValues.has(amount));
+  const direction = !multipleAmounts && directions.size === 1 ? [...directions][0] : null;
+  const account = readAccountReference(header + ' ' + details, direction);
+  const fullFolded = fold(`${title} ${text}`);
+  const isCarrierPromoSms =
+    !BANK_PACKAGES[sourcePackage] &&
+    bankCode === 'UNKNOWN' &&
+    signed.length === 0 &&
+    !labelled &&
+    balanceAfter === undefined &&
+    balanceBefore === undefined &&
+    directions.size === 0 &&
+    !account.accountNumber &&
+    !account.accountNumberMask &&
+    /\b(?:tu choi qc|tu choi quang cao|soan\s+(?:dk|huy)\b[^\n]{0,40}\bgui\s+\d{3,5}|gia han\s+[\d.,]+\s*(?:vnd|d)\/thang)\b/.test(fullFolded);
+  if (isCarrierPromoSms) {
     return null;
   }
-
-  // 3. Extract Account Mask (Last 4 digits)
-  let accountNumberMask: string | undefined = undefined;
-  const accMatch = fullText.match(/(?:TK|Tài khoản|Tai khoan|Thẻ|The)[:\s]*[xX*0-9]*?(\d{4})\b/i);
-  if (accMatch) {
-    accountNumberMask = accMatch[1];
-  }
+  const reasonCode = multipleAmounts ? 'MULTIPLE_AMOUNTS'
+    : directions.size > 1 ? 'CONFLICTING_DIRECTION'
+    : direction === null ? 'DIRECTION_UNKNOWN'
+    : account.ambiguous ? 'AMBIGUOUS_ACCOUNT' : undefined;
 
   // 4. Extract Date/Time from notification text if present
   const dateTimeMatch = fullText.match(/\b(\d{2}[/-]\d{2}[/-]\d{4}\s+\d{2}:\d{2}(?::\d{2})?)\b/);
@@ -313,16 +371,20 @@ export function parseBankNotification(
   }
 
   return {
-    type,
+    // Keep the existing storage type while requiring explicit review for an uncertain direction.
+    type: direction ?? 'expense',
+    needsTypeReview: direction === null,
     amount,
-    accountNumberMask,
+    accountNumber: account.accountNumber,
+    accountNumberMask: account.accountNumberMask,
+    accountReferenceAmbiguous: account.ambiguous,
     bankCode,
     occurredAt,
     timeSource,
     description,
     balanceAfter,
     externalRef,
-    parseStatus: isAmbiguousAmount ? 'ambiguous' : 'parsed',
-    reasonCode: isAmbiguousAmount ? 'MULTIPLE_AMOUNTS' : undefined
+    parseStatus: reasonCode ? 'ambiguous' : 'parsed',
+    reasonCode
   };
 }

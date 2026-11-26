@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Transaction, Jar, IncomeSource, BankAccount } from '../types';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Transaction, TransactionApproval, BankFundPurchaseRequest, CashFlowType, FmarketFund, Holding, Jar, IncomeSource, BankAccount } from '../types';
 import { formatPrivacyVND, formatPrivacyText } from '../utils/financeMath';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { TransactionNoteField } from '../components/TransactionNoteField';
+import { BankFundPurchaseDialog } from '../components/BankFundPurchaseDialog';
+import { SwipeCard } from '../components/SwipeCard';
+import { detectNotificationFund } from '../utils/notificationFund';
+import type { FmarketFeedStatus } from '../utils/fmarketFunds';
 import { useManagedOverlay } from '../utils/overlayManager';
+import { triggerLightHaptic } from '../utils/haptics';
 import {
   Check,
   X,
@@ -31,8 +36,10 @@ interface InboxSwipeViewProps {
   pendingTransactions: Transaction[];
   privacyMode?: boolean;
   confirmedTransactions: Transaction[];
-  onConfirm: (id: string, jarCode?: string, categoryName?: string, jarId?: string, incomeSourceId?: string, accountId?: string, note?: string) => void;
-  onReject: (id: string) => void;
+  onConfirm: (id: string, approval?: TransactionApproval) => Promise<boolean> | void;
+  onConfirmFundPurchase: (id: string, request: BankFundPurchaseRequest) => Promise<void>;
+  onCollectLoan: (transaction: Transaction, note?: string) => void;
+  onReject: (id: string) => Promise<boolean> | void;
   onDeleteConfirmed?: (id: string) => void;
   onUpdateConfirmed?: (
     id: string,
@@ -52,15 +59,65 @@ interface InboxSwipeViewProps {
   jars?: Jar[];
   incomeSources?: IncomeSource[];
   accounts?: BankAccount[];
+  holdings: Holding[];
+  fmarketFunds: FmarketFund[];
+  fmarketFeedStatus: FmarketFeedStatus;
+  onReloadFmarketFunds: () => void;
   onUnpair?: (id: string) => void;
   onPairTransfer?: (id: string, toAccountId: string) => void;
 }
 
+type PendingReviewTransaction = Transaction & { needsTypeReview?: boolean; reviewChanged?: boolean };
+
+function canApprove(txn: PendingReviewTransaction): boolean {
+  return txn.status === 'pending' && Boolean(txn.accountId) && txn.accountId !== 'acc_unassigned' &&
+    !txn.needsAccountReview && !txn.needsTypeReview;
+}
+
+function ReviewFields({ txn, accounts, onType, onAccount }: {
+  txn: PendingReviewTransaction;
+  accounts: BankAccount[];
+  onType: (type: CashFlowType) => void;
+  onAccount: (id: string) => void;
+}) {
+  const selectClass = 'block min-h-11 w-full min-w-0 rounded-xl border border-[#8BA5AA]/25 bg-[#20292B] px-2.5 text-sm text-[#F2F5F5] focus:outline-none focus:ring-2 focus:ring-[#8CC7AE]/60';
+  return (
+    <div className="mb-3 space-y-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)] gap-2">
+        <label className="min-w-0 space-y-1 text-xs font-semibold text-[#BFD0D3]">
+          <span>Loại giao dịch</span>
+          <select className={selectClass} value={txn.needsTypeReview ? '' : txn.type}
+            onChange={event => onType(event.target.value as CashFlowType)}>
+            <option value="" disabled>Chọn Thu/Chi</option>
+            <option value="income">Thu</option>
+            <option value="expense">Chi</option>
+          </select>
+        </label>
+        <label className="min-w-0 space-y-1 text-xs font-semibold text-[#BFD0D3]">
+          <span>{txn.needsTypeReview ? 'Tài khoản' : txn.type === 'income' ? 'Tài khoản nhận' : 'Tài khoản chi'}</span>
+          <select className={selectClass} value={txn.accountId || ''} onChange={event => onAccount(event.target.value)}>
+            <option value="" disabled>Chọn tài khoản</option>
+            {accounts.map(account => (
+              <option key={account.id} value={account.id}>
+                {account.name}{account.accountNumberMask ? ` · •••• ${account.accountNumberMask.replace(/\D/g, '').slice(-4)}` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {txn.needsTypeReview && <p className="text-xs text-[#DEB48A]">Thông báo chưa rõ tiền vào hay ra. Anh chọn Thu hoặc Chi để duyệt.</p>}
+      {txn.needsAccountReview && <p className="text-xs text-[#DEB48A]">Anh chọn tài khoản của khoản này trước khi duyệt.</p>}
+    </div>
+  );
+}
+
 export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
-  pendingTransactions,
+  pendingTransactions: pendingFromServer,
   privacyMode = false,
   confirmedTransactions,
   onConfirm,
+  onConfirmFundPurchase,
+  onCollectLoan,
   onReject,
   onDeleteConfirmed,
   onUpdateConfirmed,
@@ -68,6 +125,10 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   jars = [],
   incomeSources = [],
   accounts = [],
+  holdings,
+  fmarketFunds,
+  fmarketFeedStatus,
+  onReloadFmarketFunds,
   onUnpair,
   onPairTransfer
 }) => {
@@ -80,6 +141,130 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   const [pendingFilter, setPendingFilter] = useState<'all' | 'expense' | 'income' | 'transfer'>('all');
   const [pendingSearch, setPendingSearch] = useState('');
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const [reviewChoices, setReviewChoices] = useState<Record<string, Pick<TransactionApproval, 'type' | 'accountId'>>>({});
+  const [fundPaymentId, setFundPaymentId] = useState<string | null>(null);
+  const [exitingById, setExitingById] = useState<Record<string, 'approve' | 'reject'>>({});
+  const [hiddenInFlightIds, setHiddenInFlightIds] = useState<Record<string, true>>({});
+  const [inFlightIds, setInFlightIds] = useState<Record<string, true>>({});
+  const inFlightIdsRef = useRef<Set<string>>(new Set());
+  const exitTimersRef = useRef<Map<string, number>>(new Map());
+  const settlingCount = Object.keys(inFlightIds).length;
+
+  useEffect(() => () => {
+    exitTimersRef.current.forEach(timer => window.clearTimeout(timer));
+    exitTimersRef.current.clear();
+  }, []);
+
+  const runSmoothDismiss = useCallback(
+    (id: string, direction: 'approve' | 'reject', request: () => Promise<boolean> | void) => {
+      if (inFlightIdsRef.current.has(id)) return;
+      inFlightIdsRef.current.add(id);
+
+      const reducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const exitDurationMs = reducedMotion ? 0 : 150;
+
+      setInFlightIds(prev => ({ ...prev, [id]: true }));
+      if (exitDurationMs > 0) {
+        setExitingById(prev => ({ ...prev, [id]: direction }));
+      } else {
+        setHiddenInFlightIds(prev => ({ ...prev, [id]: true }));
+      }
+
+      const existingTimer = exitTimersRef.current.get(id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        exitTimersRef.current.delete(id);
+      }
+
+      if (exitDurationMs > 0) {
+        const timer = window.setTimeout(() => {
+          exitTimersRef.current.delete(id);
+          setExitingById(prev => {
+            if (!(id in prev)) return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setHiddenInFlightIds(prev => (prev[id] ? prev : { ...prev, [id]: true }));
+        }, exitDurationMs);
+        exitTimersRef.current.set(id, timer);
+      }
+
+      void Promise.resolve(request()).then(result => {
+        const timer = exitTimersRef.current.get(id);
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          exitTimersRef.current.delete(id);
+        }
+        inFlightIdsRef.current.delete(id);
+
+        const clearTrackedId = () => {
+          setExitingById(prev => {
+            if (!(id in prev)) return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setHiddenInFlightIds(prev => {
+            if (!(id in prev)) return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setInFlightIds(prev => {
+            if (!(id in prev)) return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        };
+
+        if (result === false) {
+          clearTrackedId();
+        } else {
+          window.setTimeout(clearTrackedId, 0);
+        }
+      });
+    },
+    []
+  );
+
+  const reviewAccounts = useMemo(() => accounts.filter(account => account.isActive !== false && account.id !== 'acc_unassigned'), [accounts]);
+  const pendingTransactions = useMemo(() => pendingFromServer.filter(txn => !hiddenInFlightIds[txn.id]).map((txn): PendingReviewTransaction => {
+    if (txn.status !== 'pending' || txn.type === 'transfer') return txn;
+    const choice = reviewChoices[txn.id];
+    const type = choice?.type ?? (txn.review ? txn.review.type : txn.type);
+    const accountId = choice?.accountId ?? (txn.review ? txn.review.accountId : txn.needsAccountReview ? null : txn.accountId);
+    const account = reviewAccounts.find(candidate => candidate.id === accountId);
+    const changedType = type !== null && type !== txn.type;
+    return {
+      ...txn,
+      type: type ?? txn.type,
+      accountId: account?.id,
+      accountName: account?.name || 'Chưa chọn tài khoản',
+      bankCode: account?.bankCode || txn.review?.bankCode || txn.bankCode,
+      needsAccountReview: !account,
+      needsTypeReview: type === null,
+      reviewChanged: changedType || account?.id !== txn.accountId || txn.review?.type === null,
+      ...(changedType ? { jarId: undefined, incomeSourceId: undefined, suggestedJarCode: '', suggestedCategory: type === 'income' ? 'Thu ngoài dự kiến' : 'Chi tiêu' } : {})
+    };
+  }), [pendingFromServer, hiddenInFlightIds, reviewChoices, reviewAccounts]);
+  const fundsByTransaction = useMemo(() => new Map(pendingTransactions.map(txn => [txn.id,
+    txn.needsTypeReview ? null : detectNotificationFund(txn, fmarketFunds, holdings)
+  ])), [pendingTransactions, fmarketFunds, holdings]);
+  const detectedFund = (txn: PendingReviewTransaction) => fundsByTransaction.get(txn.id) ?? null;
+  const canConfirm = (txn: PendingReviewTransaction) => canApprove(txn) &&
+    (txn.type !== 'expense' || Boolean(txn.fundPurchase) || fmarketFeedStatus !== 'loading');
+  const paymentTransaction = pendingTransactions.find(txn => txn.id === fundPaymentId);
+  const paymentFund = paymentTransaction ? detectedFund(paymentTransaction) : null;
+  const confirmationLabel = (txn: PendingReviewTransaction, fallback: string) => {
+    if (txn.type === 'expense' && !txn.fundPurchase && fmarketFeedStatus === 'loading') return 'Đang kiểm tra mã quỹ…';
+    const fund = detectedFund(txn);
+    return fund ? fund.holding ? 'Mua thêm & duyệt' : 'Mua mới & duyệt' : fallback;
+  };
 
   // Lịch sử filter & search
   const [searchQuery, setSearchQuery] = useState('');
@@ -95,12 +280,29 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
     Record<string, { jarId?: string; jarCode?: string; categoryName?: string; incomeSourceId?: string }>
   >({});
 
+  const changeReviewType = (id: string, type: CashFlowType) => {
+    setReviewChoices(prev => ({ ...prev, [id]: { ...prev[id], type } }));
+    setAssignedOverrides(prev => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
+  const renderReviewFields = (txn: PendingReviewTransaction) => txn.status === 'pending' && txn.type !== 'transfer' && (
+    <ReviewFields txn={txn} accounts={reviewAccounts}
+      onType={type => changeReviewType(txn.id, type)}
+      onAccount={accountId => setReviewChoices(prev => ({ ...prev, [txn.id]: { ...prev[txn.id], accountId } }))} />
+  );
+
   // Giao dịch đang mở modal chọn hũ / nguồn thu
   const [pickerTxn, setPickerTxn] = useState<Transaction | null>(null);
   const [pickerTab, setPickerTab] = useState<'category' | 'transfer'>('category');
 
   // Modal / Sheet chỉnh sửa giao dịch đã duyệt (trong tab Lịch sử)
   const [editingConfirmedTxn, setEditingConfirmedTxn] = useState<Transaction | null>(null);
+  const [viewingNoteTxn, setViewingNoteTxn] = useState<Transaction | null>(null);
   const [editConfirmedDesc, setEditConfirmedDesc] = useState('');
   const [editConfirmedNote, setEditConfirmedNote] = useState('');
   const [editConfirmedJarId, setEditConfirmedJarId] = useState('');
@@ -126,6 +328,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
   const pickerDialogProps = useManagedOverlay(Boolean(pickerTxn), () => setPickerTxn(null), 'Chọn hũ hoặc nguồn thu');
   const editTransactionDialogProps = useManagedOverlay(Boolean(editingConfirmedTxn), () => setEditingConfirmedTxn(null), 'Chi tiết giao dịch');
+  const noteDialogProps = useManagedOverlay(Boolean(viewingNoteTxn), () => setViewingNoteTxn(null), 'Nội dung ghi chú');
 
   // Hũ mặc định an toàn
   const defaultJar = useMemo(() => jars.find(j => j.isDefault) || jars[0], [jars]);
@@ -210,76 +413,62 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   const activeAssignment = activeTxn ? getTxnAssignment(activeTxn) : null;
   const activeJarObj = activeAssignment?.jarId ? jars.find(j => j.id === activeAssignment.jarId) || defaultJar : defaultJar;
 
-  // Touch Swipe Gesture State cho Active Card
-  const [touchStartX, setTouchStartX] = useState<number | null>(null);
-  const [swipeOffset, setSwipeOffset] = useState<number>(0);
-  const [isDragging, setIsDragging] = useState(false);
-
-  useEffect(() => {
-    setSwipeOffset(0);
-    setIsDragging(false);
-  }, [activeTxn?.id]);
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if ((e.target as HTMLElement).closest('input, textarea, button, select, a')) return;
-    setTouchStartX(e.touches[0].clientX);
-    setIsDragging(true);
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (touchStartX === null) return;
-    const currentX = e.touches[0].clientX;
-    const diff = currentX - touchStartX;
-    setSwipeOffset(diff);
-  };
-
-  const handleTouchEnd = () => {
-    setIsDragging(false);
-    if (touchStartX === null) return;
-
-    if (swipeOffset > 90) {
-      // Kéo sang phải = Xác nhận duyệt
-      if (activeTxn) handleConfirmSingle(activeTxn);
-    } else if (swipeOffset < -90) {
-      // Kéo sang trái = Bỏ qua
-      if (activeTxn) handleRejectSingle(activeTxn.id);
-    }
-    setSwipeOffset(0);
-    setTouchStartX(null);
-  };
-
   // Duyệt một giao dịch bất kỳ
-  const handleConfirmSingle = (txn: Transaction) => {
-    const assignment = getTxnAssignment(txn);
-    const note = noteDrafts[txn.id];
-    if (txn.type === 'income') {
-      onConfirm(
-        txn.id,
-        undefined,
-        assignment.categoryName || 'Thu ngoài dự kiến',
-        undefined,
-        assignment.incomeSourceId || undefined,
-        undefined,
-        note
-      );
-    } else if (txn.type === 'transfer') {
-      onConfirm(txn.id);
-    } else {
-      onConfirm(txn.id, assignment.jarCode, assignment.categoryName, assignment.jarId, undefined, undefined, note);
+  const handleConfirmSingle = (txn: PendingReviewTransaction, cashOnly = false) => {
+    if (!canConfirm(txn) || inFlightIdsRef.current.has(txn.id)) return;
+    if (detectedFund(txn) && !cashOnly) {
+      setFundPaymentId(txn.id);
+      return;
     }
+    if (txn.type === 'transfer') {
+      runSmoothDismiss(txn.id, 'approve', () => onConfirm(txn.id));
+      return;
+    }
+    const assignment = getTxnAssignment(txn);
+    const approval: TransactionApproval = {
+      ...assignment,
+      type: txn.type,
+      accountId: txn.accountId,
+      note: noteDrafts[txn.id]
+    };
+    runSmoothDismiss(txn.id, 'approve', () => onConfirm(txn.id, approval));
+  };
+
+  const renderLoanReceipt = (txn: PendingReviewTransaction) => {
+    if (txn.status !== 'pending' || txn.type !== 'income' || txn.needsTypeReview || txn.debtPaymentId ||
+        txn.fundPurchase || txn.transferPairId || txn.bankCode === 'FMARKET' || txn.review?.bankCode === 'FMARKET' ||
+        !['notification', 'sms'].includes(txn.source ?? '')) return null;
+    return <button type="button" onClick={() => onCollectLoan(txn, noteDrafts[txn.id])}
+      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#8CC7AE]/35 bg-[#1C2527] px-3 text-sm font-semibold text-[#8CC7AE] active:bg-[#263234]">
+      <ArrowDownLeft size={16} aria-hidden="true" /> Thu nợ
+    </button>;
+  };
+
+  const renderFundRecognition = (txn: PendingReviewTransaction) => {
+    if (txn.fundPurchase) return <p className="mb-3 text-xs text-[#8CC7AE]">Đã ghi CCQ {txn.fundPurchase.symbol}. Lần duyệt này cập nhật tiền chi.</p>;
+    const fund = detectedFund(txn);
+    return fund && <div className="mb-3 rounded-xl border border-[#8CC7AE]/25 bg-[#8CC7AE]/10 p-3 text-sm text-[#D5E1E3]">
+      <strong className="text-[#8CC7AE]">Nhận diện quỹ {fund.symbol}</strong>
+      <p className="mt-1 text-xs">{fund.holding ? 'Mã đang sở hữu. Nhập số CCQ và giá của lần mua thêm để duyệt.' : 'Mã mới. Nhập số CCQ và giá mua để tạo tài sản quỹ khi duyệt.'}</p>
+      <button type="button" onClick={() => setConfirmSheet({
+        isOpen: true, title: 'Duyệt tiền chi riêng?',
+        description: 'Khoản này sẽ được ghi vào tiền chi. Anh có thể cập nhật phần CCQ riêng trong Đầu tư.',
+        confirmText: 'Duyệt tiền chi', isDanger: false, onConfirm: () => handleConfirmSingle(txn, true)
+      })} className="mt-1 min-h-11 text-xs underline underline-offset-2 text-[#BFD0D3]">Duyệt tiền chi riêng</button>
+    </div>;
   };
 
   // Bỏ qua một giao dịch bất kỳ
-  const handleRejectSingle = (id: string) => {
-    onReject(id);
+  const handleRejectSingle = (id: string, haptic = false) => {
+    if (inFlightIdsRef.current.has(id)) return;
+    if (haptic) triggerLightHaptic();
+    runSmoothDismiss(id, 'reject', () => onReject(id));
   };
 
   // Filter danh sách chờ duyệt
   const filteredPending = useMemo(() => {
     return pendingTransactions.filter(t => {
-      if (pendingFilter === 'expense' && t.type !== 'expense') return false;
-      if (pendingFilter === 'income' && t.type !== 'income') return false;
-      if (pendingFilter === 'transfer' && t.type !== 'transfer') return false;
+      if (pendingFilter !== 'all' && (t.needsTypeReview || t.type !== pendingFilter)) return false;
 
       if (!pendingSearch.trim()) return true;
       const q = pendingSearch.toLowerCase();
@@ -296,7 +485,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
   // V2-25: Duyệt hàng loạt chỉ áp dụng cho danh sách đang lọc (filteredPending) và bỏ qua các giao dịch mơ hồ cần chọn tài khoản
   const handleConfirmAll = () => {
-    const eligibleToConfirm = filteredPending.filter(t => !t.needsAccountReview && t.accountId !== 'acc_unassigned');
+    const eligibleToConfirm = filteredPending.filter(txn => canConfirm(txn) && !detectedFund(txn));
     const skippedCount = filteredPending.length - eligibleToConfirm.length;
     if (eligibleToConfirm.length === 0) return;
 
@@ -305,7 +494,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
       title: `Duyệt ${eligibleToConfirm.length} giao dịch đang hiển thị`,
       description:
         skippedCount > 0
-          ? `Sẽ duyệt ${eligibleToConfirm.length} giao dịch hợp lệ trong bộ lọc hiện tại (bỏ qua ${skippedCount} giao dịch cần xác nhận tài khoản thủ công).`
+          ? `Sẽ duyệt ${eligibleToConfirm.length} giao dịch trong bộ lọc hiện tại. ${skippedCount} giao dịch cần kiểm tra thêm hoặc nhập CCQ vẫn chờ duyệt.`
           : `Anh có chắc muốn duyệt đồng loạt ${eligibleToConfirm.length} giao dịch trong bộ lọc hiện tại không?`,
       confirmText: `Duyệt ${eligibleToConfirm.length} khoản`,
       isDanger: false,
@@ -334,7 +523,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
   }, [confirmedTransactions, historyFilter, searchQuery]);
 
   return (
-    <div className="space-y-3 pb-24 px-4 select-none">
+    <div className="space-y-3 overflow-x-clip pb-24 px-4 select-none">
       {/* Top Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -375,7 +564,29 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
 
       {subTab === 'pending' ? (
         <div>
+          {pendingTransactions.length > 0 && settlingCount > 0 && (
+            <div role="status" className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-[#8CC7AE]/25 bg-[#1C2527] px-2.5 py-1 text-[11px] font-medium text-[#8CC7AE]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#8CC7AE] animate-pulse" />
+              Đang đồng bộ {settlingCount} thao tác…
+            </div>
+          )}
+          {pendingTransactions.length > 0 && fmarketFeedStatus === 'loading' && <p role="status" className="mb-2 text-xs text-[#BFD0D3]">Đang kiểm tra mã quỹ trong nội dung giao dịch…</p>}
+          {pendingTransactions.length > 0 && fmarketFeedStatus === 'unavailable' && <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#DEB48A]">
+            <span>Chưa tải được danh sách để kiểm tra mã quỹ mới.</span>
+            <button type="button" onClick={onReloadFmarketFunds} className="min-h-11 rounded-xl border border-[#8BA5AA]/25 px-3 text-[#D5E1E3]">Tải danh sách quỹ</button>
+          </div>}
           {pendingTransactions.length === 0 ? (
+            settlingCount > 0 ? (
+              <div role="status" className="bg-[#1C2426]/70 border border-[#8BA5AA]/15 rounded-3xl p-8 text-center space-y-3 mt-4">
+                <div className="w-14 h-14 rounded-2xl bg-[#232E31] text-[#8CC7AE] flex items-center justify-center mx-auto border border-[#8CC7AE]/30 animate-pulse">
+                  <CheckCircle2 size={28} />
+                </div>
+                <div className="text-base font-bold text-[#F2F5F5]">Đang đồng bộ giao dịch với máy chủ…</div>
+                <div className="text-xs text-[#869699] max-w-xs mx-auto">
+                  Số dư và lịch sử sẽ được cập nhật ngay khi máy chủ xác nhận.
+                </div>
+              </div>
+            ) : (
             <div className="bg-[#1C2426]/70 border border-[#8BA5AA]/15 rounded-3xl p-8 text-center space-y-3 mt-4">
               <div className="w-14 h-14 rounded-2xl bg-[#232E31] text-[#8CC7AE] flex items-center justify-center mx-auto border border-[#8CC7AE]/30">
                 <CheckCircle2 size={28} />
@@ -385,6 +596,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 Khi có thông báo biến động số dư từ app ngân hàng, giao dịch mới sẽ tự động xuất hiện tại đây để anh duyệt.
               </div>
             </div>
+            )
           ) : (
             <div className="space-y-3">
               {/* THANH ĐIỀU HƯỚNG CHỌN CHẾ ĐỘ XEM & DUYỆT TẤT CẢ */}
@@ -417,6 +629,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                 {pendingTransactions.length > 1 && (
                   <button
                     onClick={handleConfirmAll}
+                    disabled={!filteredPending.some(txn => canConfirm(txn) && !detectedFund(txn))}
                     className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#8CC7AE]/15 hover:bg-[#8CC7AE]/25 text-[#8CC7AE] border border-[#8CC7AE]/30 active:scale-95 transition-transform"
                     title="Duyệt tất cả các giao dịch này theo đề xuất"
                   >
@@ -461,7 +674,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                             txn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#F2F5F5]'
                           }`}
                         >
-                          {txn.type === 'income' ? '+' : '−'}
+                          {txn.needsTypeReview ? '' : txn.type === 'income' ? '+' : txn.type === 'transfer' ? '⇄ ' : '−'}
                           {formatVND(txn.amount)}
                         </span>
                       </button>
@@ -477,27 +690,28 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                   <div className="relative mt-1 mb-2">
                     <div className="absolute left-3.5 right-3.5 -bottom-2 h-10 bg-[#1C2426]/40 border border-[#8BA5AA]/10 rounded-3xl z-0"></div>
 
-                    <div
-                      onTouchStart={handleTouchStart}
-                      onTouchMove={handleTouchMove}
-                      onTouchEnd={handleTouchEnd}
-                      style={{
-                        transform: `translateX(${swipeOffset}px) rotate(${swipeOffset * 0.04}deg)`,
-                        transition: isDragging ? 'none' : 'transform 0.25s ease-out'
-                      }}
-                      className="relative z-10 bg-gradient-to-br from-[#243033] to-[#182022] border border-[#9AB3B8]/30 rounded-3xl p-5 shadow-[0_18px_36px_rgba(0,0,0,0.45)] touch-pan-y"
+                    <SwipeCard key={`${activeTxn.id}:${activeTxn.revision ?? 1}`}
+                      canApprove={canConfirm(activeTxn) && !inFlightIds[activeTxn.id]} onApprove={() => handleConfirmSingle(activeTxn)}
+                      onReject={() => handleRejectSingle(activeTxn.id, true)}
+                      className={`relative z-10 bg-gradient-to-br from-[#243033] to-[#182022] border border-[#9AB3B8]/30 rounded-3xl p-5 shadow-[0_18px_36px_rgba(0,0,0,0.45)] ${
+                        detectedFund(activeTxn) ? 'qltc-swipe-defer-approve' : ''
+                      } ${
+                        exitingById[activeTxn.id] === 'approve'
+                          ? 'qltc-card-exit-approve'
+                          : exitingById[activeTxn.id] === 'reject'
+                          ? 'qltc-card-exit-reject'
+                          : ''
+                      }`}
                     >
                       {/* Swipe hints visual indicator */}
-                      {swipeOffset > 40 && (
-                        <div className="absolute top-4 right-4 bg-[#8CC7AE] text-[#0E1314] px-3 py-1 rounded-xl font-bold text-xs shadow-lg animate-pulse flex items-center gap-1">
-                          <Check size={14} /> DUYỆT
+                      {canConfirm(activeTxn) && (
+                        <div aria-hidden="true" className="qltc-swipe-approve pointer-events-none absolute top-4 left-4 bg-[#8CC7AE] text-[#0E1314] px-3 py-1 rounded-xl font-bold text-xs shadow-lg flex items-center gap-1">
+                          <Check size={14} /> {detectedFund(activeTxn) ? 'NHẬP CCQ' : 'DUYỆT'}
                         </div>
                       )}
-                      {swipeOffset < -40 && (
-                        <div className="absolute top-4 left-4 bg-[#E06D6D] text-white px-3 py-1 rounded-xl font-bold text-xs shadow-lg animate-pulse flex items-center gap-1">
-                          <X size={14} /> BỎ QUA
-                        </div>
-                      )}
+                      <div aria-hidden="true" className="qltc-swipe-reject pointer-events-none absolute top-4 right-4 bg-[#E06D6D] text-white px-3 py-1 rounded-xl font-bold text-xs shadow-lg flex items-center gap-1">
+                        <X size={14} /> BỎ QUA
+                      </div>
 
                       {/* Header giao dịch */}
                       <div className="flex items-center justify-between mb-3">
@@ -521,7 +735,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                               : 'bg-[#657D81]/25 text-[#BFD0D3] border-[#8BA5AA]/20'
                           }`}
                         >
-                          {activeTxn.type === 'income' ? (
+                          {activeTxn.needsTypeReview ? 'Chưa rõ Thu/Chi' : activeTxn.type === 'income' ? (
                             'Tiền vào'
                           ) : activeTxn.type === 'transfer' ? (
                             <>
@@ -543,7 +757,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                             : 'text-[#F2F5F5]'
                         }`}
                       >
-                        {activeTxn.type === 'transfer' ? (
+                        {activeTxn.needsTypeReview ? null : activeTxn.type === 'transfer' ? (
                           <ArrowRightLeft size={24} className="text-[#8CC7AE]" />
                         ) : activeTxn.type === 'income' ? (
                           '+'
@@ -555,6 +769,8 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       <div className="text-[13.5px] font-medium text-[#C4D0D2] mb-3 leading-snug">
                         {activeTxn.description}
                       </div>
+                      {renderReviewFields(activeTxn)}
+                      {renderFundRecognition(activeTxn)}
 
                       {/* KHI LÀ GIAO DỊCH CHUYỂN TIỀN NỘI BỘ (TRANSFER) */}
                       {activeTxn.type === 'transfer' ? (
@@ -614,7 +830,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                             </div>
                           )}
                         </div>
-                      ) : (
+                      ) : activeTxn.needsTypeReview || detectedFund(activeTxn) ? null : (
                         <>
                           {activeTxn.rawQuote && (
                             <div className="bg-[#0C1011]/60 border border-[#8BA5AA]/15 rounded-xl p-2.5 text-[11px] font-mono text-[#97A8AB] leading-relaxed mb-3">
@@ -656,7 +872,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                               </button>
                             )}
 
-                            {onPairTransfer && accounts && accounts.length > 1 && (
+                            {onPairTransfer && canConfirm(activeTxn) && !activeTxn.fundPurchase && !activeTxn.reviewChanged && reviewAccounts.length > 1 && (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -673,25 +889,28 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       )}
 
                       {activeTxn.type !== 'transfer' && <TransactionNoteField key={activeTxn.id} id={`pending-note-${activeTxn.id}`} value={noteDrafts[activeTxn.id] ?? activeTxn.note ?? ''} onChange={value => setNoteDrafts(prev => ({ ...prev, [activeTxn.id]: value }))} />}
+                      {renderLoanReceipt(activeTxn)}
 
                       {/* Nút Bỏ qua / Xác nhận */}
                       <div className="flex items-center justify-between pt-3 border-t border-[#8BA5AA]/15">
                         <button
                           onClick={() => handleRejectSingle(activeTxn.id)}
-                          className="h-10 px-4 rounded-xl flex items-center gap-1.5 text-xs font-semibold border border-[#8BA5AA]/20 bg-white/[0.03] hover:bg-white/[0.08] text-[#97A8AB] active:scale-95 transition-transform"
+                          disabled={Boolean(inFlightIds[activeTxn.id])}
+                          className="h-10 px-4 rounded-xl flex items-center gap-1.5 text-xs font-semibold border border-[#8BA5AA]/20 bg-white/[0.03] hover:bg-white/[0.08] text-[#97A8AB] active:scale-95 transition-transform disabled:opacity-50"
                         >
                           <X size={15} strokeWidth={2} />
                           Bỏ qua
                         </button>
                         <button
                           onClick={() => handleConfirmSingle(activeTxn)}
-                          className="h-10 px-6 rounded-xl flex items-center gap-1.5 text-xs font-semibold bg-[#657D81] hover:bg-[#789397] text-[#F2F5F5] border border-[#BFD0D3]/35 shadow-[0_6px_16px_rgba(101,125,129,0.35)] active:scale-95 transition-transform"
+                          disabled={!canConfirm(activeTxn) || Boolean(inFlightIds[activeTxn.id])}
+                          className="min-h-11 px-4 rounded-xl flex items-center gap-1.5 text-xs font-semibold bg-[#657D81] hover:bg-[#789397] text-[#F2F5F5] border border-[#BFD0D3]/35 shadow-[0_6px_16px_rgba(101,125,129,0.35)] active:scale-95 transition-transform disabled:opacity-50"
                         >
                           <Check size={16} strokeWidth={2.4} />
-                          {activeTxn.type === 'transfer' ? 'Xác nhận chuyển nội bộ' : 'Xác nhận duyệt'}
+                          {confirmationLabel(activeTxn, activeTxn.type === 'transfer' ? 'Xác nhận chuyển nội bộ' : 'Xác nhận duyệt')}
                         </button>
                       </div>
-                    </div>
+                    </SwipeCard>
                   </div>
 
                   {/* DANH SÁCH CÁC KHOẢN KHÁC TRONG HÀNG ĐỢI (CHẠM VÀO ĐỂ DUYỆT NGAY HOẶC CHUYỂN THẺ) */}
@@ -707,10 +926,17 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       <div className="divide-y divide-[#8BA5AA]/10">
                         {queue.map((txn) => {
                           const assignment = getTxnAssignment(txn);
+                          const isRowSettling = Boolean(inFlightIds[txn.id]);
+                          const rowExitClass =
+                            exitingById[txn.id] === 'approve'
+                              ? 'qltc-card-exit-approve'
+                              : exitingById[txn.id] === 'reject'
+                              ? 'qltc-card-exit-reject'
+                              : '';
                           return (
                             <div
                               key={txn.id}
-                              className="py-2.5 flex items-center justify-between gap-2.5 hover:bg-[#232E31]/40 rounded-xl px-1.5 transition-colors"
+                              className={`py-2.5 flex items-center justify-between gap-2.5 hover:bg-[#232E31]/40 rounded-xl px-1.5 transition-all ${rowExitClass}`}
                             >
                               {/* Khu vực bấm để đổi thành active card */}
                               <div
@@ -732,7 +958,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                         txn.type === 'income' ? 'text-[#8CC7AE]' : 'text-[#C4D0D2]'
                                       }`}
                                     >
-                                      {txn.type === 'income' ? '+' : '−'}
+                                      {txn.needsTypeReview ? '' : txn.type === 'income' ? '+' : txn.type === 'transfer' ? '⇄ ' : '−'}
                                       {formatVND(txn.amount)}
                                     </span>
                                   </div>
@@ -743,17 +969,19 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                               <div className="flex items-center gap-1 shrink-0">
                                 <button
                                   onClick={() => handleRejectSingle(txn.id)}
-                                  className="w-7 h-7 rounded-lg bg-[#232A2C] hover:bg-[#342426] text-[#97A8AB] hover:text-[#E06D6D] border border-[#8BA5AA]/15 flex items-center justify-center active:scale-90 transition-transform"
+                                  disabled={isRowSettling}
+                                  className="w-7 h-7 rounded-lg bg-[#232A2C] hover:bg-[#342426] text-[#97A8AB] hover:text-[#E06D6D] border border-[#8BA5AA]/15 flex items-center justify-center active:scale-90 transition-transform disabled:opacity-50"
                                   title="Bỏ qua giao dịch này"
                                 >
                                   <X size={13} />
                                 </button>
                                 <button
                                   onClick={() => handleConfirmSingle(txn)}
-                                  className="h-7 px-2.5 rounded-lg bg-[#657D81]/30 hover:bg-[#657D81] text-[#8CC7AE] hover:text-[#F2F5F5] border border-[#8CC7AE]/30 text-xs font-semibold flex items-center gap-1 active:scale-90 transition-all"
+                                  disabled={!canConfirm(txn) || isRowSettling}
+                                  className="h-7 px-2.5 rounded-lg bg-[#657D81]/30 hover:bg-[#657D81] text-[#8CC7AE] hover:text-[#F2F5F5] border border-[#8CC7AE]/30 text-xs font-semibold flex items-center gap-1 active:scale-90 transition-all disabled:opacity-50"
                                   title="Duyệt nhanh theo đề xuất"
                                 >
-                                  <Check size={12} strokeWidth={2.4} /> Duyệt
+                                  <Check size={12} strokeWidth={2.4} /> {detectedFund(txn) ? 'Ghi quỹ' : 'Duyệt'}
                                 </button>
                               </div>
                             </div>
@@ -834,11 +1062,17 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       filteredPending.map((txn, idx) => {
                         const assignment = getTxnAssignment(txn);
                         const jar = assignment.jarId ? jars.find(j => j.id === assignment.jarId) || defaultJar : defaultJar;
+                        const listExitClass =
+                          exitingById[txn.id] === 'approve'
+                            ? 'qltc-card-exit-approve'
+                            : exitingById[txn.id] === 'reject'
+                            ? 'qltc-card-exit-reject'
+                            : '';
 
                         return (
                           <div
                             key={txn.id}
-                            className="bg-gradient-to-br from-[#202B2E] to-[#161E20] border border-[#8BA5AA]/20 rounded-2xl p-4 shadow-md space-y-3"
+                            className={`bg-gradient-to-br from-[#202B2E] to-[#161E20] border border-[#8BA5AA]/20 rounded-2xl p-4 shadow-md space-y-3 transition-all ${listExitClass}`}
                           >
                             {/* Dòng 1: Ngân hàng & Loại giao dịch & Giờ */}
                             <div className="flex items-center justify-between">
@@ -861,7 +1095,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                     : 'bg-[#657D81]/25 text-[#BFD0D3] border-[#8BA5AA]/20'
                                 }`}
                               >
-                                {txn.type === 'income' ? 'Tiền vào' : txn.type === 'transfer' ? 'Chuyển khoản' : 'Khoản chi'}
+                                {txn.needsTypeReview ? 'Chưa rõ Thu/Chi' : txn.type === 'income' ? 'Tiền vào' : txn.type === 'transfer' ? 'Chuyển khoản' : 'Khoản chi'}
                               </span>
                             </div>
 
@@ -884,13 +1118,16 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                     : 'text-[#F2F5F5]'
                                 }`}
                               >
-                                {txn.type === 'income' ? '+' : txn.type === 'transfer' ? '⇄ ' : '−'}
+                                {txn.needsTypeReview ? '' : txn.type === 'income' ? '+' : txn.type === 'transfer' ? '⇄ ' : '−'}
                                 {formatVND(txn.amount)}
                               </div>
                             </div>
 
+                            {renderReviewFields(txn)}
+                            {renderFundRecognition(txn)}
+
                             {/* Dòng 3: Phân bổ Hũ / Nguồn thu (Có thể bấm để đổi) */}
-                            <div className="flex items-center justify-between bg-[#12191B]/80 rounded-xl p-2 border border-[#8BA5AA]/10 text-xs">
+                            {!txn.needsTypeReview && !detectedFund(txn) && <div className="flex items-center justify-between bg-[#12191B]/80 rounded-xl p-2 border border-[#8BA5AA]/10 text-xs">
                               <div className="flex items-center gap-1.5 min-w-0">
                                 <span className="text-[10.5px] text-[#869699]">Phân bổ:</span>
                                 {txn.type === 'income' ? (
@@ -929,7 +1166,7 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                   >
                                     {txn.type === 'income' ? 'Nguồn thu ▾' : 'Hũ chi ▾'}
                                   </button>
-                                  {onPairTransfer && accounts && accounts.length > 1 && (
+                                  {onPairTransfer && canConfirm(txn) && !txn.fundPurchase && !txn.reviewChanged && reviewAccounts.length > 1 && (
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -944,9 +1181,10 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                   )}
                                 </div>
                               )}
-                            </div>
+                            </div>}
 
                             {txn.type !== 'transfer' && <TransactionNoteField id={`list-note-${txn.id}`} value={noteDrafts[txn.id] ?? txn.note ?? ''} onChange={value => setNoteDrafts(prev => ({ ...prev, [txn.id]: value }))} />}
+                            {renderLoanReceipt(txn)}
 
                             {/* Dòng 4: Cụm nút hành động trên mỗi giao dịch */}
                             <div className="flex items-center justify-between pt-1 gap-2 border-t border-[#8BA5AA]/10">
@@ -965,7 +1203,8 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleRejectSingle(txn.id)}
-                                  className="px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-[#97A8AB] hover:text-[#E06D6D] border border-[#8BA5AA]/20 text-xs font-semibold flex items-center gap-1 active:scale-95 transition-all"
+                                  disabled={Boolean(inFlightIds[txn.id])}
+                                  className="px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-[#97A8AB] hover:text-[#E06D6D] border border-[#8BA5AA]/20 text-xs font-semibold flex items-center gap-1 active:scale-95 transition-all disabled:opacity-50"
                                 >
                                   <X size={13} /> Bỏ qua
                                 </button>
@@ -973,9 +1212,10 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleConfirmSingle(txn)}
-                                  className="px-4 py-1.5 rounded-xl bg-[#657D81] hover:bg-[#789397] text-[#F2F5F5] border border-[#BFD0D3]/35 text-xs font-bold flex items-center gap-1.5 shadow-[0_4px_12px_rgba(101,125,129,0.35)] active:scale-95 transition-all"
+                                  disabled={!canConfirm(txn) || Boolean(inFlightIds[txn.id])}
+                                  className="px-4 py-1.5 rounded-xl bg-[#657D81] hover:bg-[#789397] text-[#F2F5F5] border border-[#BFD0D3]/35 text-xs font-bold flex items-center gap-1.5 shadow-[0_4px_12px_rgba(101,125,129,0.35)] active:scale-95 transition-all disabled:opacity-50"
                                 >
-                                  <Check size={14} strokeWidth={2.4} /> Duyệt ngay
+                                  <Check size={14} strokeWidth={2.4} /> {confirmationLabel(txn, 'Duyệt ngay')}
                                 </button>
                               </div>
                             </div>
@@ -1082,7 +1322,13 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                       <div className="text-xs font-semibold text-[#F2F5F5] truncate">
                         {txn.description}
                       </div>
-                      {txn.note && <p className="mt-1 text-xs text-[#BFD0D3] whitespace-pre-wrap break-words line-clamp-2">Ghi chú: {formatPrivacyText(txn.note, privacyMode)}</p>}
+                      {txn.note && <button type="button" aria-haspopup="dialog" aria-label="Xem đầy đủ ghi chú"
+                        onClick={event => { event.stopPropagation(); setViewingNoteTxn(txn); }}
+                        className="mt-1 block min-h-11 w-full rounded-lg py-1 text-left text-xs text-[#BFD0D3] focus-visible:outline-2 focus-visible:outline-[#8CC7AE]">
+                        <span className="line-clamp-2 whitespace-pre-wrap break-words">Ghi chú · {formatPrivacyText(txn.note, privacyMode)}</span>
+                        <span className="mt-1 block text-[#8CC7AE] underline underline-offset-2">Xem đầy đủ</span>
+                      </button>}
+                      {txn.fundPurchase && <p className="mt-1 text-xs text-[#8CC7AE]">Đã ghi mua quỹ {txn.fundPurchase.symbol}</p>}
                       <div className="text-[11px] text-[#869699] flex items-center gap-1.5 mt-0.5">
                         {txn.type === 'expense' && jarObj && (
                           <span className="text-[#D5E1E3] font-medium">Hũ {jarObj.name}</span>
@@ -1404,6 +1650,26 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
         </div>
       )}
 
+      {viewingNoteTxn && <div {...noteDialogProps}
+        onClick={event => { if (event.target === event.currentTarget) setViewingNoteTxn(null); }}
+        className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4">
+        <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-3xl border border-[#8BA5AA]/20 bg-[#161C1E] p-5 pb-safe shadow-2xl sm:rounded-3xl">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-lg font-bold text-[#F2F5F5]">Nội dung ghi chú</h2>
+              <p className="mt-1 text-sm text-[#BFD0D3]">{viewingNoteTxn.occurredAt} · {formatVND(viewingNoteTxn.amount)}</p>
+            </div>
+            <button type="button" aria-label="Đóng ghi chú" onClick={() => setViewingNoteTxn(null)}
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[#232D30] text-[#D5E1E3] focus-visible:outline-2 focus-visible:outline-[#8CC7AE]">
+              <X size={20} aria-hidden="true" />
+            </button>
+          </div>
+          <p id="confirmed-note-content" className="select-text whitespace-pre-wrap rounded-xl border border-[#8BA5AA]/20 bg-[#20292B] p-3.5 text-base leading-relaxed text-[#F2F5F5] [overflow-wrap:anywhere]">
+            {formatPrivacyText(viewingNoteTxn.note ?? '', privacyMode)}
+          </p>
+        </div>
+      </div>}
+
       {/* ======================= SHEET CHỈNH SỬA GIAO DỊCH ĐÃ DUYỆT ======================= */}
       {editingConfirmedTxn && (
         <div {...editTransactionDialogProps} className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-0 sm:p-4">
@@ -1534,7 +1800,9 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
                     setConfirmSheet({
                       isOpen: true,
                       title: 'Xóa giao dịch',
-                      description: `Anh có chắc muốn xóa giao dịch "${txnToDelete.description}" (${formatVND(txnToDelete.amount)})? Số dư tài khoản sẽ được hoàn lại tương ứng.`,
+                      description: txnToDelete.fundPurchase
+                        ? `Xóa khoản tiền ngân hàng ${formatVND(txnToDelete.amount)} sẽ hoàn lại tiền ở ví. CCQ ${txnToDelete.fundPurchase.symbol} đã ghi vẫn ở danh mục đầu tư.`
+                        : `Anh có chắc muốn xóa giao dịch "${txnToDelete.description}" (${formatVND(txnToDelete.amount)})? Số dư tài khoản sẽ được hoàn lại tương ứng.`,
                       confirmText: 'Xóa giao dịch',
                       isDanger: true,
                       onConfirm: () => {
@@ -1593,6 +1861,12 @@ export const InboxSwipeView: React.FC<InboxSwipeViewProps> = ({
           </div>
         </div>
       )}
+
+      {paymentTransaction && paymentFund && <BankFundPurchaseDialog
+        key={paymentTransaction.id} transaction={paymentTransaction} fund={paymentFund}
+        note={noteDrafts[paymentTransaction.id]} privacyMode={privacyMode}
+        onClose={() => setFundPaymentId(null)}
+        onSave={request => onConfirmFundPurchase(paymentTransaction.id, request)} />}
 
       {/* Confirm Bottom Sheet */}
       <ConfirmSheet

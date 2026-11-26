@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bell, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { UserProfile } from '../types';
+import { readInstalledApkVersion } from '../interfaceUpdate';
 
 interface NavbarProps {
   pendingCount?: number;
@@ -32,14 +33,15 @@ export const Navbar: React.FC<NavbarProps> = ({
     : 'Chào anh';
 
   const spinning = isSyncing || isRefreshing;
+  const apkVersion = readInstalledApkVersion();
 
   return (
-    <header className="flex items-center justify-between px-5 pt-4 pb-3 pt-safe">
-      <div className="flex items-center gap-3">
+    <header className="flex items-center justify-between gap-2 px-5 pt-4 pb-3 pt-safe">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <button
           onClick={onOpenSettings}
           title="Tài khoản & Cài đặt"
-          className="w-10 h-10 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm active:scale-95 transition-transform overflow-hidden relative"
+          className="w-10 h-10 shrink-0 rounded-full bg-gradient-to-br from-[#657D81] to-[#3E4F52] flex items-center justify-center font-bold text-sm text-[#F2F5F5] border border-white/15 shadow-sm active:scale-95 transition-transform overflow-hidden relative"
         >
           {userProfile?.avatar ? (
             <img
@@ -51,10 +53,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>{initial}</span>
           )}
         </button>
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-[#869699] font-medium">Hôm nay</span>
-            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">v2.0.3</span>
+            <span className="hidden whitespace-nowrap text-[11px] text-[#869699] font-medium min-[360px]:inline">Hôm nay</span>
+            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded bg-[#232E31] text-[#8CC7AE] border border-[#8CC7AE]/20">{apkVersion ? `v${apkVersion}` : 'Web'}</span>
           </div>
           <div className="text-[16px] font-semibold text-[#F2F5F5] leading-tight truncate max-w-[150px]">
             {greeting}
@@ -62,7 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
         {/* Nút Ẩn/Hiện số tiền nhạy cảm */}
         {onTogglePrivacy && (
           <button

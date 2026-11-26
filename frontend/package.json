@@ -9,13 +9,14 @@
     "build:vite": "tsc -b && vite build",
     "test:startup": "npm run build && node --test tests/startup.test.mjs",
     "test:notes": "npm run build && node --test tests/transaction_notes.test.mjs",
-    "test": "npx tsx --test tests/v2_frontend.test.ts",
+    "test": "npx tsx --test tests/v2_frontend.test.ts tests/notification_fund.test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^1.68.0",
+    "maplibre-gl": "6.17.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwind-merge": "^3.7.0"

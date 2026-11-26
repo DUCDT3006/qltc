@@ -1,6 +1,7 @@
 import React from 'react';
 
 interface CurrencyInputProps {
+  id?: string;
   value: number;
   onChange: (val: number) => void;
   placeholder?: string;
@@ -10,6 +11,7 @@ interface CurrencyInputProps {
 }
 
 export const CurrencyInput: React.FC<CurrencyInputProps> = ({
+  id,
   value,
   onChange,
   placeholder = '0 ₫',
@@ -37,6 +39,7 @@ export const CurrencyInput: React.FC<CurrencyInputProps> = ({
     <div className="space-y-1.5 w-full">
       <div className="relative flex items-center">
         <input
+          id={id}
           type="text"
           inputMode="numeric"
           autoFocus={autoFocus}

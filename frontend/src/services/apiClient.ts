@@ -176,6 +176,12 @@ export function checkAuthSessionWithTimeout(
  * Wrapper that keeps API requests same-origin so browser cookies are sent first-party.
  */
 let isFetchPatched = false;
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
 export function installAuthenticatedFetchInterceptor() {
   if (isFetchPatched || typeof window === 'undefined' || typeof window.fetch !== 'function') return;
   const originalFetch = window.fetch.bind(window);
@@ -185,7 +191,14 @@ export function installAuthenticatedFetchInterceptor() {
     if (isTrustedApiUrl(urlStr)) {
       const headers = new Headers(input instanceof Request ? input.headers : undefined);
       new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-      return originalFetch(input, { ...init, headers, credentials: 'same-origin', redirect: 'error' });
+      const response = await originalFetch(input, { ...init, headers, credentials: 'same-origin', redirect: 'error' });
+      if (response.status === 401) {
+        const pathname = new URL(urlStr, window.location.origin).pathname;
+        if (pathname !== `${API_BASE}/auth/login` && pathname !== `${API_BASE}/auth/change-owner-code`) {
+          unauthorizedHandler?.();
+        }
+      }
+      return response;
     }
     return originalFetch(input, init);
   };
@@ -204,6 +217,7 @@ export async function apiRequestJson<T = any>(
     body?: any;
     operationId?: string;
     headers?: Record<string, string>;
+    signal?: AbortSignal;
   } = {}
 ): Promise<T> {
   const method = options.method || 'GET';
@@ -224,6 +238,7 @@ export async function apiRequestJson<T = any>(
     headers,
     credentials: 'same-origin',
     redirect: 'error',
+    signal: options.signal,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined
   });
 
@@ -280,4 +295,24 @@ export async function fetchAllTransactions<T = any>(): Promise<T[]> {
     if (typeof page.pagination.nextCursor !== 'string' || !page.pagination.nextCursor) throw new Error('Máy chủ trả cursor lịch sử không hợp lệ');
     cursor = page.pagination.nextCursor;
   }
+}
+
+/** Persist the exact request before a financial write so a lost reply can be retried safely. */
+export async function submitRecordedMutation<T extends { success: boolean }>(draft: DraftMutation): Promise<T> {
+  if (!saveDraftToOutbox(draft)) throw new ApiRequestError('Không lưu được yêu cầu trên thiết bị.', 400, 'DRAFT_UNAVAILABLE');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 16000);
+  try {
+    const response = await apiRequestJson<T>(`${API_BASE}${draft.endpoint}`, {
+      method: draft.method, body: { ...draft.payload, operationId: draft.operationId }, signal: controller.signal
+    });
+    if (response?.success !== true) throw new Error('Missing confirmation');
+    removeDraftFromOutbox(draft.operationId);
+    return response;
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+      removeDraftFromOutbox(draft.operationId);
+    }
+    throw error;
+  } finally { clearTimeout(timeout); }
 }

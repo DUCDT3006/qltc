@@ -22,7 +22,10 @@ export async function generateDedupeHash(userId: string, parsed: ParsedTransacti
       : '';
   const refPart = parsed.externalRef ? `_REF${parsed.externalRef.toUpperCase()}` : '';
 
-  const rawString = `${userId}_${parsed.bankCode || 'UNK'}_${parsed.accountNumberMask || '0000'}_${parsed.type}_${parsed.amount}_${timeBucket}${balancePart}${refPart}_${cleanDesc}`;
+  // An Fmarket order number stays the same when the app repeats its confirmation later.
+  const rawString = parsed.bankCode === 'FMARKET' && parsed.externalRef
+    ? `${userId}_FMARKET_ORDER_${parsed.externalRef.toUpperCase()}`
+    : `${userId}_${parsed.bankCode || 'UNK'}_${parsed.accountNumberMask || '0000'}_${parsed.type}_${parsed.amount}_${timeBucket}${balancePart}${refPart}_${cleanDesc}`;
 
   const msgBuffer = new TextEncoder().encode(rawString);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);

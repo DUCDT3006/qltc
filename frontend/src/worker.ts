@@ -1,3 +1,5 @@
+import { INTERFACE_UPDATE } from './interfaceUpdate';
+
 type FrontendWorkerEnv = {
   ASSETS: { fetch: (req: Request | string) => Promise<Response> };
   BACKEND?: { fetch: (request: Request) => Promise<Response> };
@@ -7,15 +9,12 @@ export default {
   async fetch(request: Request, env: FrontendWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
 
+    // Use the backend's release metadata for the stable download links.
+    const apkDownload = url.pathname === '/apk' || url.pathname === '/download';
     // Keep browser API traffic same-origin so the HttpOnly session cookie is first-party.
-    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+    if (apkDownload || url.pathname === '/api' || url.pathname.startsWith('/api/')) {
       if (!env.BACKEND) return Response.json({ error: 'Backend service binding is not configured', code: 'BACKEND_UNAVAILABLE' }, { status: 503 });
-      return env.BACKEND.fetch(request);
-    }
-
-    // Đường dẫn rút gọn tải file APK trực tiếp
-    if (url.pathname === '/apk' || url.pathname === '/download') {
-      return Response.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.3/qltc-v2.0.3.apk', 302);
+      return env.BACKEND.fetch(apkDownload ? new Request(new URL('/api/download-apk', url), request) : request);
     }
 
     // Serve static assets or fallback to index.html for SPA routing
@@ -33,6 +32,7 @@ export default {
       headers.set('Pragma', 'no-cache');
       headers.set('Expires', '0');
       headers.set('Content-Security-Policy', "frame-src 'none'; object-src 'none'");
+      headers.set('X-QLTC-Interface-Revision', String(INTERFACE_UPDATE.revision));
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,

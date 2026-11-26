@@ -36,10 +36,12 @@ import { CurrencyInput } from './CurrencyInput';
 import { ConfirmSheet } from './ConfirmSheet';
 import { BankPickerModal } from './BankPickerModal';
 import { AccountQrModal } from './AccountQrModal';
+import { OwnerCodeChange } from './OwnerCodeChange';
 import { findBankByCode, VietnamBank } from '../utils/vietnamBanks';
 import { API_BASE } from '../services/apiClient';
 import { getBackupPreviewCounts, isVerifiedBackupDryRun } from '../utils/backupPreview';
 import { useManagedOverlay } from '../utils/overlayManager';
+import { INTERFACE_UPDATE, readInstalledApkVersion } from '../interfaceUpdate';
 
 // Compare numeric releases as numbers, not lexicographic strings (2.0.10 > 2.0.9).
 export function compareVersions(left: string, right: string): number | null {
@@ -275,7 +277,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [settingsTab, setSettingsTab] = useState<'profile' | 'accounts' | 'automation' | 'system'>('profile');
 
   // Version check state
-  const CURRENT_VERSION = 'v2.0.3';
+  const installedApkVersion = readInstalledApkVersion();
+  const CURRENT_VERSION = installedApkVersion ? `v${installedApkVersion}` : 'Web';
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [latestRelease, setLatestRelease] = useState<(AvailableRelease & { hasUpdate: boolean }) | null>(null);
   const [updateCheckError, setUpdateCheckError] = useState(false);
@@ -342,22 +345,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const release = await loadLatestRelease();
       if (!release) throw new Error('Không thể lấy thông tin phiên bản');
-      const nativeVer = (window as any).AndroidBridge && typeof (window as any).AndroidBridge.getNativeApkVersion === 'function'
-        ? (window as any).AndroidBridge.getNativeApkVersion()
-        : null;
+      const nativeVer = readInstalledApkVersion();
       const comparison = nativeVer ? compareVersions(nativeVer, release.tagName) : null;
       const canDownload = canDownloadRelease(nativeVer, release.tagName);
       setLatestRelease({ ...release, hasUpdate: canDownload });
       if (comparison !== null && comparison < 0) {
-        setUpdateCheckedMsg(`Điện thoại đang chạy bản v${nativeVer}. Đã có bản mới (${release.tagName}) sẵn sàng tải về!`);
+        setUpdateCheckedMsg(`Đã có APK ${release.tagName} để cài đặt. Điện thoại đang dùng v${nativeVer}.`);
       } else if (comparison !== null) {
-        setUpdateCheckedMsg(`Điện thoại đang chạy bản v${nativeVer}. Không có bản cập nhật mới hơn.`);
+        setUpdateCheckedMsg(`Điện thoại đang dùng APK v${nativeVer}. Chưa có APK mới hơn.`);
       } else {
-        setUpdateCheckedMsg(`Phiên bản trên máy chủ: ${release.tagName}. Anh có thể tải file APK bên dưới.`);
+        setUpdateCheckedMsg(`APK mới nhất là ${release.tagName}. Anh có thể tải bên dưới.`);
       }
     } catch {
       setUpdateCheckError(true);
-      setUpdateCheckedMsg('Không thể kiểm tra phiên bản. Anh kiểm tra kết nối và thử lại.');
+      setUpdateCheckedMsg('Không thể kiểm tra bản cài Android. Anh kiểm tra kết nối và thử lại.');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -372,7 +373,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const triggerInstall = (blobUrl: string) => {
     // 1. Thử qua AndroidBridge nếu chạy trên APK v1.0.2+
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.3/qltc-v2.0.3.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.5/qltc-v2.0.5.apk');
       return;
     }
 
@@ -380,7 +381,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = `qltc-${latestRelease?.tagName || 'v2.0.3'}.apk`;
+      a.download = `qltc-${latestRelease?.tagName || 'v2.0.5'}.apk`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -394,7 +395,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // Tải gói APK với thanh hiển thị % tiến trình thực tế
   const startDownload = async () => {
     if ((window as any).AndroidBridge && typeof (window as any).AndroidBridge.openExternalUrl === 'function') {
-      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.3/qltc-v2.0.3.apk');
+      (window as any).AndroidBridge.openExternalUrl(latestRelease?.apkUrl || 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.5/qltc-v2.0.5.apk');
       return;
     }
     setDownloadStatus('downloading');
@@ -928,6 +929,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
             </div>
 
+            <OwnerCodeChange />
+
             {/* Tùy chọn Ẩn/Hiện số dư riêng tư */}
             <button
               type="button"
@@ -1110,18 +1113,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </span>
           </div>
 
-          <div className="text-[11px] text-[#869699] leading-relaxed">
-            ⚡ <strong>Cập nhật tức thì (OTA):</strong> Giao diện và các tính năng mới luôn tự động cập nhật qua mạng mỗi khi anh vuốt làm mới hoặc mở app.
+          <section aria-labelledby="interface-update-title" className="rounded-xl border border-[#8CC7AE]/25 bg-[#8CC7AE]/10 p-3 space-y-1">
+            <h3 id="interface-update-title" className="text-xs font-semibold text-[#8CC7AE]">Giao diện đã cập nhật</h3>
+            <p className="text-sm font-semibold text-[#F2F5F5]">{INTERFACE_UPDATE.title}</p>
+            <p className="text-xs leading-relaxed text-[#BFD0D3]">{INTERFACE_UPDATE.description}</p>
+          </section>
+
+          <div className="text-xs font-semibold text-[#D5E1E3]">
+            Bản cài Android
           </div>
 
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleCheckUpdate}
               disabled={isCheckingUpdate}
-              className="py-2.5 rounded-xl bg-[#232E31] hover:bg-[#2C383C] border border-[#8BA5AA]/25 text-xs font-semibold text-[#D5E1E3] flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
+              className="min-h-11 py-2.5 rounded-xl bg-[#232E31] hover:bg-[#2C383C] border border-[#8BA5AA]/25 text-xs font-semibold text-[#D5E1E3] flex items-center justify-center gap-1.5 active:scale-98 transition-transform"
             >
               <RefreshCw size={13} className={isCheckingUpdate ? 'animate-spin' : ''} />
-              {isCheckingUpdate ? 'Đang kiểm tra...' : updateCheckError ? 'Thử kiểm tra lại' : 'Kiểm tra bản mới'}
+              {isCheckingUpdate ? 'Đang kiểm tra...' : updateCheckError ? 'Thử kiểm tra lại' : 'Kiểm tra APK'}
             </button>
 
             <button
@@ -1134,7 +1143,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {updateCheckedMsg && (
-            <div className="text-[11px] text-[#8CC7AE] bg-[#8CC7AE]/10 border border-[#8CC7AE]/20 rounded-xl p-2.5 text-center leading-relaxed animate-fade-in">
+            <div role="status" className="text-[11px] text-[#8CC7AE] bg-[#8CC7AE]/10 border border-[#8CC7AE]/20 rounded-xl p-2.5 text-center leading-relaxed animate-fade-in">
               {updateCheckedMsg}
             </div>
           )}
@@ -1240,7 +1249,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               ) : (
                 <div className="text-[10.5px] text-[#869699] leading-relaxed">
-                  Bản vá v2.0.3: Cải thiện quá trình khởi động, làm mới bộ nhớ đệm và thông báo khi không kết nối được.
+                  Bản Android v2.0.5 hỗ trợ rung phản hồi khi gạt bỏ qua thông báo và thao tác duyệt mượt hơn.
                 </div>
               )}
               <button
@@ -1292,7 +1301,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-[#D5E1E3]">
                   {restorePreviewCounts.map(({ key, count }) => (
-                    <div key={key} className="flex justify-between gap-2"><span>{key.replaceAll('_', ' ')}</span><b>{count}</b></div>
+                    <div key={key} className="flex justify-between gap-2"><span>{key === 'debts' ? 'Khoản nợ' : key === 'debt_payments' ? 'Lần trả nợ' : key.replaceAll('_', ' ')}</span><b>{count}</b></div>
                   ))}
                 </div>
                 <div className="flex gap-2">

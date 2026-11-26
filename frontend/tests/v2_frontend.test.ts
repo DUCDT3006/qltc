@@ -31,6 +31,7 @@ import { resolvePlannedValue } from '../src/utils/plannedSummary';
 import { applyResetScope } from '../src/utils/resetState';
 import { fetchFmarketFunds, parseFmarketFundsResponse } from '../src/utils/fmarketFunds';
 import { addInvestmentCashflow, deleteInvestmentCashflow, getInvestmentCashflows, parseInvestmentCashflowsResponse, setInvestmentHistoryCompleteFrom } from '../src/utils/investmentCashflows';
+import { triggerLightHaptic } from '../src/utils/haptics';
 import frontendWorker from '../src/worker';
 
 describe('Auth session startup check', () => {
@@ -236,6 +237,15 @@ describe('V2-01 / V2-07: API origin allowlist and durable operation retry', () =
     assert.strictEqual(seen?.url, request.url);
     const unavailable = await frontendWorker.fetch(request, { ASSETS: { fetch: async () => new Response('assets') } });
     assert.strictEqual(unavailable.status, 503);
+
+    for (const path of ['/apk', '/download']) {
+      const download = await frontendWorker.fetch(new Request(new URL(path, request.url)), {
+        ASSETS: { fetch: async () => new Response('assets') },
+        BACKEND: { fetch: async (forwarded) => { seen = forwarded; return Response.redirect('https://example.test/qltc-v2.0.4.apk'); } }
+      });
+      assert.strictEqual(download.headers.get('Location'), 'https://example.test/qltc-v2.0.4.apk');
+      assert.strictEqual(seen?.url, 'https://qltc-app.dtd-store.workers.dev/api/download-apk');
+    }
   });
 
   it('serves the app shell with frame and object embedding disabled', async () => {
@@ -455,5 +465,37 @@ describe('V2-09: income reset preserves planned expenses and jar settings', () =
     assert.deepStrictEqual(allReset.pendingTransactions, []);
     assert.deepStrictEqual(allReset.confirmedTransactions, []);
     assert.deepStrictEqual(allReset.holdings, []);
+  });
+});
+
+describe('Swipe dismiss haptic feedback helper', () => {
+  it('prefers AndroidBridge native haptics, falls back to navigator.vibrate, and ignores missing or throwing hooks', () => {
+    let bridgeCalls = 0;
+    let vibrateCalls: Array<number | number[]> = [];
+
+    assert.strictEqual(
+      triggerLightHaptic({
+        AndroidBridge: { triggerLightHaptic: () => { bridgeCalls += 1; } },
+        navigator: { vibrate: pattern => { vibrateCalls.push(pattern); return true; } }
+      }),
+      true
+    );
+    assert.strictEqual(bridgeCalls, 1);
+    assert.strictEqual(vibrateCalls.length, 0);
+
+    assert.strictEqual(
+      triggerLightHaptic({
+        AndroidBridge: { triggerLightHaptic: () => { throw new Error('bridge unavailable'); } },
+        navigator: { vibrate: pattern => { vibrateCalls.push(pattern); return true; } }
+      }),
+      true
+    );
+    assert.deepStrictEqual(vibrateCalls, [18]);
+
+    assert.strictEqual(triggerLightHaptic({}), false);
+    assert.strictEqual(
+      triggerLightHaptic({ navigator: { vibrate: () => { throw new Error('blocked'); } } }),
+      false
+    );
   });
 });

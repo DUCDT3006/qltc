@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Holding, AssetClass, FmarketFund, InvestmentCashflowsResponse } from '../types';
+import { Holding, AssetClass, FmarketFund, FundPurchaseRequest, InvestmentCashflowsResponse, type LandDetails } from '../types';
 import { formatPrivacyVND } from '../utils/financeMath';
-import { FmarketFeedStatus } from '../utils/fmarketFunds';
+import { fetchFmarketQuote, type FmarketFeedStatus, type FmarketQuote } from '../utils/fmarketFunds';
 import { CurrencyInput } from '../components/CurrencyInput';
+import { FundDecimalInput, fundPurchasePriceDraft } from '../components/FundDecimalInput';
+import { FundBuyMoreDialog } from '../components/FundBuyMoreDialog';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { LandSurveyFields } from '../components/LandSurveyFields';
 import { useManagedOverlay } from '../utils/overlayManager';
 import { addInvestmentCashflow, deleteInvestmentCashflow, getInvestmentCashflows, setInvestmentHistoryCompleteFrom } from '../utils/investmentCashflows';
 import { Plus, X, RefreshCw, Search, Trash2, Edit2, TrendingUp, Zap } from 'lucide-react';
@@ -13,8 +16,10 @@ interface InvestmentsViewProps {
   privacyMode?: boolean;
   fmarketFunds: FmarketFund[];
   fmarketFeedStatus: FmarketFeedStatus;
+  onReloadFmarketFunds: () => void;
   isSyncingPrices?: boolean;
-  onAddHolding: (holding: Holding) => Promise<void> | void;
+  onAddHolding: (holding: Holding) => Promise<boolean>;
+  onBuyMoreFund: (id: string, purchase: FundPurchaseRequest) => Promise<void>;
   onDeleteHolding: (symbol: string) => Promise<void> | void;
   onSyncMarketPrices: () => Promise<boolean>;
 }
@@ -37,33 +42,49 @@ const ASSET_COLORS: Record<AssetClass, string> = {
   crypto: '#A288E3'
 };
 
+const navFormat = new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 8 });
+const formatNavDate = (date: string) => date.slice(0, 10).split('-').reverse().join('/');
+
 export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
   holdings,
   privacyMode = false,
   fmarketFunds,
   fmarketFeedStatus,
+  onReloadFmarketFunds,
   isSyncingPrices = false,
   onAddHolding,
+  onBuyMoreFund,
   onDeleteHolding,
   onSyncMarketPrices
 }) => {
   const formatVND = (amount: number) => formatPrivacyVND(amount, privacyMode);
   const [filter, setFilter] = useState<string>('all');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [buyMoreId, setBuyMoreId] = useState<string | null>(null);
+  const buyingHolding = holdings.find(holding => holding.id === buyMoreId && holding.assetClass === 'fund');
   const addHoldingDialogProps = useManagedOverlay(showAddModal, () => setShowAddModal(false), 'Thêm hoặc cập nhật tài sản');
 
   // Form thêm / sửa tài sản
   const [editingHoldingId, setEditingHoldingId] = useState<string | undefined>(undefined);
+  const [editingRevision, setEditingRevision] = useState<number | undefined>(undefined);
+  const [landDetails, setLandDetails] = useState<LandDetails | null>(null);
   const [editingSymbol, setEditingSymbol] = useState<string | null>(null);
+  const [editingMarketFund, setEditingMarketFund] = useState(false);
   const [assetClass, setAssetClass] = useState<AssetClass>('fund');
   const [symbol, setSymbol] = useState('');
   const [name, setName] = useState('');
   const [quantityStr, setQuantityStr] = useState('');
   const [avgCost, setAvgCost] = useState<number>(0);
+  const [fundCost, setFundCost] = useState('');
   const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [unit, setUnit] = useState('CCQ');
   const [autoSync, setAutoSync] = useState<boolean>(true);
   const [fundSearch, setFundSearch] = useState('');
+  const [fundQuote, setFundQuote] = useState<FmarketQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteAttempt, setQuoteAttempt] = useState(0);
+  const [holdingFormError, setHoldingFormError] = useState('');
+  const [holdingSaving, setHoldingSaving] = useState(false);
   const [confirmDeleteSymbol, setConfirmDeleteSymbol] = useState<string | null>(null);
   const [cashflowData, setCashflowData] = useState<InvestmentCashflowsResponse | null>(null);
   const [cashflowLoading, setCashflowLoading] = useState(true);
@@ -137,10 +158,27 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
     : holdings.filter(h => h.assetClass === filter);
 
   // Lọc danh sách quỹ Fmarket theo từ khóa
-  const matchingFunds = fmarketFunds.filter(f =>
-    f.shortName.toLowerCase().includes(fundSearch.toLowerCase()) ||
-    f.name.toLowerCase().includes(fundSearch.toLowerCase())
-  ).slice(0, 12);
+  const query = fundSearch.trim().toLowerCase();
+  const matchingFunds = fmarketFunds.filter(f => f.shortName.toLowerCase().includes(query) || f.name.toLowerCase().includes(query));
+  const fundSymbol = symbol.trim().toUpperCase();
+  const catalogFund = assetClass === 'fund' ? fmarketFunds.find(fund => fund.shortName.toUpperCase() === fundSymbol) : undefined;
+  const linkedSymbol = assetClass === 'fund' && (catalogFund || (editingMarketFund && fundSymbol === editingSymbol)) ? fundSymbol : '';
+  const linkedQuote = fundQuote?.shortName === linkedSymbol ? fundQuote : null;
+
+  useEffect(() => {
+    if (!showAddModal || !linkedSymbol) return;
+    const controller = new AbortController();
+    setQuoteLoading(true);
+    setFundQuote(null);
+    void fetchFmarketQuote(linkedSymbol, controller.signal).then(quote => {
+      if (!controller.signal.aborted) setFundQuote(quote);
+    }).catch(() => {
+      if (!controller.signal.aborted) setFundQuote(null);
+    }).finally(() => {
+      if (!controller.signal.aborted) setQuoteLoading(false);
+    });
+    return () => controller.abort();
+  }, [linkedSymbol, quoteAttempt, showAddModal]);
 
   const getDefaultAutoSync = (cls: AssetClass) => {
     if (cls === 'fund' || cls === 'crypto') return true;
@@ -150,80 +188,111 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
 
   const handleOpenAddModal = (defaultClass: AssetClass = 'fund') => {
     setEditingHoldingId(undefined);
+    setEditingRevision(undefined);
+    setLandDetails(null);
     setEditingSymbol(null);
+    setEditingMarketFund(false);
     setAssetClass(defaultClass);
     setSymbol('');
     setName('');
     setQuantityStr('');
     setAvgCost(0);
+    setFundCost('');
     setCurrentPrice(0);
     setFundSearch('');
+    setFundQuote(null);
+    setHoldingFormError('');
     setAutoSync(getDefaultAutoSync(defaultClass));
     setUnit(
       defaultClass === 'fund' ? 'CCQ' :
       defaultClass === 'stock' ? 'CP' :
       defaultClass === 'gold' ? 'chỉ' :
       defaultClass === 'silver' ? 'lượng' :
-      defaultClass === 'land' ? 'Lô/m²' : 'Coin'
+      defaultClass === 'land' ? 'm²' : 'Coin'
     );
     setShowAddModal(true);
   };
 
   const handleOpenEditHolding = (h: Holding) => {
     setEditingHoldingId(h.id);
+    setEditingRevision(h.revision ?? 1);
+    setLandDetails(h.landDetails ?? null);
     setEditingSymbol(h.symbol);
+    setEditingMarketFund(h.provider === 'fmarket');
     setAssetClass(h.assetClass);
     setSymbol(h.symbol);
     setName(h.name);
     setQuantityStr(String(h.quantity));
     // V2-18: Keep exact decimal NAV/price precision (do not Math.round before multiplying by quantity!)
     setAvgCost(Number(h.avgCost));
+    setFundCost(fundPurchasePriceDraft(h.avgCost));
     setCurrentPrice(Number(h.currentPrice));
     setUnit(h.unit || 'CCQ');
     setAutoSync(h.autoSync !== undefined ? h.autoSync : getDefaultAutoSync(h.assetClass));
+    setFundSearch('');
+    setFundQuote(null);
+    setHoldingFormError('');
     setShowAddModal(true);
   };
 
   const handleSelectFmarketFund = (fund: FmarketFund) => {
-    if (!fund.navAvailable || fund.stale || !fund.nav) return;
     setSymbol(fund.shortName);
     setName(fund.name);
     setUnit('CCQ');
     setAutoSync(true);
-    // Seed the field only when blank; keep any price the user has already entered.
-    if (currentPrice <= 0) setCurrentPrice(fund.nav);
-    if (!avgCost) {
-      setAvgCost(fund.nav);
-    }
+    setCurrentPrice(0);
+    setHoldingFormError('');
   };
 
   const handleSaveHolding = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!symbol.trim() || !name.trim()) return;
+    if (holdingSaving) return;
+    setHoldingFormError('');
+    const quantity = Number(quantityStr.replace(',', '.'));
+    const purchasePrice = assetClass === 'fund' ? Number(fundCost.replace(',', '.')) : avgCost;
+    const locatedLand = assetClass === 'land' ? landDetails : null;
+    if ((!fundSymbol && !locatedLand) || (!linkedSymbol && !name.trim())) {
+      setHoldingFormError('Anh chọn mã quỹ hoặc nhập mã và tên tài sản.');
+      return;
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      setHoldingFormError('Anh nhập số lượng lớn hơn 0.');
+      return;
+    }
+    if (linkedSymbol && (!Number.isFinite(purchasePrice) || purchasePrice <= 0)) {
+      setHoldingFormError('Anh nhập giá mua trên mỗi chứng chỉ quỹ.');
+      return;
+    }
+    if (linkedSymbol && (quoteLoading || !linkedQuote || linkedQuote.stale)) {
+      setHoldingFormError('Anh đợi lấy NAV mới hoặc thử tải lại NAV.');
+      return;
+    }
 
-    const quantity = parseFloat(quantityStr.replace(/,/g, '.')) || 0;
-    if (quantity <= 0) return;
-    const finalCurrentPrice = currentPrice > 0 ? currentPrice : avgCost;
-
-    await onAddHolding({
-      id: editingHoldingId,
-      symbol: symbol.trim().toUpperCase(),
-      name: name.trim(),
-      assetClass,
-      quantity,
-      avgCost,
-      currentPrice: finalCurrentPrice,
-      autoSync,
-      unit: unit.trim() || (
-        assetClass === 'fund' ? 'CCQ' :
-        assetClass === 'stock' ? 'CP' :
-        assetClass === 'gold' ? 'chỉ' :
-        assetClass === 'silver' ? 'lượng' :
-        assetClass === 'land' ? 'Lô/m²' : 'Coin'
-      )
-    });
-
-    setShowAddModal(false);
+    setHoldingSaving(true);
+    try {
+      const saved = await onAddHolding({
+        id: editingHoldingId,
+        symbol: fundSymbol || 'LAND',
+        name: linkedQuote?.name ?? name.trim(),
+        assetClass,
+        quantity,
+        avgCost: purchasePrice,
+        currentPrice: locatedLand ? currentPrice : linkedQuote?.nav ?? (currentPrice > 0 ? currentPrice : purchasePrice),
+        provider: linkedQuote ? 'fmarket' : undefined,
+        priceAsOf: linkedQuote?.navDate,
+        autoSync: linkedQuote ? true : autoSync,
+        revision: editingRevision,
+        landDetails: locatedLand,
+        unit: linkedQuote ? 'CCQ' : unit.trim() || (
+          assetClass === 'fund' ? 'CCQ' : assetClass === 'stock' ? 'CP' : assetClass === 'gold' ? 'chỉ' :
+          assetClass === 'silver' ? 'lượng' : assetClass === 'land' ? 'Lô/m²' : 'Coin'
+        )
+      });
+      if (saved) setShowAddModal(false);
+      else setHoldingFormError('Chưa lưu được tài sản. Anh kiểm tra thông báo rồi thử lại.');
+    } finally {
+      setHoldingSaving(false);
+    }
   };
 
   const handleTriggerSync = async () => {
@@ -454,17 +523,22 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                 <div className="flex-1 min-w-0">
                   <div className="text-[13px] font-semibold text-[#F2F5F5] truncate flex items-center gap-1.5">
                     <span className="truncate">{h.name}</span>
-                    {h.autoSync !== false && (h.assetClass === 'fund' || h.assetClass === 'crypto' || h.assetClass === 'gold' || h.assetClass === 'silver') && (
+                    {(h.assetClass === 'fund' ? h.provider === 'fmarket' : h.autoSync !== false && ['crypto', 'gold', 'silver'].includes(h.assetClass)) && (
                       <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#8CC7AE]/15 text-[#8CC7AE] border border-[#8CC7AE]/25 shrink-0 font-mono">
-                        Auto
+                        {h.provider === 'fmarket' ? 'Fmarket' : 'Auto'}
                       </span>
                     )}
                     <Edit2 size={10} className="text-[#869699] shrink-0 opacity-60" />
                   </div>
                   <div className="text-[11px] text-[#869699] num mt-0.5">
-                    {h.quantity} {h.unit} · Giá hiện tại:{' '}
-                    <b className="text-[#D5E1E3]">{new Intl.NumberFormat('vi-VN').format(Math.round(h.currentPrice))} ₫</b>
+                    {h.assetClass === 'fund' ? navFormat.format(h.quantity) : h.quantity} {h.unit} · Giá hiện tại:{' '}
+                    <b className="text-[#D5E1E3]">{navFormat.format(h.assetClass === 'fund' ? h.currentPrice : Math.round(h.currentPrice))} ₫</b>
                   </div>
+                  {h.provider === 'fmarket' && h.priceAsOf && <p className="mt-0.5 text-[11px] text-[#BFD0D3]">NAV ngày {formatNavDate(h.priceAsOf)}{h.syncStatus === 'stale' ? ' · Đang chờ giá mới' : ''}</p>}
+                  {h.assetClass === 'land' && h.landDetails && <p className="mt-1 break-words text-[11px] text-[#BFD0D3]">
+                    {privacyMode ? 'Đã ghim vị trí' : h.landDetails.address || 'Đã ghim vị trí'}
+                    {h.landDetails.valuation ? ` · Giá tham khảo DuLieu.dev ngày ${formatNavDate(h.landDetails.valuation.surveyedAt)}` : h.currentPrice > 0 ? ' · Giá anh nhập' : ' · Chưa cập nhật giá'}
+                  </p>}
                 </div>
 
                 <div className="text-right num shrink-0">
@@ -474,12 +548,28 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                   <div className={`text-[11px] font-medium ${!hasCost ? 'text-[#869699]' : isUp ? 'text-[#8CC7AE]' : 'text-[#D98A8A]'}`}>
                     {!hasCost ? 'Chưa có giá vốn' : `${isUp ? '+' : ''}${p.toFixed(1)}%`}
                   </div>
+                  {h.assetClass === 'fund' && h.id && (
+                    <button type="button" aria-label={`Mua thêm ${h.symbol}`} onClick={event => {
+                      event.stopPropagation();
+                      setBuyMoreId(h.id ?? null);
+                    }} className="mt-2 ml-auto flex min-h-11 items-center gap-1.5 rounded-xl border border-[#8CC7AE]/35 bg-[#8CC7AE]/15 px-3 text-xs font-semibold text-[#8CC7AE] focus-visible:outline-2 focus-visible:outline-[#8CC7AE]">
+                      <Plus size={14} aria-hidden="true" /> Mua thêm
+                    </button>
+                  )}
                 </div>
               </div>
             );
           })
         )}
       </div>
+
+      {buyMoreId && buyingHolding && (
+        <FundBuyMoreDialog key={buyMoreId} holding={buyingHolding} privacyMode={privacyMode}
+          onClose={() => setBuyMoreId(null)} onBuy={async purchase => {
+            await onBuyMoreFund(buyMoreId, purchase);
+            void refreshCashflows(false);
+          }} />
+      )}
 
       {/* MODAL: Thêm / Cập nhật tài sản đầu tư (Hỗ trợ chọn nhanh Quỹ Fmarket & công tắc AutoSync L-10) */}
       {showAddModal && (
@@ -515,8 +605,11 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                     <button
                       type="button"
                       key={tab.id}
+                      disabled={Boolean(editingHoldingId && (editingMarketFund || landDetails) && assetClass !== tab.id)}
                       onClick={() => {
+                        if (tab.id === assetClass) return;
                         setAssetClass(tab.id);
+                        setLandDetails(null);
                         setAutoSync(getDefaultAutoSync(tab.id));
                         setUnit(
                           tab.id === 'fund' ? 'CCQ' :
@@ -551,51 +644,64 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               {/* Nếu là Quỹ Fmarket -> Hiển thị bộ chọn trực tiếp từ Fmarket API */}
               {assetClass === 'fund' && (
                 <div className="bg-[#20292B] border border-[#8CC7AE]/25 rounded-2xl p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-[#8CC7AE]">
-                      Chọn nhanh Quỹ Fmarket ({fmarketFunds.length} quỹ)
-                    </span>
-                    <span className="text-[10px] text-[#869699]">
-                      {fmarketFeedStatus === 'available' ? 'NAV đã xác minh' : fmarketFeedStatus === 'stale' ? 'Dữ liệu cũ hoặc thiếu NAV' : 'Nguồn NAV không khả dụng'}
-                    </span>
-                  </div>
-                  {fmarketFeedStatus === 'unavailable' && <p className="text-[10px] text-[#E0B782]">Không tải được danh sách/NAV Fmarket. Anh vẫn có thể nhập mã và giá thủ công.</p>}
+                  <label htmlFor="fmarket-fund-search" className="block text-sm font-semibold text-[#8CC7AE]">
+                    Chọn mã quỹ Fmarket{fmarketFunds.length > 0 ? ` (${fmarketFunds.length} mã)` : ''}
+                  </label>
+                  {fmarketFeedStatus === 'loading' && <p role="status" className="text-xs text-[#BFD0D3]">Đang tải danh sách quỹ…</p>}
+                  {fmarketFeedStatus === 'unavailable' && (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-[#E0B782]">Chưa tải được danh sách Fmarket.</p>
+                      <button type="button" onClick={onReloadFmarketFunds} className="min-h-11 px-3 rounded-lg border border-[#8BA5AA]/25 text-xs text-[#D5E1E3]">Tải lại danh sách</button>
+                    </div>
+                  )}
                   <div className="relative">
-                    <Search size={13} className="absolute left-2.5 top-2.5 text-[#869699]" />
+                    <Search size={15} aria-hidden="true" className="absolute left-3 top-3.5 text-[#869699]" />
                     <input
+                      id="fmarket-fund-search"
                       type="text"
-                      placeholder="Tìm mã quỹ Fmarket (VD: VESAF, DCDS, VCBF, SSISCA...)"
+                      placeholder="Tìm theo mã hoặc tên quỹ"
                       value={fundSearch}
                       onChange={(e) => setFundSearch(e.target.value)}
-                      className="w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl pl-8 pr-3 py-1.5 text-xs text-[#F2F5F5] focus:outline-none"
+                      className="min-h-11 w-full bg-[#161C1E] border border-[#8BA5AA]/20 rounded-xl pl-9 pr-3 text-sm text-[#F2F5F5] focus:outline-none focus:ring-2 focus:ring-[#8CC7AE]/50"
                     />
                   </div>
-                  <div className="flex gap-1.5 overflow-x-auto py-1 no-scrollbar">
+                  {fmarketFunds.length > 0 && matchingFunds.length === 0 && <p className="text-xs text-[#BFD0D3]">Không tìm thấy mã quỹ phù hợp.</p>}
+                  <div className="max-h-40 space-y-1 overflow-y-auto overscroll-contain">
                     {matchingFunds.map(f => (
                       <button
                         type="button"
                         key={f.shortName}
                         onClick={() => handleSelectFmarketFund(f)}
-                        disabled={!f.navAvailable || f.stale}
-                        className={`px-2.5 py-1.5 rounded-xl text-left shrink-0 border transition-all ${
-                          !f.navAvailable || f.stale
-                            ? 'bg-[#161C1E] border-[#8BA5AA]/10 text-[#869699] opacity-60 cursor-not-allowed'
-                            : symbol.toUpperCase() === f.shortName
+                        aria-pressed={fundSymbol === f.shortName.toUpperCase()}
+                        className={`min-h-11 w-full px-3 py-2 rounded-xl text-left border transition-all ${
+                          fundSymbol === f.shortName.toUpperCase()
                             ? 'bg-[#8CC7AE]/20 border-[#8CC7AE] text-[#F2F5F5]'
                             : 'bg-[#161C1E] border-[#8BA5AA]/15 text-[#C4D0D2]'
                         }`}
                       >
-                        <div className="text-[11px] font-bold text-[#8CC7AE]">{f.shortName}</div>
-                        <div className="text-[10px] num text-[#D5E1E3]">
-                          {f.navAvailable && f.nav ? `NAV: ${new Intl.NumberFormat('vi-VN').format(f.nav)} ₫` : 'NAV chưa xác minh'}
-                        </div>
-                        {f.navDate && <div className="text-[9px] text-[#869699]">{new Date(f.navDate).toLocaleDateString('vi-VN')}</div>}
+                        <div className="text-xs font-bold text-[#8CC7AE]">{f.shortName}</div>
+                        <div className="text-xs text-[#D5E1E3]">{f.name}</div>
                       </button>
                     ))}
                   </div>
                 </div>
               )}
 
+              {linkedSymbol ? (
+                <section aria-label="Thông tin quỹ đã chọn" className="rounded-xl bg-[#1D2926] border border-[#8CC7AE]/25 p-3 space-y-1.5">
+                  <p className="text-sm font-bold text-[#F2F5F5]">{linkedSymbol} · {linkedQuote?.name || catalogFund?.name || name}</p>
+                  {quoteLoading ? <p role="status" className="text-xs text-[#BFD0D3]">Đang lấy NAV từ Fmarket…</p> : linkedQuote ? (
+                    <>
+                      <p className="text-sm text-[#8CC7AE]">NAV {navFormat.format(linkedQuote.nav)} ₫ / CCQ</p>
+                      <p className="text-xs text-[#BFD0D3]">Ngày định giá {formatNavDate(linkedQuote.navDate)} · Fmarket</p>
+                      {linkedQuote.stale && <p className="text-xs text-[#DEB48A]">Đang chờ NAV mới để lưu quỹ.</p>}
+                    </>
+                  ) : <p className="text-xs text-[#DEB48A]">Chưa lấy được NAV của mã này.</p>}
+                  {!quoteLoading && (!linkedQuote || linkedQuote.stale) && (
+                    <button type="button" onClick={() => setQuoteAttempt(attempt => attempt + 1)} className="min-h-11 rounded-lg border border-[#8BA5AA]/25 px-3 text-xs text-[#D5E1E3]">Tải lại NAV</button>
+                  )}
+                </section>
+              ) : <>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
@@ -617,6 +723,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                     type="text"
                     placeholder="CCQ, chỉ, lượng, m², lô..."
                     value={unit}
+                    disabled={assetClass === 'land' && Boolean(landDetails)}
                     onChange={(e) => setUnit(e.target.value)}
                     className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
                   />
@@ -624,58 +731,86 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               </div>
 
               <div>
-                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
+                <label htmlFor="holding-name" className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
                   Tên tài sản chi tiết *
                 </label>
                 <input
+                  id="holding-name"
                   type="text"
-                  placeholder="VD: Quỹ đầu tư cổ phiếu tiếp cận thị trường VinaCapital..."
+                  placeholder={assetClass === 'land' ? 'Ví dụ lô đất đường Nguyễn Trãi' : 'VD: Quỹ đầu tư cổ phiếu tiếp cận thị trường VinaCapital...'}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2 text-xs text-[#F2F5F5]"
                 />
               </div>
+              </>}
 
               <div>
-                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                  Số lượng ({unit}) *
+                <label htmlFor="holding-quantity" className="text-xs font-semibold text-[#BFD0D3] block mb-1">
+                  {assetClass === 'land' && unit === 'm²' ? 'Diện tích (m²)' : `Số lượng (${linkedSymbol ? 'CCQ' : unit})`}
                 </label>
                 <input
+                  id="holding-quantity"
                   type="number"
                   step="any"
+                  inputMode="decimal"
                   placeholder="VD: 500.25"
                   value={quantityStr}
-                  onChange={(e) => setQuantityStr(e.target.value)}
+                  onChange={(e) => {
+                    setQuantityStr(e.target.value);
+                    if (landDetails?.valuation) setLandDetails({ ...landDetails, valuation: null });
+                  }}
                   className="w-full bg-[#20292B] border border-[#8BA5AA]/20 rounded-xl px-3 py-2.5 text-sm font-bold num text-[#F2F5F5]"
                 />
               </div>
 
+              {assetClass === 'land' && <LandSurveyFields details={landDetails} area={Number(quantityStr.replace(',', '.'))} privacyMode={privacyMode}
+                onChange={details => {
+                  if (!landDetails && unit !== 'm²') {
+                    setUnit('m²');
+                    setQuantityStr('');
+                    setAvgCost(0);
+                    setCurrentPrice(0);
+                    setHoldingFormError('Anh nhập diện tích và giá trên mỗi m² để lưu lô đất đã ghim.');
+                  }
+                  setLandDetails(details);
+                }}
+                onApply={valuation => {
+                  setCurrentPrice(valuation.medianPerM2);
+                  setLandDetails(value => value ? { ...value, valuation } : value);
+                }} />}
+
               <div>
-                <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
-                  Giá vốn TB / 1 {unit} (₫)
+                <label htmlFor={assetClass === 'fund' ? 'fmarket-purchase-price' : undefined} className="text-xs font-semibold text-[#BFD0D3] block mb-1">
+                  {assetClass === 'fund' ? 'Giá mua bình quân / CCQ (₫)' : `Giá vốn TB / 1 ${unit} (₫)`}
                 </label>
-                <CurrencyInput
+                {assetClass === 'fund' ? (
+                  <FundDecimalInput id="fmarket-purchase-price" value={fundCost} onChange={setFundCost} placeholder="Ví dụ 29.800,25" />
+                ) : <CurrencyInput
                   value={avgCost}
                   onChange={setAvgCost}
                   showQuickChips={false}
                   className="text-sm font-bold"
-                />
+                />}
               </div>
 
-              <div>
+              {!linkedSymbol && <div>
                 <label className="text-[10.5px] font-semibold text-[#869699] uppercase block mb-1">
                   Giá thị trường hiện tại / 1 {unit} (₫)
                 </label>
                 <CurrencyInput
                   value={currentPrice}
-                  onChange={setCurrentPrice}
+                  onChange={price => {
+                    setCurrentPrice(price);
+                    if (landDetails?.valuation) setLandDetails({ ...landDetails, valuation: null });
+                  }}
                   showQuickChips={assetClass === 'land' || assetClass === 'gold'}
                   className="text-sm font-bold text-[#8CC7AE]"
                 />
-              </div>
+              </div>}
 
               {/* L-10: Công tắc gạt bảo vệ giá tự nhập (SJC / BĐS) khỏi bị giá quốc tế ghi đè */}
-              {assetClass !== 'land' && (
+              {assetClass !== 'land' && assetClass !== 'fund' && (
                 <button
                   type="button"
                   onClick={() => setAutoSync(!autoSync)}
@@ -691,9 +826,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                       Tự động cập nhật giá hàng ngày
                     </div>
                     <div className="text-[10px] text-[#869699] mt-0.5">
-                      {assetClass === 'fund'
-                        ? 'Đồng bộ trực tiếp NAV khớp lệnh từ Fmarket'
-                        : assetClass === 'gold' || assetClass === 'silver'
+                      {assetClass === 'gold' || assetClass === 'silver'
                         ? 'Tắt nếu anh muốn giữ nguyên giá Vàng SJC / tiệm vàng trong nước'
                         : 'Cập nhật giá thị trường quốc tế tự động'}
                     </div>
@@ -705,17 +838,19 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               )}
 
               <div className="pt-1 flex flex-col gap-2">
+                {holdingFormError && <p role="alert" className="text-xs text-[#E99191]">{holdingFormError}</p>}
                 <button
                   type="submit"
-                  className="w-full py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-98"
+                  disabled={holdingSaving || Boolean(linkedSymbol && (quoteLoading || !linkedQuote || linkedQuote.stale))}
+                  className="w-full min-h-11 py-2.5 rounded-xl bg-[#8CC7AE] text-[#0E1314] text-xs font-bold shadow active:scale-98 disabled:opacity-50"
                 >
-                  {editingSymbol ? 'Lưu cập nhật tài sản' : '+ Lưu vào danh mục tài sản'}
+                  {holdingSaving ? 'Đang lưu…' : editingSymbol ? 'Lưu cập nhật tài sản' : '+ Lưu vào danh mục tài sản'}
                 </button>
 
                 {editingSymbol && (
                   <button
                     type="button"
-                    onClick={() => setConfirmDeleteSymbol(editingSymbol)}
+                    onClick={() => setConfirmDeleteSymbol(editingHoldingId || editingSymbol)}
                     className="w-full py-2 rounded-xl bg-transparent border border-[#E06D6D]/35 text-[#E06D6D] text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Trash2 size={13} /> Xóa tài sản này

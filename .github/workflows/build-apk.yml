@@ -34,29 +34,29 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk qltc-v2.0.4.apk
+          cp android/app/build/outputs/apk/release/app-release.apk qltc-v2.0.5.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QLTC-Android-APK
-          path: qltc-v2.0.4.apk
+          path: qltc-v2.0.5.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
-          tag_name: v2.0.4
-          name: "QLTC v2.0.4 - Nhận thông báo mua quỹ Fmarket"
+          tag_name: v2.0.5
+          name: "QLTC v2.0.5 - Rung phản hồi gạt bỏ qua & duyệt mượt hơn"
           draft: false
           prerelease: false
           body: |
-            ## QLTC v2.0.4 cho Android
+            ## QLTC v2.0.5 cho Android
 
-            - Nhận lệnh mua đã được xác nhận từ app Fmarket vào Chờ duyệt.
-            - Chọn tài khoản đã thanh toán trước khi ghi chi đầu tư.
-            - Bỏ qua email Fmarket để tránh tạo khoản chờ duyệt trùng.
+            - Thêm phản hồi rung nhẹ native (`VIBRATE` + `AndroidBridge.triggerLightHaptic`) khi gạt trái bỏ qua thông báo.
+            - Tinh chỉnh chuyển thẻ duyệt/từ chối giao dịch tức thì, mượt hơn.
+            - Cải thiện chọn khoản vay thu nợ, lọc tin nhắn quảng cáo nhà mạng và xử lý hết phiên đăng nhập.
           files: |
-            qltc-v2.0.4.apk
+            qltc-v2.0.5.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

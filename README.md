@@ -77,6 +77,10 @@ Chạy cả backend và frontend cùng lúc. Frontend Vite chuyển tiếp `/api
 ### 4. Cấu hình triển khai Cloudflare
 Với D1 mới, khởi tạo schema từ `backend/schema.sql`. Với database hiện hữu, hãy backup trước, rà soát thay đổi schema và thử migration trên bản sao trước khi cập nhật production; không chạy schema/migration mù lên dữ liệu thật. Trước khi dùng đăng nhập web production, đặt secret `OWNER_API_TOKEN` cho Worker `qltc-backend`, rồi deploy backend và frontend. Frontend Worker cần Service Binding `BACKEND` trỏ tới service `qltc-backend` và route `/api/*` chạy qua Worker; cấu hình này đã có trong `frontend/wrangler.jsonc`. Backend `FRONTEND_ORIGIN` phải khớp chính xác origin frontend production. Không đặt owner token trong frontend hoặc commit secret.
 
+Để chủ tài khoản đổi mã trong app, cấu hình thêm secret `OWNER_CODE_PEPPER` riêng, ngẫu nhiên tối thiểu 32 ký tự, cho Worker. Giữ ổn định secret này sau khi đã đổi mã. Sao lưu tài chính không chứa mã đăng nhập.
+
+Tính năng khảo giá đất dùng [DuLieu.dev](https://dulieu.dev/api/docs). Đặt khóa do anh tạo tại DuLieu.dev dưới dạng secret `LAND_PRICE_API_KEY` của Worker `qltc-backend` (hoặc trong `.dev.vars` khi chạy local). QLTC lấy giá chào bán quanh vị trí được chọn theo yêu cầu, hiện nguồn và thời điểm, rồi lưu giá anh xác nhận. Khi nguồn thiếu tọa độ tin rao, QLTC có thể dùng mẫu cùng phường/xã hoặc quận/huyện được xác định từ ghim và ghi rõ phạm vi đó. Khi chưa kết nối nguồn, anh vẫn lưu được vị trí và giá nhập tay.
+
 ---
 
 ## 🔒 Cam kết bảo mật dữ liệu

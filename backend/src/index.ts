@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import { migrateLegacyStorage } from './services/legacyStorage';
-import { Bindings, AuthPrincipal, PlanVersion } from './types';
+import { Bindings, AuthPrincipal, ParsedTransaction, PlanVersion } from './types';
 import {
   parseBankNotification,
   isOtpNotification,
+  isFmarketEmailNotification,
   redactOtp,
   canonicalizeOccurredAt,
   normalizeNotificationText
@@ -32,6 +33,12 @@ import {
   readOwnerSessionCookie
 } from './services/auth';
 import { matchAccountForNotification, AccountCandidate } from './services/accountMatcher';
+import { loadFmarketNav, loadFmarketProducts, loadFmarketQuote, type FmarketQuote } from './services/fmarket';
+import { addFundPurchase, parseFundPurchaseLink, type FundPurchaseLink } from './services/fundPurchase';
+import { isLandArea, LandSourceError, loadLandSurvey, parseLandDetails, parseLandSurveyInput, readLandDetails } from './services/landSurvey';
+import { debtPaymentTable, debtTable, isOperationId, isRevision, parseDebtFields, parseDebtPayment } from './services/debts';
+import { checkOwnerCode, ownerAuthThrottleTable, ownerCodeMac, ownerCodeMacMatches, ownerCredentialsTable,
+  OwnerCodeRateLimitError, OwnerCodeUnavailableError, readOwnerCredential, recordOwnerAttempt } from './services/ownerCode';
 import { calculateXIRR } from './services/xirr';
 
 export const app = new Hono<{
@@ -310,6 +317,8 @@ export async function ensureDatabaseSchema(db: D1Database) {
         revoked_at TEXT
       )`
     ).run();
+    await db.prepare(ownerCredentialsTable).run();
+    await db.prepare(ownerAuthThrottleTable).run();
 
     await db
       .prepare(
@@ -458,6 +467,9 @@ export async function ensureDatabaseSchema(db: D1Database) {
           source TEXT DEFAULT 'manual',
           description TEXT,
           note TEXT,
+          reviewed_at DATETIME,
+          fund_purchase_json TEXT,
+          debt_payment_id TEXT,
           counterparty TEXT,
           raw_notification_id TEXT,
           dedupe_hash TEXT UNIQUE,
@@ -568,11 +580,17 @@ export async function ensureDatabaseSchema(db: D1Database) {
           holding_unit TEXT,
           avg_cost REAL NOT NULL DEFAULT 0,
           note TEXT,
+          land_details_json TEXT,
           revision INTEGER NOT NULL DEFAULT 1,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`
       )
       .run();
+
+    await db.prepare(debtTable).run();
+    await db.prepare(debtPaymentTable).run();
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_debts_user ON debts(user_id)').run();
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_debt_payments_user ON debt_payments(user_id, debt_id, created_at)').run();
 
     await db
       .prepare(
@@ -636,6 +654,10 @@ export async function ensureDatabaseSchema(db: D1Database) {
       'ALTER TABLE transactions ADD COLUMN deleted_at DATETIME',
       'ALTER TABLE transactions ADD COLUMN updated_at DATETIME',
       'ALTER TABLE transactions ADD COLUMN note TEXT',
+      'ALTER TABLE transactions ADD COLUMN reviewed_at DATETIME',
+      'ALTER TABLE transactions ADD COLUMN fund_purchase_json TEXT',
+      'ALTER TABLE transactions ADD COLUMN debt_payment_id TEXT',
+      "ALTER TABLE debts ADD COLUMN kind TEXT NOT NULL DEFAULT 'payable' CHECK(kind IN ('payable','receivable'))",
       'ALTER TABLE income_sources ADD COLUMN icon TEXT DEFAULT "payments"',
       'ALTER TABLE income_sources ADD COLUMN color TEXT DEFAULT "#10B981"',
       'ALTER TABLE income_sources ADD COLUMN one_time_date TEXT',
@@ -666,6 +688,7 @@ export async function ensureDatabaseSchema(db: D1Database) {
       'ALTER TABLE assets ADD COLUMN sync_status TEXT DEFAULT "ok"',
       'ALTER TABLE holdings ADD COLUMN account_id TEXT',
       'ALTER TABLE holdings ADD COLUMN holding_unit TEXT',
+      'ALTER TABLE holdings ADD COLUMN land_details_json TEXT',
       'ALTER TABLE holdings ADD COLUMN revision INTEGER DEFAULT 1',
       'ALTER TABLE users ADD COLUMN history_hidden_at DATETIME',
       'ALTER TABLE users ADD COLUMN phone TEXT',
@@ -823,6 +846,13 @@ app.use('/api/*', async (c, next) => {
   try {
     principal = await resolveAuthPrincipal(c);
   } catch (err) {
+    if (err instanceof OwnerCodeRateLimitError) {
+      c.header('Retry-After', String(err.retryAfterSeconds));
+      return c.json({ error: 'Nhập sai quá nhiều lần. Anh thử lại sau.', code: 'OWNER_CODE_RATE_LIMITED' }, 429);
+    }
+    if (err instanceof OwnerCodeUnavailableError) {
+      return c.json({ error: 'Máy chủ xác thực đang tạm thời không khả dụng. Anh thử lại.', code: 'AUTH_SERVICE_UNAVAILABLE' }, 503);
+    }
     if (!(err instanceof AuthServiceUnavailableError)) throw err;
     c.header('Retry-After', '5');
     return c.json({ error: 'Máy chủ xác thực đang tạm thời không khả dụng. Vui lòng thử lại.', code: 'AUTH_SERVICE_UNAVAILABLE' }, 503);
@@ -854,37 +884,33 @@ app.use('/api/*', async (c, next) => {
 });
 
 // Health & Public Endpoints
+const ANDROID_RELEASE = {
+  versionCode: 27,
+  versionName: '2.0.5',
+  latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.5/qltc-v2.0.5.apk',
+  changelog: 'Rung phản hồi nhẹ khi gạt bỏ qua thông báo, chuyển thẻ duyệt mượt hơn và sửa lỗi chọn khoản vay thu nợ / từ chối giao dịch.'
+};
+
 app.get('/', (c) => c.text('QLTC Ca Nhan API is running!'));
 
 app.get('/api/health', (c) =>
   c.json({
     ok: true,
-    version: '2.0.3',
+    version: ANDROID_RELEASE.versionName,
     timestamp: new Date().toISOString()
   })
 );
 
 app.get('/api/version', (c) => {
   return c.json({
-    versionCode: 25,
-    versionName: '2.0.3',
-    version: '2.0.3',
-    latestApkUrl: 'https://github.com/DUCDT3006/qltc/releases/download/v2.0.3/qltc-v2.0.3.apk',
-    downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk',
-    changelog:
-      'Các thay đổi đáng chú ý:\n\n' +
-      '• Cải thiện khởi động Android: xử lý lỗi kết nối, cho phép thử tải lại và hạn chế giữ lại giao diện cũ trong bộ nhớ đệm.\n' +
-      '• Sửa xác thực: bỏ token mặc định, kiểm tra JWT Cloudflare Access và dùng phiên HttpOnly qua Worker cùng nguồn.\n' +
-      '• Sửa ghi sổ để yêu cầu trùng operationId chỉ tác động số dư một lần; tách reset nguồn thu để giữ khoản chi dự kiến, hũ và giao dịch.\n' +
-      '• Bổ sung phân trang có phát hiện dữ liệu thay đổi, xử lý kế hoạch theo kỳ và ngày của khoản “Một lần”.\n' +
-      '• Bổ sung kiểm tra checksum, liên kết dữ liệu và bước xem trước khi khôi phục sao lưu.\n' +
-      '• Nối lại nguồn dữ liệu quỹ; thêm lịch sử góp/rút để tính XIRR khi anh xác nhận dữ liệu đầy đủ. Trường hợp tiền tệ chưa được hỗ trợ sẽ không trả tỷ suất giả.\n' +
-      '• Sửa một số luồng riêng tư, Back/Escape và focus của hộp thoại; Android có hàng đợi gửi lại bằng WorkManager.'
+    ...ANDROID_RELEASE,
+    version: ANDROID_RELEASE.versionName,
+    downloadUrl: 'https://qltc-backend.dtd-store.workers.dev/api/download-apk'
   });
 });
 
 app.get('/api/download-apk', (c) => {
-  return c.redirect('https://github.com/DUCDT3006/qltc/releases/download/v2.0.3/qltc-v2.0.3.apk', 302);
+  return c.redirect(ANDROID_RELEASE.latestApkUrl, 302);
 });
 
 // ============================================================================
@@ -896,19 +922,30 @@ app.post('/api/auth/login', async (c) => {
     return c.json({ error: 'Nguồn yêu cầu không hợp lệ', code: 'CSRF_ORIGIN_REJECTED' }, 403);
   }
   const body = await c.req.json().catch(() => ({}));
-  const configuredToken = c.env.OWNER_API_TOKEN;
-  if (!configuredToken) {
-    return c.json({ error: 'OWNER_API_TOKEN chưa được cấu hình', code: 'AUTH_NOT_CONFIGURED' }, 503);
-  }
   const passwordOrToken = body.token || body.password || '';
-  if (passwordOrToken && passwordOrToken === configuredToken) {
+  try {
+    const owner = await checkOwnerCode(c.env.DB, c.env, passwordOrToken);
+    if (!owner.configured) return c.json({ error: 'Mã chủ tài khoản chưa được cấu hình', code: 'AUTH_NOT_CONFIGURED' }, 503);
+    if (!owner.valid) return c.json({ error: 'Thông tin xác thực không hợp lệ', code: 'UNAUTHORIZED' }, 401);
     const sessionToken = generateRandomToken('qltc_web_');
     const now = new Date();
     const expiresAt = new Date(now.getTime() + OWNER_SESSION_TTL_SECONDS * 1000).toISOString();
     const sessionId = `web_${crypto.randomUUID()}`;
-    await c.env.DB.prepare(
-      `INSERT INTO web_sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`
-    ).bind(sessionId, 'user_default', await sha256Hex(sessionToken), expiresAt).run();
+    const db = ((c.env.DB as any).withSession?.('first-primary') || c.env.DB) as D1Database;
+    const guardSql = owner.credential
+      ? 'SELECT COUNT(*) FROM owner_credentials WHERE id=1 AND revision=? AND code_mac=?'
+      : 'SELECT NOT EXISTS(SELECT 1 FROM owner_credentials WHERE id=1)';
+    const guardArgs = owner.credential ? [owner.credential.revision, owner.credential.code_mac] : [];
+    try {
+      await db.batch([
+        buildBatchAssertion(db, guardSql, guardArgs),
+        db.prepare(`INSERT INTO web_sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`)
+          .bind(sessionId, 'user_default', await sha256Hex(sessionToken), expiresAt)
+      ]);
+    } catch (error) {
+      if (String(error).includes('CHECK constraint failed')) return c.json({ error: 'Mã truy cập vừa thay đổi. Anh đăng nhập lại.', code: 'UNAUTHORIZED' }, 401);
+      throw error;
+    }
     const response = c.json({
       success: true,
       role: 'owner',
@@ -918,8 +955,101 @@ app.post('/api/auth/login', async (c) => {
     response.headers.append('Set-Cookie', `${OWNER_SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/api; Max-Age=${OWNER_SESSION_TTL_SECONDS}; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; Secure; SameSite=Strict`);
     response.headers.set('Cache-Control', 'no-store');
     return response;
+  } catch (error) {
+    if (error instanceof OwnerCodeRateLimitError) {
+      c.header('Retry-After', String(error.retryAfterSeconds));
+      return c.json({ error: 'Nhập sai quá nhiều lần. Anh thử lại sau.', code: 'OWNER_CODE_RATE_LIMITED' }, 429);
+    }
+    return c.json({ error: 'Máy chủ xác thực đang tạm thời không khả dụng. Anh thử lại.', code: 'AUTH_SERVICE_UNAVAILABLE' }, 503);
   }
-  return c.json({ error: 'Thông tin xác thực không hợp lệ', code: 'UNAUTHORIZED' }, 401);
+});
+
+app.post('/api/auth/change-owner-code', async (c) => {
+  const db = ((c.env.DB as any).withSession?.('first-primary') || c.env.DB) as D1Database;
+  const body = await c.req.json().catch(() => null);
+  const currentCode = typeof body?.currentCode === 'string' ? body.currentCode.trim() : '';
+  const newCode = typeof body?.newCode === 'string' ? body.newCode.trim() : '';
+  const operationId = body?.operationId;
+  c.header('Cache-Control', 'no-store');
+  if (!currentCode || currentCode.length > 256 || Array.from(newCode).length < 5 || newCode.length > 128 ||
+      !isOperationId(operationId) || currentCode === newCode) {
+    return c.json({ error: 'Anh nhập mã hiện tại và mã mới khác mã cũ, có ít nhất 5 ký tự.', code: 'INVALID_OWNER_CODE' }, 400);
+  }
+  if (!c.env.OWNER_CODE_PEPPER || c.env.OWNER_CODE_PEPPER.length < 32) {
+    return c.json({ error: 'Chưa thể đổi mã lúc này. Anh thử lại sau.', code: 'OWNER_CODE_NOT_CONFIGURED' }, 503);
+  }
+
+  const requestParts = ['qltc-owner-change-v1', operationId, currentCode, newCode];
+  const checkReplay = async () => {
+    const saved = await readOwnerCredential(db);
+    if (saved?.last_change_id !== operationId) return null;
+    return ownerCodeMacMatches(c.env.OWNER_CODE_PEPPER, requestParts, saved.last_change_mac);
+  };
+  try {
+    const replay = await checkReplay();
+    if (replay !== null) {
+      await recordOwnerAttempt(db, replay);
+      return replay ? c.json({ success: true }) : c.json({ error: 'Yêu cầu đổi mã đã thay đổi. Anh thử lại.', code: 'OWNER_CODE_CONFLICT' }, 409);
+    }
+
+    const checked = await checkOwnerCode(db, c.env, currentCode);
+    if (!checked.configured) return c.json({ error: 'Mã chủ tài khoản chưa được cấu hình.', code: 'AUTH_NOT_CONFIGURED' }, 503);
+    if (!checked.valid) {
+      // Another retry may have finished the same request while this one was checking the old code.
+      if (await checkReplay()) return c.json({ success: true });
+      return c.json({ error: 'Mã hiện tại không đúng.', code: 'OWNER_CODE_INCORRECT' }, 401);
+    }
+
+    const newTokenHash = await sha256Hex(newCode);
+    const device = await db.prepare("SELECT id FROM devices WHERE token_hash=? AND status='active' AND revoked_at IS NULL LIMIT 1")
+      .bind(newTokenHash).first();
+    if (device) return c.json({ error: 'Anh chọn mã khác mã thiết bị đã ghép.', code: 'OWNER_CODE_DEVICE_CONFLICT' }, 400);
+
+    const salt = generateRandomToken('');
+    const codeMac = await ownerCodeMac(c.env.OWNER_CODE_PEPPER, ['qltc-owner-code-v1', salt, newCode]);
+    const requestMac = await ownerCodeMac(c.env.OWNER_CODE_PEPPER, requestParts);
+    const currentSession = readOwnerSessionCookie(c as any);
+    const currentSessionHash = currentSession ? await sha256Hex(currentSession) : null;
+    const now = new Date().toISOString();
+    const existing = checked.credential;
+    const statements = [
+      buildBatchAssertion(db, existing
+        ? 'SELECT COUNT(*) FROM owner_credentials WHERE id=1 AND revision=? AND code_mac=?'
+        : 'SELECT NOT EXISTS(SELECT 1 FROM owner_credentials WHERE id=1)',
+      existing ? [existing.revision, existing.code_mac] : []),
+      buildBatchAssertion(db, "SELECT NOT EXISTS(SELECT 1 FROM devices WHERE token_hash=? AND status='active' AND revoked_at IS NULL)", [newTokenHash])
+    ];
+    if (currentSessionHash) statements.push(buildBatchAssertion(db,
+      'SELECT COUNT(*) FROM web_sessions WHERE user_id=? AND token_hash=? AND revoked_at IS NULL AND expires_at>?',
+      [c.get('principal').userId, currentSessionHash, now]));
+    if (existing) {
+      statements.push(db.prepare(`UPDATE owner_credentials SET salt=?,code_mac=?,revision=revision+1,
+        last_change_id=?,last_change_mac=?,updated_at=? WHERE id=1`)
+        .bind(salt, codeMac, operationId, requestMac, now));
+    } else {
+      statements.push(db.prepare(`INSERT INTO owner_credentials (id,salt,code_mac,revision,last_change_id,last_change_mac,updated_at)
+        VALUES (1,?,?,1,?,?,?)`).bind(salt, codeMac, operationId, requestMac, now));
+    }
+    statements.push(db.prepare(`UPDATE web_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL
+      AND (? IS NULL OR token_hash<>?)`).bind(now, c.get('principal').userId, currentSessionHash, currentSessionHash));
+
+    try { await db.batch(statements); }
+    catch (error) {
+      const after = await checkReplay();
+      if (after === true) return c.json({ success: true });
+      if (after === false || String(error).includes('CHECK constraint failed')) {
+        return c.json({ error: 'Mã hoặc phiên đăng nhập vừa thay đổi. Anh thử lại.', code: 'OWNER_CODE_CONFLICT' }, 409);
+      }
+      throw error;
+    }
+    return c.json({ success: true });
+  } catch (error) {
+    if (error instanceof OwnerCodeRateLimitError) {
+      c.header('Retry-After', String(error.retryAfterSeconds));
+      return c.json({ error: 'Nhập sai quá nhiều lần. Anh thử lại sau.', code: 'OWNER_CODE_RATE_LIMITED' }, 429);
+    }
+    return c.json({ error: 'Chưa đổi được mã lúc này. Anh thử lại cùng yêu cầu.', code: 'OWNER_CODE_UNAVAILABLE' }, 503);
+  }
 });
 
 app.get('/api/auth/session', async (c) => {
@@ -1086,6 +1216,29 @@ async function ensureUnassignedAccount(db: D1Database, userId: string): Promise<
   return placeholderId;
 }
 
+async function notificationAccounts(db: D1Database, userId: string): Promise<AccountCandidate[]> {
+  const { results } = await db.prepare(
+    `SELECT id, name, type, bank_code, bank_name, account_number, account_number_mask, is_active
+     FROM accounts WHERE user_id = ?`
+  ).bind(userId).all<AccountCandidate>();
+  return results || [];
+}
+
+function canSuggestPendingReview(tx: {
+  status: string;
+  type: string;
+  raw_notification_id?: string | null;
+  reviewed_at?: string | null;
+  transfer_pair_id?: string | null;
+}): boolean {
+  return tx.status === 'pending' && (tx.type === 'income' || tx.type === 'expense') &&
+    Boolean(tx.raw_notification_id) && !tx.transfer_pair_id && !tx.reviewed_at;
+}
+
+function suggestedReviewType(parsed: ParsedTransaction | null, storedAmount: number): ParsedTransaction['type'] | null {
+  return parsed && parsed.amount === storedAmount && !parsed.needsTypeReview ? parsed.type : null;
+}
+
 async function processNotificationToTransaction(
   db: D1Database,
   userId: string,
@@ -1095,13 +1248,20 @@ async function processNotificationToTransaction(
   text: string,
   occurredAtOverride?: string | number | null
 ): Promise<{
-  status: 'created' | 'duplicate' | 'ignored_otp' | 'unparsed' | 'invalid_time';
+  status: 'created' | 'duplicate' | 'ignored_otp' | 'ignored_fmarket_email' | 'unparsed' | 'invalid_time';
   transactionId?: string;
   parseStatus: string;
   needsAccountReview?: boolean;
   suggestedPairId?: string | null;
   reasonCode?: string;
 }> {
+  if (isFmarketEmailNotification(appPackage, title, text)) {
+    await db.prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ? AND user_id = ?')
+      .bind('ignored_fmarket_email', 'Email Fmarket được bỏ qua', rawId, userId)
+      .run();
+    return { status: 'ignored_fmarket_email', parseStatus: 'ignored_fmarket_email' };
+  }
+
   if (isOtpNotification(title, text)) {
     await db
       .prepare('UPDATE raw_notifications SET parse_status = ?, parse_error = ? WHERE id = ?')
@@ -1169,18 +1329,9 @@ async function processNotificationToTransaction(
   }
 
   // V2-03: Strict Account Matching via matchAccountForNotification
-  const { results: accRows } = await db
-    .prepare(
-      `SELECT id, name, type, bank_code, bank_name, account_number, account_number_mask, aliases_json, is_active
-       FROM accounts
-       WHERE user_id = ?`
-    )
-    .bind(userId)
-    .all<AccountCandidate>();
-
-  const matchResult = matchAccountForNotification(accRows || [], parsed, title, text);
+  const matchResult = matchAccountForNotification(await notificationAccounts(db, userId), parsed);
   let accountId = matchResult.accountId;
-  let needsAccountReview = matchResult.needsAccountReview || parsed.parseStatus === 'ambiguous';
+  let needsAccountReview = matchResult.needsAccountReview;
 
   if (!accountId) {
     // A real, inactive zero-balance row satisfies the schema FK without representing user money.
@@ -1282,7 +1433,7 @@ async function processNotificationToTransaction(
 
   // V2-10: Weak Transfer Detection -> Only suggest (`suggested_pair_id`), NEVER auto-convert or hide!
   let suggestedPairId: string | null = null;
-  if ((finalType === 'income' || finalType === 'expense') && !needsAccountReview) {
+  if ((finalType === 'income' || finalType === 'expense') && !needsAccountReview && !parsed.needsTypeReview) {
     const oppositeType = finalType === 'income' ? 'expense' : 'income';
     const candidate = await db
       .prepare(
@@ -1292,6 +1443,8 @@ async function processNotificationToTransaction(
            AND amount = ?
            AND type = ?
            AND account_id != ?
+           AND fund_purchase_json IS NULL
+           AND debt_payment_id IS NULL
            AND status IN ('pending', 'confirmed')
            AND transfer_pair_id IS NULL
            AND deleted_at IS NULL
@@ -1394,6 +1547,9 @@ app.post('/api/notifications/ingest', async (c) => {
     }
 
     // V2-04: Reject/Redact OTP BEFORE storing in raw_notifications!
+    if (isFmarketEmailNotification(appPackage, rawTitle, `${rawText}\n${body.bigText || ''}`)) {
+      return c.json({ status: 'ignored_fmarket_email', reason: 'Email Fmarket được bỏ qua' });
+    }
     if (isOtpNotification(rawTitle, rawText)) {
       return c.json({
         status: 'ignored_otp',
@@ -1505,14 +1661,23 @@ app.post('/api/notifications/reprocess', async (c) => {
   const userId = principal.userId;
 
   try {
+    const body = await c.req.json().catch(() => null);
+    const rawIds = body?.rawNotificationIds;
+    if (rawIds !== undefined && (!Array.isArray(rawIds) || rawIds.length === 0 || rawIds.length > 100 ||
+        rawIds.some(id => typeof id !== 'string' || !/^[a-z0-9_-]{1,150}$/i.test(id)))) {
+      return c.json({ error: 'Danh sách thông báo cần xử lý lại không hợp lệ.', code: 'INVALID_NOTIFICATION_IDS' }, 400);
+    }
+    const selectedIds: string[] | null = rawIds === undefined ? null : [...new Set<string>(rawIds)];
     const { results: rawNotifs } = await db
       .prepare(
         `SELECT id, user_id, app_package, title, text, original_time_value, received_at, raw_json
          FROM raw_notifications
          WHERE user_id = ? AND parse_status IN ('pending', 'ignored', 'failed', 'ambiguous')
+           AND COALESCE(parse_error, '') != 'Duplicate transaction hash'
+           ${selectedIds ? 'AND id IN (' + selectedIds.map(() => '?').join(',') + ')' : ''}
          ORDER BY received_at ASC`
       )
-      .bind(userId)
+      .bind(userId, ...(selectedIds ?? []))
       .all<any>();
 
     if (!rawNotifs || rawNotifs.length === 0) {
@@ -1691,13 +1856,15 @@ app.get('/api/transactions', async (c) => {
       SELECT t.*, j.name as jar_name, j.color as jar_color, j.icon as jar_icon,
              a.name as account_name, a2.name as to_account_name,
              inc.name as income_source_name,
-             rn.app_package as app_package
+             rn.app_package as app_package,
+             CASE WHEN t.status = 'pending' AND t.reviewed_at IS NULL THEN rn.title END AS review_title,
+             CASE WHEN t.status = 'pending' AND t.reviewed_at IS NULL THEN rn.text END AS review_text
       FROM transactions t
       LEFT JOIN jars j ON t.jar_id = j.id
       LEFT JOIN accounts a ON t.account_id = a.id
       LEFT JOIN accounts a2 ON t.to_account_id = a2.id
       LEFT JOIN income_sources inc ON t.income_source_id = inc.id
-      LEFT JOIN raw_notifications rn ON t.raw_notification_id = rn.id
+      LEFT JOIN raw_notifications rn ON t.raw_notification_id = rn.id AND rn.user_id = t.user_id
       WHERE ${cursorWhereClauses.join(' AND ')}
       ORDER BY t.occurred_at DESC, ${cursorMode ? 't.id' : 't.created_at'} DESC${cursorMode ? '' : ', t.id DESC'}
       LIMIT ?${cursorMode ? '' : ' OFFSET ?'}
@@ -1707,6 +1874,21 @@ app.get('/api/transactions', async (c) => {
     const results = queryResult.results || [];
     const pageHasMore = cursorMode ? results.length > limit : offset + results.length < Number(countRow?.totalCount || 0);
     const pageRows = cursorMode && pageHasMore ? results.slice(0, limit) : results;
+    const reviewAccounts = pageRows.some(canSuggestPendingReview) ? await notificationAccounts(db, userId) : [];
+    const transactions = pageRows.map(({ review_title, review_text, ...row }) => {
+      const fundPurchase = parseFundPurchaseLink(row.fund_purchase_json);
+      if (!canSuggestPendingReview(row)) return { ...row, fundPurchase: fundPurchase ?? undefined };
+      const parsed = review_text ? parseBankNotification(row.app_package || '', review_title || '', review_text, row.occurred_at) : null;
+      return {
+        ...row,
+        fundPurchase: fundPurchase ?? undefined,
+        review: {
+          type: suggestedReviewType(parsed, Number(row.amount)),
+          accountId: parsed ? matchAccountForNotification(reviewAccounts, parsed).accountId : null,
+          bankCode: parsed?.bankCode === 'UNKNOWN' ? null : parsed?.bankCode ?? null
+        }
+      };
+    });
     const latestRevisionRow = await db
       .prepare('SELECT revision FROM user_data_revisions WHERE user_id = ?')
       .bind(userId)
@@ -1722,7 +1904,7 @@ app.get('/api/transactions', async (c) => {
       : cursorMode ? null : pageHasMore ? offset + limit : null;
 
     return c.json({
-      transactions: pageRows,
+      transactions,
       pagination: {
         limit,
         offset,
@@ -1955,6 +2137,7 @@ app.put('/api/transactions/:id', async (c) => {
     }
 
     const txId = oldTx.id;
+    if (oldTx.debt_payment_id) return c.json({ error: 'Khoản này đã ghi vào lần trả nợ. Anh mở mục Nợ để kiểm tra.', code: 'DEBT_PAYMENT_LINKED' }, 409);
 
     // Optimistic concurrency check (V2-02 / AT2-06)
     if (body.expectedRevision !== undefined && Number(body.expectedRevision) !== Number(oldTx.revision || 1)) {
@@ -1970,12 +2153,21 @@ app.put('/api/transactions/:id', async (c) => {
 
     const newStatus = body.status !== undefined ? body.status : oldTx.status;
     const newType = body.type !== undefined ? body.type : oldTx.type;
+    if (oldTx.fund_purchase_json && newType !== 'expense') {
+      return c.json({ error: 'Khoản này đã gắn với lần mua chứng chỉ quỹ và được ghi là tiền chi.', code: 'FUND_PAYMENT_LINKED' }, 400);
+    }
+    if (body.type !== undefined && !['income', 'expense', 'transfer'].includes(newType)) {
+      return c.json({ error: 'Loại giao dịch không hợp lệ', code: 'INVALID_TYPE' }, 400);
+    }
     const newAmount = body.amount !== undefined ? Number(body.amount) : Number(oldTx.amount);
-    if (!isValidVndAmount(newAmount)) {
+    if ((newStatus !== 'rejected' || body.amount !== undefined) && !isValidVndAmount(newAmount)) {
       return c.json({ error: 'Số tiền không hợp lệ', code: 'INVALID_AMOUNT' }, 400);
     }
 
-    const newAccountId = body.accountId !== undefined ? String(body.accountId).trim() : String(oldTx.account_id);
+    if (body.accountId !== undefined && (typeof body.accountId !== 'string' || !body.accountId.trim())) {
+      return c.json({ error: 'Anh chọn một tài khoản hợp lệ.', code: 'ACCOUNT_NOT_FOUND' }, 400);
+    }
+    const newAccountId = body.accountId !== undefined ? body.accountId.trim() : String(oldTx.account_id);
     const newToAccountId =
       newType === 'transfer'
         ? body.toAccountId !== undefined
@@ -1990,15 +2182,9 @@ app.put('/api/transactions/:id', async (c) => {
     const newNote = body.note === undefined ? oldTx.note ?? null : typeof body.note === 'string' ? body.note.trim() || null : null;
     const newOccurredAt = body.occurredAt !== undefined ? new Date(body.occurredAt).toISOString() : oldTx.occurred_at;
 
-    // If user explicitly assigns an accountId during review/edit, clear needs_account_review
-    const needsAccountReview =
-      body.accountId !== undefined && body.accountId !== 'acc_unassigned'
-        ? 0
-        : body.needsAccountReview !== undefined
-          ? body.needsAccountReview
-            ? 1
-            : 0
-          : Number(oldTx.needs_account_review || 0);
+    const approvingPending = oldTx.status === 'pending' && newStatus === 'confirmed';
+    const needsAccountReview = body.accountId !== undefined && newAccountId !== 'acc_unassigned'
+      ? 0 : Number(oldTx.needs_account_review || 0);
 
     // Block confirming an ambiguous transaction until a valid account is selected (V2-03 / AT2-07)
     if (newStatus === 'confirmed' && (needsAccountReview === 1 || newAccountId === 'acc_unassigned')) {
@@ -2011,7 +2197,23 @@ app.put('/api/transactions/:id', async (c) => {
       );
     }
 
-    if (newType === 'transfer' && (!newToAccountId || newToAccountId === newAccountId)) {
+    if (approvingPending && body.type === undefined && canSuggestPendingReview(oldTx)) {
+      const raw = await db.prepare('SELECT app_package, title, text FROM raw_notifications WHERE id = ? AND user_id = ?')
+        .bind(oldTx.raw_notification_id, userId).first<{ app_package: string; title: string | null; text: string }>();
+      const parsed = raw?.text ? parseBankNotification(raw.app_package, raw.title || '', raw.text, oldTx.occurred_at) : null;
+      if (suggestedReviewType(parsed, newAmount) !== newType) {
+        return c.json({ error: 'Anh chọn lại Thu hoặc Chi trước khi duyệt giao dịch này.', code: 'TYPE_REVIEW_REQUIRED' }, 400);
+      }
+    }
+
+    const checkActiveAccount = approvingPending || newAccountId !== oldTx.account_id;
+    const activeAccountSql = `SELECT COUNT(*) AS n FROM accounts
+      WHERE id = ? AND user_id = ? AND COALESCE(is_active, 1) = 1 AND id != 'acc_unassigned' AND type != 'unassigned'`;
+    if (checkActiveAccount && !(await db.prepare(activeAccountSql).bind(newAccountId, userId).first<number>('n'))) {
+      return c.json({ error: 'Tài khoản đã chọn không tồn tại hoặc đã lưu trữ.', code: 'ACCOUNT_NOT_FOUND' }, 400);
+    }
+
+    if (newStatus !== 'rejected' && newStatus !== 'ignored' && newType === 'transfer' && (!newToAccountId || newToAccountId === newAccountId)) {
       return c.json(
         {
           error: 'Giao dịch chuyển khoản nội bộ cần tài khoản đích khác tài khoản nguồn',
@@ -2039,6 +2241,8 @@ app.put('/api/transactions/:id', async (c) => {
 
     const nextRevision = Number(oldTx.revision || 1) + 1;
     const stmts: D1PreparedStatement[] = [];
+    const changedReviewChoice = approvingPending && !oldTx.transfer_pair_id && newType !== 'transfer' &&
+      (newType !== oldTx.type || newAccountId !== oldTx.account_id);
 
     // Atomic DB-level revision assertion inside batch
     stmts.push(
@@ -2048,6 +2252,7 @@ app.put('/api/transactions/:id', async (c) => {
         [txId, userId, Number(oldTx.revision || 1)]
       )
     );
+    if (checkActiveAccount) stmts.push(buildBatchAssertion(db, activeAccountSql, [newAccountId, userId]));
 
     stmts.push(
       db
@@ -2055,7 +2260,8 @@ app.put('/api/transactions/:id', async (c) => {
           `UPDATE transactions
            SET status = ?, type = ?, amount = ?, account_id = ?, to_account_id = ?,
                jar_id = ?, income_source_id = ?, description = ?, note = ?, occurred_at = ?,
-               needs_account_review = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
+               needs_account_review = ?, suggested_pair_id = ?, original_type = ?, original_account_id = ?,
+               original_jar_id = ?, original_income_source_id = ?, reviewed_at = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ? AND user_id = ? AND COALESCE(revision, 1) = ?`
         )
         .bind(
@@ -2070,12 +2276,22 @@ app.put('/api/transactions/:id', async (c) => {
           newNote,
           newOccurredAt,
           needsAccountReview,
+          changedReviewChoice ? null : oldTx.suggested_pair_id ?? null,
+          changedReviewChoice ? newType : oldTx.original_type ?? null,
+          changedReviewChoice ? newAccountId : oldTx.original_account_id ?? null,
+          changedReviewChoice ? newJarId : oldTx.original_jar_id ?? null,
+          changedReviewChoice ? newIncomeSourceId : oldTx.original_income_source_id ?? null,
+          approvingPending ? new Date().toISOString() : oldTx.reviewed_at ?? null,
           nextRevision,
           txId,
           userId,
           Number(oldTx.revision || 1)
         )
     );
+    if (changedReviewChoice) {
+      stmts.push(db.prepare('UPDATE transactions SET suggested_pair_id = NULL WHERE user_id = ? AND suggested_pair_id = ?')
+        .bind(userId, txId));
+    }
 
     // Compute exact balance deltas across ALL affected accounts (old and new source/target accounts!)
     const candidateAccountIds = new Set<string>();
@@ -2117,6 +2333,8 @@ app.put('/api/transactions/:id', async (c) => {
       id: txId,
       operationId,
       status: newStatus,
+      type: newType,
+      accountId: newAccountId,
       note: newNote,
       revision: nextRevision,
       deltasByAccount,
@@ -2175,6 +2393,7 @@ app.delete('/api/transactions/:id', async (c) => {
     if (!oldTx) {
       return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
     }
+    if (oldTx.debt_payment_id) return c.json({ error: 'Anh hoàn tác trong mục Nợ để cập nhật cả số dư và dư nợ.', code: 'DEBT_PAYMENT_LINKED' }, 409);
 
     const oldState: LedgerTxState = {
       status: oldTx.status,
@@ -2274,6 +2493,9 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
       .first<any>();
     if (!tx) return c.json({ error: 'Transaction not found', code: 'NOT_FOUND' }, 404);
 
+    if (tx.fund_purchase_json) return c.json({ error: 'Khoản chi này đã gắn với chứng chỉ quỹ.', code: 'FUND_PAYMENT_LINKED' }, 400);
+    if (tx.debt_payment_id) return c.json({ error: 'Khoản này đã ghi vào lần trả nợ.', code: 'DEBT_PAYMENT_LINKED' }, 409);
+
     // Determine counterpart transaction (explicit counterpartTxId, suggested_pair_id, or search within 120 mins)
     let counterpart: any = null;
     const requestedCounterpartId = body.counterpartTxId || tx.suggested_pair_id;
@@ -2298,6 +2520,8 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
              AND type = ?
              AND account_id != ?
              AND status IN ('pending', 'confirmed')
+             AND fund_purchase_json IS NULL
+             AND debt_payment_id IS NULL
              AND transfer_pair_id IS NULL
              AND deleted_at IS NULL
              AND ABS(strftime('%s', occurred_at) - strftime('%s', ?)) <= 7200
@@ -2307,6 +2531,9 @@ app.post('/api/transactions/:id/pair-transfer', async (c) => {
         .bind(userId, txId, tx.amount, oppositeType, tx.account_id, tx.occurred_at)
         .first<any>();
     }
+
+    if (counterpart?.fund_purchase_json) return c.json({ error: 'Khoản chi này đã gắn với chứng chỉ quỹ.', code: 'FUND_PAYMENT_LINKED' }, 400);
+    if (counterpart?.debt_payment_id) return c.json({ error: 'Giao dịch đối ứng đã ghi vào lần trả nợ.', code: 'DEBT_PAYMENT_LINKED' }, 409);
 
     const pairId = `pair_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const targetStatus = body.confirmImmediately ? 'confirmed' : tx.status === 'confirmed' ? 'confirmed' : 'pending';
@@ -4106,6 +4333,7 @@ app.get('/api/holdings', async (c) => {
 
       return {
         ...h,
+        landDetails: h.asset_class === 'land' ? readLandDetails(h.land_details_json) : null,
         quantity: qty,
         avg_cost: avgCost,
         current_price: currentPrice,
@@ -4127,6 +4355,67 @@ app.get('/api/holdings', async (c) => {
     return c.json({ error: err.message }, 500);
   }
 });
+
+app.post('/api/land/survey', async (c) => {
+  const query = parseLandSurveyInput(await c.req.json().catch(() => null));
+  if (!query) return c.json({ error: 'Anh chọn vị trí ở Việt Nam, nhập diện tích và bán kính khảo giá hợp lệ.', code: 'INVALID_LAND_SURVEY' }, 400);
+  if (!c.env.LAND_PRICE_API_KEY?.trim()) {
+    return c.json({ error: 'Nguồn giá DuLieu.dev chưa được kết nối. Anh vẫn có thể lưu vị trí và nhập giá của mình.', code: 'LAND_PRICE_NOT_CONFIGURED' }, 503);
+  }
+  try { return c.json(await loadLandSurvey(query, c.env.LAND_PRICE_API_KEY.trim())); }
+  catch (error) {
+    console.warn('Land survey unavailable', error instanceof Error ? error.message : 'Unknown failure');
+    if (error instanceof LandSourceError && ['AbortError', 'TimeoutError', 'HTTP 504', 'HTTP 522', 'HTTP 524'].includes(error.reason)) {
+      return c.json({ error: 'DuLieu.dev phản hồi chậm. Anh bấm Khảo giá ngay để thử lại.', code: 'LAND_PRICE_TIMEOUT' }, 503);
+    }
+    return c.json({ error: 'Chưa lấy được tin bán đất từ DuLieu.dev. Anh thử lại sau.', code: 'LAND_PRICE_UNAVAILABLE' }, 503);
+  }
+});
+
+function fmarketAssetStatement(db: D1Database, quote: FmarketQuote): D1PreparedStatement {
+  return db.prepare(`INSERT INTO assets (id, symbol, name, asset_class, unit, quote_unit, provider, currency, current_price, price_as_of, sync_status, updated_at)
+      VALUES (?, ?, ?, 'fund', 'CCQ', 'CCQ', 'fmarket', 'VND', ?, ?, 'ok', CURRENT_TIMESTAMP)
+      ON CONFLICT(symbol) DO UPDATE SET name = excluded.name, unit = excluded.unit, quote_unit = excluded.quote_unit,
+        provider = excluded.provider, currency = excluded.currency, current_price = excluded.current_price,
+        price_as_of = excluded.price_as_of, sync_status = 'ok', updated_at = CURRENT_TIMESTAMP
+      WHERE assets.asset_class = 'fund' AND (COALESCE(assets.provider, '') != 'fmarket' OR assets.price_as_of IS NULL
+        OR date(assets.price_as_of) <= excluded.price_as_of)`)
+      .bind(`asset_${crypto.randomUUID()}`, quote.shortName, quote.name, quote.nav, quote.navDate);
+}
+
+async function saveFmarketHolding(db: D1Database, userId: string, holdingId: string | null, quote: FmarketQuote, quantity: number, avgCost: number) {
+  const symbol = quote.shortName;
+  const assetRef = '(SELECT id FROM assets WHERE symbol = ?)';
+  const statements: D1PreparedStatement[] = [
+    fmarketAssetStatement(db, quote),
+    buildBatchAssertion(db, "SELECT COUNT(*) FROM assets WHERE symbol = ? AND asset_class = 'fund'", [symbol])
+  ];
+  if (holdingId) {
+    statements.push(
+      buildBatchAssertion(db, 'SELECT COUNT(*) FROM holdings WHERE id = ? AND user_id = ?', [holdingId, userId]),
+      buildBatchAssertion(db, `SELECT NOT EXISTS (SELECT 1 FROM holdings WHERE user_id = ? AND id != ? AND asset_id = ${assetRef})`, [userId, holdingId, symbol]),
+      db.prepare(`UPDATE holdings SET asset_id = ${assetRef}, quantity = ?, avg_cost = ?, holding_unit = 'CCQ',
+        revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`)
+        .bind(symbol, quantity, avgCost, holdingId, userId)
+    );
+  } else {
+    statements.push(
+      db.prepare(`UPDATE holdings SET quantity = ?, avg_cost = ?, holding_unit = 'CCQ',
+        revision = COALESCE(revision, 1) + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND asset_id = ${assetRef}`)
+        .bind(quantity, avgCost, userId, symbol),
+      db.prepare(`INSERT INTO holdings (id, user_id, asset_id, quantity, holding_unit, avg_cost, revision)
+        SELECT ?, ?, a.id, ?, 'CCQ', ?, 1 FROM assets a WHERE a.symbol = ?
+        AND NOT EXISTS (SELECT 1 FROM holdings h WHERE h.user_id = ? AND h.asset_id = a.id)`)
+        .bind(`hold_${crypto.randomUUID()}`, userId, quantity, avgCost, symbol, userId)
+    );
+  }
+  statements.push(db.prepare(`SELECT h.id, h.asset_id, h.quantity, h.avg_cost, h.holding_unit, h.revision,
+      a.symbol, a.name, a.asset_class, a.current_price, a.provider, a.price_as_of, a.sync_status
+    FROM holdings h JOIN assets a ON a.id = h.asset_id WHERE h.user_id = ? AND a.symbol = ? LIMIT 1`)
+    .bind(userId, symbol));
+  const results = await db.batch(statements);
+  return results[results.length - 1].results[0];
+}
 
 // Create or Edit Holding by Stable ID (V2-18: Renaming symbol updates in-place instead of duplicating!)
 app.post('/api/holdings', async (c) => {
@@ -4151,13 +4440,88 @@ app.post('/api/holdings', async (c) => {
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return c.json({ error: 'Số lượng nắm giữ phải lớn hơn 0', code: 'INVALID_QUANTITY' }, 400);
     }
+    if (assetClass === 'fund' && body.provider === 'fmarket') {
+      if (!Number.isFinite(avgCost) || avgCost <= 0) {
+        return c.json({ error: 'Anh nhập giá mua trên mỗi chứng chỉ quỹ.', code: 'INVALID_PRICE' }, 400);
+      }
+      if (!/^[A-Z0-9][A-Z0-9._-]{0,23}$/.test(symbol)) return c.json({ error: 'Mã quỹ không hợp lệ.', code: 'INVALID_FUND_SYMBOL' }, 400);
+      const quote = await loadFmarketQuote(symbol).catch(() => null);
+      if (!quote || quote.stale) {
+        return c.json({ error: 'Chưa xác minh được NAV mới của quỹ. Anh tải lại giá rồi thử lưu.', code: 'FMARKET_NAV_UNAVAILABLE' }, 503);
+      }
+      try {
+        const holding = await saveFmarketHolding(db, userId, holdingId, quote, quantity, avgCost) as { id: string; asset_id: string };
+        return c.json({ success: true, id: holding.id, assetId: holding.asset_id, holding });
+      } catch (err) {
+        if (String(err).includes('CHECK constraint failed')) {
+          return c.json({ error: 'Mã quỹ đã được dùng hoặc tài sản đã thay đổi. Anh tải lại danh mục.', code: 'HOLDING_CONFLICT' }, 409);
+        }
+        throw err;
+      }
+    }
     if (!Number.isFinite(avgCost) || avgCost < 0 || !Number.isFinite(currentPrice) || currentPrice < 0) {
       return c.json({ error: 'Giá vốn hoặc thị giá không hợp lệ', code: 'INVALID_PRICE' }, 400);
+    }
+
+    if (body.landDetails != null) {
+      const details = parseLandDetails(body.landDetails, currentPrice);
+      const validTotal = (price: number) => price === 0 || isValidVndAmount(Math.round(quantity * price));
+      if (assetClass !== 'land' || !details || unit !== 'm²' || !isLandArea(quantity) || !validTotal(avgCost) || !validTotal(currentPrice) || !isOperationId(body.operationId)) {
+        return c.json({ error: 'Anh kiểm tra vị trí, diện tích và giá trên mỗi m².', code: 'INVALID_LAND_HOLDING' }, 400);
+      }
+      const endpoint = 'POST /api/holdings#land';
+      const receipt = await getMutationReceipt(db, body.operationId, userId, endpoint, body);
+      if (receipt.conflict) return c.json({ error: 'Yêu cầu lưu lô đất đã được dùng với dữ liệu khác.', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+      if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+      const existing = holdingId ? await db.prepare(`SELECT h.id, h.asset_id, COALESCE(h.revision,1) AS revision, a.symbol
+        FROM holdings h JOIN assets a ON a.id=h.asset_id WHERE h.id=? AND h.user_id=? AND a.asset_class='land'`)
+        .bind(holdingId, userId).first<{ id: string; asset_id: string; revision: number; symbol: string }>() : null;
+      if (holdingId && !existing) return c.json({ error: 'Không tìm thấy lô đất để cập nhật.', code: 'HOLDING_NOT_FOUND' }, 404);
+      const stale = () => c.json({ error: 'Lô đất vừa thay đổi. Anh tải lại danh mục và mở lại lô đất.', code: 'HOLDING_REVISION_CONFLICT' }, 409);
+      if (existing && (!isRevision(body.revision) || existing.revision !== body.revision)) return stale();
+      const privateAsset = existing && await db.prepare('SELECT COUNT(*) FROM holdings WHERE asset_id=? AND id<>?')
+        .bind(existing.asset_id, existing.id).first<number>('COUNT(*)') === 0;
+      const unique = crypto.randomUUID();
+      const id = existing?.id || `hold_land_${unique}`;
+      const assetId = privateAsset ? existing.asset_id : `asset_land_${unique}`;
+      const landSymbol = privateAsset ? existing.symbol : `LAND-${unique.toUpperCase()}`;
+      const priceAsOf = currentPrice > 0 ? new Date().toISOString() : null;
+      const revision = existing ? existing.revision + 1 : 1;
+      const result = { success: true, id, assetId, holding: {
+        id, symbol: landSymbol, asset_name: name, asset_class: 'land', quantity, avg_cost: avgCost,
+        current_price: currentPrice, holding_unit: unit, provider: 'manual', price_as_of: priceAsOf, revision, landDetails: details
+      } };
+      const statements = [buildMutationReceiptStatement(db, body.operationId, userId, endpoint, receipt.payloadHash, 200, result)!];
+      if (existing) statements.push(buildBatchAssertion(db, `SELECT COUNT(*) FROM holdings WHERE id=? AND user_id=? AND asset_id=? AND COALESCE(revision,1)=?`,
+        [existing.id, userId, existing.asset_id, existing.revision]));
+      if (privateAsset) {
+        statements.push(buildBatchAssertion(db, 'SELECT NOT EXISTS(SELECT 1 FROM holdings WHERE asset_id=? AND id<>?)', [assetId, id]));
+        statements.push(db.prepare(`UPDATE assets SET name=?,unit=?,quote_unit=?,provider='manual',current_price=?,price_as_of=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+          .bind(name, unit, unit, currentPrice, priceAsOf, assetId));
+      } else {
+        statements.push(db.prepare(`INSERT INTO assets (id,symbol,name,asset_class,unit,quote_unit,provider,current_price,price_as_of) VALUES (?,?,?,'land',?,?,'manual',?,?)`)
+          .bind(assetId, landSymbol, name, unit, unit, currentPrice, priceAsOf));
+      }
+      if (existing) statements.push(db.prepare(`UPDATE holdings SET asset_id=?,quantity=?,holding_unit=?,avg_cost=?,land_details_json=?,revision=?,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND user_id=?`).bind(assetId, quantity, unit, avgCost, JSON.stringify(details), revision, id, userId));
+      else statements.push(db.prepare(`INSERT INTO holdings (id,user_id,asset_id,quantity,holding_unit,avg_cost,land_details_json) VALUES (?,?,?,?,?,?,?)`)
+        .bind(id, userId, assetId, quantity, unit, avgCost, JSON.stringify(details)));
+      try { await db.batch(statements); }
+      catch (err) {
+        const replay = await getMutationReceipt(db, body.operationId, userId, endpoint, body);
+        if (replay.cachedResponse) return c.json(replay.cachedResponse);
+        if (replay.conflict || String(err).includes('CHECK constraint failed')) return stale();
+        throw err;
+      }
+      return c.json(result);
     }
 
     const nowIso = new Date().toISOString();
 
     // If holdingId is provided, update that exact holding!
+    const protectedAsset = await db.prepare(`SELECT 1 FROM holdings h JOIN assets a ON a.id=h.asset_id WHERE a.symbol=? AND h.land_details_json IS NOT NULL LIMIT 1`)
+      .bind(symbol).first<number>('1');
+    if (protectedAsset) return c.json({ error: 'Mã này thuộc lô đất đã ghim. Anh mở đúng lô đất để chỉnh sửa.', code: 'LAND_DETAILS_REQUIRED' }, 409);
     if (holdingId) {
       const existingHolding = await db
         .prepare('SELECT * FROM holdings WHERE id = ? AND user_id = ?')
@@ -4165,6 +4529,7 @@ app.post('/api/holdings', async (c) => {
         .first<any>();
 
       if (existingHolding) {
+        if (existingHolding.land_details_json) return c.json({ error: 'Anh mở lại lô đất để lưu cùng vị trí trên bản đồ.', code: 'LAND_DETAILS_REQUIRED' }, 409);
         // Ensure target asset exists or update existing asset
         let asset = await db.prepare('SELECT * FROM assets WHERE symbol = ?').bind(symbol).first<any>();
         let assetId = existingHolding.asset_id;
@@ -4277,6 +4642,203 @@ app.post('/api/holdings', async (c) => {
   }
 });
 
+app.post('/api/holdings/:id/buy-more', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const holdingId = c.req.param('id');
+  const endpoint = `POST /api/holdings/${holdingId}/buy-more`;
+  const body = await c.req.json().catch(() => null);
+  const { quantity, unitPrice, expectedRevision, operationId } = body || {};
+
+  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0 ||
+      typeof unitPrice !== 'number' || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+    return c.json({ error: 'Anh nhập số lượng và giá mua lớn hơn 0.', code: 'INVALID_FUND_PURCHASE' }, 400);
+  }
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1 ||
+      typeof operationId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(operationId)) {
+    return c.json({ error: 'Phiên lưu chưa hợp lệ. Anh mở lại mã quỹ và thử lại.', code: 'INVALID_FUND_PURCHASE_REQUEST' }, 400);
+  }
+
+  const payload = { quantity, unitPrice, expectedRevision };
+  const conflict = () => c.json({ error: 'Lần mua này đã được lưu với thông tin khác. Anh kiểm tra lại danh mục.', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+  const stale = () => c.json({ error: 'Danh mục vừa thay đổi. Anh kiểm tra số đang giữ rồi thử lưu lại.', code: 'HOLDING_REVISION_CONFLICT' }, 409);
+  try {
+    const receipt = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+    if (receipt.conflict) return conflict();
+    if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+
+    const holding = await db.prepare(`SELECT h.id, h.asset_id, h.quantity, h.avg_cost, COALESCE(h.revision, 1) AS revision,
+        a.symbol, a.asset_class, a.currency
+      FROM holdings h JOIN assets a ON a.id = h.asset_id WHERE h.id = ? AND h.user_id = ?`)
+      .bind(holdingId, userId).first<{
+        id: string; asset_id: string; quantity: number; avg_cost: number; revision: number;
+        symbol: string; asset_class: string; currency: string;
+      }>();
+    if (!holding) return c.json({ error: 'Không tìm thấy quỹ đang nắm giữ.', code: 'HOLDING_NOT_FOUND' }, 404);
+    if (holding.asset_class !== 'fund' || holding.currency?.toUpperCase() !== 'VND') {
+      return c.json({ error: 'Mua thêm áp dụng cho chứng chỉ quỹ tính bằng VND.', code: 'INVALID_FUND_HOLDING' }, 400);
+    }
+    if (holding.revision !== expectedRevision) return stale();
+    if (!Number.isFinite(holding.quantity) || holding.quantity < 0 ||
+        (holding.quantity > 0 && (!Number.isFinite(holding.avg_cost) || holding.avg_cost <= 0))) {
+      return c.json({ error: 'Anh cập nhật số lượng và giá vốn đang giữ trước khi ghi lần mua thêm.', code: 'FUND_COST_REQUIRED' }, 409);
+    }
+
+    const updated = addFundPurchase(holding.quantity, holding.avg_cost, quantity, unitPrice);
+    if (!updated) {
+      return c.json({ error: 'Số lượng hoặc giá mua vượt quá giới hạn tính toán.', code: 'INVALID_FUND_PURCHASE' }, 400);
+    }
+    const nextQuantity = updated.quantity;
+    const avgCost = updated.avgCost;
+    const result = {
+      success: true,
+      holding: { id: holdingId, symbol: holding.symbol, quantity: nextQuantity, avgCost, revision: holding.revision + 1 }
+    };
+    const receiptStatement = buildMutationReceiptStatement(db, operationId, userId, endpoint, receipt.payloadHash, 200, result);
+    if (!receiptStatement) throw new Error('Missing purchase receipt');
+
+    try {
+      await db.batch([
+        receiptStatement,
+        buildBatchAssertion(db, `SELECT COUNT(*) FROM holdings h JOIN assets a ON a.id = h.asset_id
+          WHERE h.id = ? AND h.user_id = ? AND h.asset_id = ? AND COALESCE(h.revision, 1) = ?
+            AND a.asset_class = 'fund' AND UPPER(a.currency) = 'VND'`, [holdingId, userId, holding.asset_id, expectedRevision]),
+        db.prepare(`UPDATE holdings SET quantity = ?, avg_cost = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?`).bind(nextQuantity, avgCost, result.holding.revision, holdingId, userId)
+      ]);
+    } catch (err) {
+      const replay = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+      if (replay.conflict) return conflict();
+      if (replay.cachedResponse) return c.json(replay.cachedResponse);
+      if (String(err).includes('CHECK constraint failed')) return stale();
+      throw err;
+    }
+    return c.json(result);
+  } catch {
+    return c.json({ error: 'Chưa xác nhận được lần mua đã lưu. Anh thử lưu lại.', code: 'FUND_PURCHASE_UNAVAILABLE' }, 503);
+  }
+});
+
+app.post('/api/transactions/:id/fund-purchase', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const transactionId = c.req.param('id');
+  const endpoint = `POST /api/transactions/${transactionId}/fund-purchase`;
+  const body = await c.req.json().catch(() => null);
+  const { symbol, accountId, quantity, unitPrice, expectedTransactionRevision, expectedHoldingRevision, operationId } = body || {};
+  const alreadyRecorded = body?.alreadyRecorded === true;
+  if (typeof symbol !== 'string' || !/^[A-Z0-9][A-Z0-9._-]{0,23}$/.test(symbol) || body?.type !== 'expense' ||
+      typeof accountId !== 'string' || !accountId.trim() || accountId === 'acc_unassigned' ||
+      !Number.isSafeInteger(expectedTransactionRevision) || expectedTransactionRevision < 1 ||
+      (expectedHoldingRevision !== null && (!Number.isSafeInteger(expectedHoldingRevision) || expectedHoldingRevision < 1)) ||
+      typeof operationId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(operationId) || !isValidTransactionNote(body.note)) {
+    return c.json({ error: 'Thông tin duyệt khoản mua quỹ chưa hợp lệ. Anh mở lại giao dịch.', code: 'INVALID_FUND_PAYMENT' }, 400);
+  }
+  if (!alreadyRecorded && (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0 ||
+      typeof unitPrice !== 'number' || !Number.isFinite(unitPrice) || unitPrice <= 0)) {
+    return c.json({ error: 'Anh nhập số lượng và giá mua lớn hơn 0.', code: 'INVALID_FUND_PURCHASE' }, 400);
+  }
+
+  const payload = {
+    symbol, accountId, quantity: alreadyRecorded ? null : quantity, unitPrice: alreadyRecorded ? null : unitPrice,
+    expectedTransactionRevision, expectedHoldingRevision, alreadyRecorded,
+    confirmAmountDifference: body.confirmAmountDifference === true,
+    ...(body.note !== undefined ? { note: body.note } : {})
+  };
+  const conflict = () => c.json({ error: 'Yêu cầu này đã dùng với thông tin khác. Anh tải lại giao dịch.', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+  const stale = () => c.json({ error: 'Giao dịch hoặc danh mục vừa thay đổi. Anh mở lại để kiểm tra.', code: 'FUND_PAYMENT_REVISION_CONFLICT' }, 409);
+  try {
+    const receipt = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+    if (receipt.conflict) return conflict();
+    if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+
+    const tx = await db.prepare(`SELECT id,status,type,amount,currency,revision,fund_purchase_json,note
+      FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL`)
+      .bind(transactionId, userId).first<any>();
+    if (!tx) return c.json({ error: 'Không tìm thấy giao dịch.', code: 'NOT_FOUND' }, 404);
+    if (tx.status !== 'pending' || tx.type === 'transfer' || tx.fund_purchase_json || Number(tx.revision || 1) !== expectedTransactionRevision) return stale();
+    if (!isValidVndAmount(Number(tx.amount)) || String(tx.currency || '').toUpperCase() !== 'VND') {
+      return c.json({ error: 'Khoản mua quỹ cần là giao dịch VND hợp lệ.', code: 'INVALID_FUND_PAYMENT' }, 400);
+    }
+    if (!alreadyRecorded && Math.abs(Math.round(quantity * unitPrice) - Number(tx.amount)) > 1 && !payload.confirmAmountDifference) {
+      return c.json({ error: 'Giá trị CCQ khác số tiền ngân hàng. Anh kiểm tra và xác nhận phần chênh lệch.', code: 'FUND_AMOUNT_DIFFERENCE' }, 400);
+    }
+    const accountSql = `SELECT COUNT(*) AS n FROM accounts WHERE id = ? AND user_id = ?
+      AND COALESCE(is_active,1) = 1 AND UPPER(currency) = 'VND' AND type != 'unassigned'`;
+    if (!await db.prepare(accountSql).bind(accountId, userId).first<number>('n')) {
+      return c.json({ error: 'Anh chọn tài khoản chi đang hoạt động.', code: 'ACCOUNT_NOT_FOUND' }, 400);
+    }
+
+    const { results: owned } = await db.prepare(`SELECT h.id,h.asset_id,h.quantity,h.avg_cost,COALESCE(h.revision,1) AS revision
+      FROM holdings h JOIN assets a ON a.id=h.asset_id
+      WHERE h.user_id = ? AND a.symbol = ? AND a.asset_class = 'fund' AND UPPER(a.currency) = 'VND' LIMIT 2`)
+      .bind(userId, symbol).all<any>();
+    if ((owned || []).length > 1) return stale();
+    const holding = owned?.[0];
+    if ((holding && holding.revision !== expectedHoldingRevision) || (!holding && expectedHoldingRevision !== null)) return stale();
+    if (alreadyRecorded && !holding) return c.json({ error: 'Danh mục chưa có quỹ này để xác nhận đã ghi CCQ.', code: 'FUND_HOLDING_REQUIRED' }, 400);
+    const updated = !alreadyRecorded ? addFundPurchase(Number(holding?.quantity || 0), Number(holding?.avg_cost || 0), quantity, unitPrice) : null;
+    if (!alreadyRecorded && !updated) return c.json({ error: 'Anh kiểm tra số CCQ và giá vốn đang giữ.', code: 'INVALID_FUND_PURCHASE' }, 400);
+
+    const quote = !holding ? await loadFmarketQuote(symbol).catch(() => null) : null;
+    if (!holding && (!quote || quote.stale)) {
+      return c.json({ error: 'Chưa có NAV xác minh cho mã quỹ mới. Anh thử tải lại.', code: 'FMARKET_NAV_UNAVAILABLE' }, 503);
+    }
+    const holdingId = holding?.id || `hold_${crypto.randomUUID()}`;
+    const link: FundPurchaseLink = { symbol, holdingId, quantity: payload.quantity, unitPrice: payload.unitPrice, alreadyRecorded };
+    const result = { success: true, transactionId, holdingId, revision: expectedTransactionRevision + 1, fundPurchase: link };
+    const receiptStatement = buildMutationReceiptStatement(db, operationId, userId, endpoint, receipt.payloadHash, 200, result);
+    if (!receiptStatement) throw new Error('Missing fund payment receipt');
+    const statements: D1PreparedStatement[] = [
+      receiptStatement,
+      buildBatchAssertion(db, `SELECT COUNT(*) FROM transactions WHERE id = ? AND user_id = ? AND status = 'pending'
+        AND COALESCE(revision,1) = ? AND deleted_at IS NULL AND fund_purchase_json IS NULL`, [transactionId, userId, expectedTransactionRevision]),
+      buildBatchAssertion(db, accountSql, [accountId, userId])
+    ];
+    if (holding) {
+      statements.push(buildBatchAssertion(db, `SELECT COUNT(*) FROM holdings WHERE id = ? AND user_id = ?
+        AND asset_id = ? AND COALESCE(revision,1) = ?`, [holding.id, userId, holding.asset_id, expectedHoldingRevision]));
+      if (updated) statements.push(db.prepare(`UPDATE holdings SET quantity = ?, avg_cost = ?, revision = COALESCE(revision,1) + 1,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`)
+        .bind(updated.quantity, updated.avgCost, holding.id, userId));
+    } else if (quote && updated) {
+      statements.push(
+        fmarketAssetStatement(db, quote),
+        buildBatchAssertion(db, "SELECT COUNT(*) FROM assets WHERE symbol = ? AND asset_class = 'fund'", [symbol]),
+        buildBatchAssertion(db, `SELECT NOT EXISTS (SELECT 1 FROM holdings h JOIN assets a ON a.id=h.asset_id WHERE h.user_id = ? AND a.symbol = ?)`, [userId, symbol]),
+        db.prepare(`INSERT INTO holdings (id,user_id,asset_id,quantity,avg_cost,holding_unit,revision)
+          SELECT ?,?,id,?,?,'CCQ',1 FROM assets WHERE symbol = ?`)
+          .bind(holdingId, userId, updated.quantity, updated.avgCost, symbol)
+      );
+    }
+    const investmentJar = await db.prepare("SELECT id FROM jars WHERE user_id = ? AND COALESCE(is_active,1)=1 AND (UPPER(code)='FFA' OR id='jar_ffa') ORDER BY id LIMIT 1")
+      .bind(userId).first<{ id: string }>();
+    statements.push(
+      ...buildLedgerDeltaStatements(db, userId, accountId, -Number(tx.amount), 'fund_purchase_payment', operationId, transactionId),
+      db.prepare(`UPDATE transactions SET status='confirmed',type='expense',account_id=?,to_account_id=NULL,jar_id=?,income_source_id=NULL,
+        needs_account_review=0,reviewed_at=?,fund_purchase_json=?,note=?,suggested_pair_id=NULL,
+        original_type='expense',original_account_id=?,original_jar_id=?,original_income_source_id=NULL,
+        revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?`)
+        .bind(accountId, investmentJar?.id || null, new Date().toISOString(), JSON.stringify(link),
+          body.note === undefined ? tx.note ?? null : typeof body.note === 'string' ? body.note.trim() || null : null,
+          accountId, investmentJar?.id || null, result.revision, transactionId, userId),
+      db.prepare('UPDATE transactions SET suggested_pair_id=NULL WHERE user_id=? AND suggested_pair_id=?').bind(userId, transactionId)
+    );
+    try {
+      await db.batch(statements);
+    } catch (err) {
+      const replay = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+      if (replay.conflict) return conflict();
+      if (replay.cachedResponse) return c.json(replay.cachedResponse);
+      if (String(err).includes('CHECK constraint failed')) return stale();
+      throw err;
+    }
+    return c.json(result);
+  } catch {
+    return c.json({ error: 'Chưa xác nhận được khoản mua quỹ đã lưu. Anh thử lại cùng yêu cầu.', code: 'FUND_PAYMENT_UNAVAILABLE' }, 503);
+  }
+});
+
 app.delete('/api/holdings/:id', async (c) => {
   const db = c.env.DB;
   const principal = c.get('principal');
@@ -4295,6 +4857,213 @@ app.delete('/api/holdings/:id', async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }
+});
+
+app.get('/api/debts', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const includeReceivables = Number(c.req.query('includeReceivables') === '1');
+  const [debts, payments] = await db.batch([
+    db.prepare(`SELECT d.*, EXISTS(SELECT 1 FROM debt_payments p WHERE p.debt_id=d.id AND p.user_id=d.user_id) AS has_payment_history
+      FROM debts d WHERE user_id=? AND (d.kind='payable' OR ?=1) ORDER BY due_on IS NULL, due_on, updated_at DESC`).bind(userId, includeReceivables),
+    db.prepare(`SELECT p.*, a.name AS account_name, t.note AS note FROM debt_payments p
+      JOIN debts d ON d.id=p.debt_id AND d.user_id=p.user_id
+      LEFT JOIN accounts a ON a.id=p.account_id AND a.user_id=p.user_id
+      LEFT JOIN transactions t ON t.id=p.bank_transaction_id AND t.user_id=p.user_id
+      WHERE p.user_id=? AND p.voided_at IS NULL AND (d.kind='payable' OR ?=1) ORDER BY p.created_at DESC, p.id DESC`).bind(userId, includeReceivables)
+  ]);
+  return c.json({ debts: debts.results || [], payments: payments.results || [] });
+});
+
+app.post('/api/debts', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const body = await c.req.json().catch(() => null);
+  const fields = parseDebtFields(body);
+  const id = body?.id ?? null;
+  const expectedRevision = body?.expectedRevision;
+  const operationId = body?.operationId;
+  if (!fields || !isOperationId(operationId) ||
+      (id !== null ? typeof id !== 'string' || !id || !isRevision(expectedRevision) : expectedRevision !== null || fields.principalVnd + fields.chargesVnd === 0)) {
+    return c.json({ error: 'Anh kiểm tra tên khoản nợ, dư nợ và thông tin kỳ trả.', code: 'INVALID_DEBT' }, 400);
+  }
+  const endpoint = 'POST /api/debts';
+  const payload = { id, expectedRevision, ...fields };
+  const conflict = () => c.json({ error: 'Yêu cầu đã được dùng với thông tin khác. Anh tải lại khoản nợ.', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+  const stale = () => c.json({ error: 'Khoản nợ hoặc tài sản thế chấp vừa thay đổi. Anh tải lại để kiểm tra.', code: 'DEBT_REVISION_CONFLICT' }, 409);
+  try {
+    const receipt = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+    if (receipt.conflict) return conflict();
+    if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+    const finalId = id || `debt_${crypto.randomUUID()}`;
+    const revision = id ? expectedRevision + 1 : 1;
+    const result = { success: true, id: finalId, revision };
+    const statements = [buildMutationReceiptStatement(db, operationId, userId, endpoint, receipt.payloadHash, 200, result)!];
+    const { name, creditor, kind = 'payable', principalVnd, chargesVnd, dueOn, dueVnd, collateralHoldingId } = fields;
+    if (collateralHoldingId) statements.push(buildBatchAssertion(db, `SELECT COUNT(*) FROM holdings h JOIN assets a ON a.id=h.asset_id
+      WHERE h.id=? AND h.user_id=? AND a.asset_class='land'`, [collateralHoldingId, userId]));
+    if (id) statements.push(
+      buildBatchAssertion(db, 'SELECT COUNT(*) FROM debts WHERE id=? AND user_id=? AND revision=? AND kind=?', [id, userId, expectedRevision, kind]),
+      db.prepare(`UPDATE debts SET name=?,creditor=?,principal_vnd=?,charges_vnd=?,due_on=?,due_vnd=?,collateral_holding_id=?,revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?`)
+        .bind(name, creditor, principalVnd, chargesVnd, dueOn, dueVnd, collateralHoldingId, revision, id, userId)
+    );
+    else statements.push(db.prepare(`INSERT INTO debts (id,user_id,name,creditor,kind,principal_vnd,charges_vnd,due_on,due_vnd,collateral_holding_id) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .bind(finalId, userId, name, creditor, kind, principalVnd, chargesVnd, dueOn, dueVnd, collateralHoldingId));
+    try { await db.batch(statements); }
+    catch (err) {
+      const replay = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+      if (replay.conflict) return conflict();
+      if (replay.cachedResponse) return c.json(replay.cachedResponse);
+      if (String(err).includes('CHECK constraint failed')) return stale();
+      throw err;
+    }
+    return c.json(result);
+  } catch { return c.json({ error: 'Chưa lưu được khoản nợ. Anh thử lại.', code: 'DEBT_SAVE_UNAVAILABLE' }, 503); }
+});
+
+app.delete('/api/debts/:id', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => null);
+  if (!isRevision(body?.expectedRevision)) return c.json({ error: 'Anh tải lại khoản nợ trước khi xóa.', code: 'INVALID_DEBT' }, 400);
+  const result = await db.prepare(`DELETE FROM debts WHERE id=? AND user_id=? AND revision=?
+    AND NOT EXISTS(SELECT 1 FROM debt_payments WHERE debt_id=? AND user_id=?)`).bind(id, userId, body.expectedRevision, id, userId).run();
+  const stillExists = !result.meta.changes && await db.prepare('SELECT id FROM debts WHERE id=? AND user_id=?').bind(id, userId).first();
+  return stillExists ? c.json({ error: 'Khoản nợ đã thay đổi hoặc có lịch sử trả nợ.', code: 'DEBT_DELETE_CONFLICT' }, 409) : c.json({ success: true });
+});
+
+const debtPaymentAccount = `SELECT revision FROM accounts WHERE id=? AND user_id=? AND COALESCE(is_active,1)=1 AND UPPER(COALESCE(currency,'VND'))='VND' AND type<>'unassigned'`;
+
+app.post('/api/debts/:id/repay', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const debtId = c.req.param('id');
+  const body = await c.req.json().catch(() => null);
+  const payment = parseDebtPayment(body);
+  if (!payment) return c.json({ error: 'Anh chọn tài khoản và kiểm tra số tiền trả nợ.', code: 'INVALID_DEBT_PAYMENT' }, 400);
+  if (!isValidTransactionNote(body?.note)) return c.json({ error: 'Ghi chú phải là văn bản, tối đa 500 ký tự.', code: 'INVALID_TRANSACTION_NOTE' }, 400);
+  const note = body?.note;
+  const payload = note === undefined ? payment : { ...payment, note };
+  const { accountId, principalVnd, chargesVnd, totalVnd, transactionId, expectedTransactionRevision, expectedRevision, operationId } = payment;
+  const endpoint = `POST /api/debts/${debtId}/repay`;
+  const conflict = () => c.json({ error: 'Yêu cầu này đã được lưu với dữ liệu khác.', code: 'IDEMPOTENCY_CONFLICT' }, 409);
+  const stale = () => c.json({ error: 'Khoản nợ, tài khoản hoặc thông báo vừa thay đổi. Anh tải lại rồi kiểm tra.', code: 'DEBT_PAYMENT_CONFLICT' }, 409);
+  try {
+    const receipt = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+    if (receipt.conflict) return conflict();
+    if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+    const debt = await db.prepare('SELECT * FROM debts WHERE id=? AND user_id=?').bind(debtId, userId).first<any>();
+    if (!debt) return c.json({ error: 'Không tìm thấy khoản nợ.', code: 'DEBT_NOT_FOUND' }, 404);
+    const collecting = debt.kind === 'receivable';
+    if (collecting !== (payment.type === 'income')) {
+      return c.json({ error: 'Anh chọn đúng loại khoản nợ hoặc khoản cho vay.', code: 'INVALID_DEBT_PAYMENT_KIND' }, 400);
+    }
+    if (debt.revision !== expectedRevision) return stale();
+    if (principalVnd > debt.principal_vnd) return c.json({
+      error: collecting ? 'Tiền nhận vượt dư gốc của khoản cho vay.' : 'Số gốc trả vượt số gốc còn lại.',
+      code: 'DEBT_PRINCIPAL_TOO_HIGH'
+    }, 400);
+    const account = await db.prepare(debtPaymentAccount).bind(accountId, userId).first<{ revision: number | null }>();
+    if (!account) return c.json({ error: 'Anh chọn tài khoản VND đang hoạt động.', code: 'ACCOUNT_NOT_FOUND' }, 400);
+    const accountRevision = account.revision ?? 1;
+    // An explicit income review can also correct an expense prediction on a bank notice.
+    const bankSql = `SELECT occurred_at FROM transactions WHERE id=? AND user_id=? AND status='pending' AND type IN ('expense',?)
+      AND currency='VND' AND amount=? AND COALESCE(revision,1)=? AND deleted_at IS NULL AND transfer_pair_id IS NULL
+      AND fund_purchase_json IS NULL AND debt_payment_id IS NULL AND (raw_notification_id IS NOT NULL OR source IN ('notification','sms'))`;
+    const bankArgs = [transactionId, userId, collecting ? 'income' : 'expense', totalVnd, expectedTransactionRevision];
+    const bank = transactionId ? await db.prepare(bankSql).bind(...bankArgs).first<{ occurred_at: string }>() : null;
+    if (transactionId && !bank) return stale();
+
+    const id = `repay_${crypto.randomUUID()}`;
+    const interestTxId = chargesVnd ? `tx_debt_${crypto.randomUUID()}` : null;
+    const occurredAt = bank?.occurred_at || new Date().toISOString();
+    const chargesReduced = Math.min(chargesVnd, Number(debt.charges_vnd));
+    const result = { success: true, id, revision: expectedRevision + 1 };
+    const statements = [
+      buildMutationReceiptStatement(db, operationId, userId, endpoint, receipt.payloadHash, 200, result)!,
+      buildBatchAssertion(db, 'SELECT COUNT(*) FROM debts WHERE id=? AND user_id=? AND revision=?', [debtId, userId, expectedRevision]),
+      buildBatchAssertion(db, `SELECT EXISTS(${debtPaymentAccount} AND COALESCE(revision,1)=?)`, [accountId, userId, accountRevision])
+    ];
+    if (transactionId) statements.push(buildBatchAssertion(db, `SELECT EXISTS(${bankSql})`, bankArgs));
+    if (interestTxId) statements.push(db.prepare(`INSERT INTO transactions (id,user_id,occurred_at,type,amount,currency,account_id,status,source,description,debt_payment_id)
+      VALUES (?,?,?,'expense',?,'VND',?,'confirmed','debt_payment',?,?)`)
+      .bind(interestTxId, userId, occurredAt, chargesVnd, accountId, `Lãi/phí trả nợ · ${debt.name}`, id));
+    statements.push(
+      db.prepare(`UPDATE debts SET principal_vnd=principal_vnd-?,charges_vnd=charges_vnd-?,revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?`)
+        .bind(principalVnd, chargesReduced, result.revision, debtId, userId),
+      db.prepare(`INSERT INTO debt_payments (id,user_id,debt_id,account_id,bank_transaction_id,interest_transaction_id,principal_vnd,charges_vnd,charges_reduced_vnd,debt_revision_after,account_revision_after,occurred_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, userId, debtId, accountId, transactionId, interestTxId, principalVnd, chargesVnd, chargesReduced, result.revision, accountRevision + 1, occurredAt),
+      ...buildLedgerDeltaStatements(db, userId, accountId, collecting ? totalVnd : -totalVnd,
+        collecting ? 'loan_repayment' : 'debt_repayment', operationId, collecting ? transactionId : interestTxId)
+    );
+    if (transactionId) statements.push(
+      db.prepare(`UPDATE transactions SET status='ignored',debt_payment_id=?,suggested_pair_id=NULL,
+        note=CASE WHEN ?=1 THEN ? ELSE note END,revision=COALESCE(revision,1)+1,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?`)
+        .bind(id, Number(note !== undefined), typeof note === 'string' ? note.trim() || null : null, transactionId, userId),
+      db.prepare('UPDATE transactions SET suggested_pair_id=NULL WHERE user_id=? AND suggested_pair_id=?').bind(userId, transactionId)
+    );
+    try { await db.batch(statements); }
+    catch (err) {
+      const replay = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+      if (replay.conflict) return conflict();
+      if (replay.cachedResponse) return c.json(replay.cachedResponse);
+      if (String(err).includes('CHECK constraint failed')) return stale();
+      throw err;
+    }
+    return c.json(result);
+  } catch { return c.json({ error: 'Chưa xác nhận được lần trả nợ. Anh thử lại cùng yêu cầu.', code: 'DEBT_PAYMENT_UNAVAILABLE' }, 503); }
+});
+
+app.post('/api/debts/:id/payments/:paymentId/undo', async (c) => {
+  const db = c.env.DB;
+  const userId = c.get('principal').userId;
+  const { id: debtId, paymentId } = c.req.param();
+  const operationId = (await c.req.json().catch(() => null))?.operationId;
+  if (!isOperationId(operationId)) return c.json({ error: 'Anh mở lại lần trả nợ.', code: 'INVALID_DEBT_PAYMENT' }, 400);
+  const endpoint = `POST /api/debts/${debtId}/payments/${paymentId}/undo`;
+  const payload = { paymentId };
+  const stale = () => c.json({ error: 'Khoản nợ hoặc tài khoản đã thay đổi sau lần trả này.', code: 'DEBT_UNDO_CONFLICT' }, 409);
+  try {
+    const receipt = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+    if (receipt.conflict) return stale();
+    if (receipt.cachedResponse) return c.json(receipt.cachedResponse);
+    const row = await db.prepare(`SELECT p.*, d.kind AS debt_kind FROM debt_payments p JOIN debts d ON d.id=p.debt_id AND d.user_id=p.user_id
+      WHERE p.id=? AND p.debt_id=? AND p.user_id=? AND p.voided_at IS NULL`)
+      .bind(paymentId, debtId, userId).first<any>();
+    if (!row?.account_id) return stale();
+    const collecting = row.debt_kind === 'receivable';
+    const amount = Number(row.principal_vnd) + Number(row.charges_vnd);
+    const result = { success: true, id: paymentId };
+    const statements = [
+      buildMutationReceiptStatement(db, operationId, userId, endpoint, receipt.payloadHash, 200, result)!,
+      buildBatchAssertion(db, 'SELECT COUNT(*) FROM debt_payments WHERE id=? AND debt_id=? AND user_id=? AND voided_at IS NULL', [paymentId, debtId, userId]),
+      buildBatchAssertion(db, 'SELECT COUNT(*) FROM debts WHERE id=? AND user_id=? AND revision=?', [debtId, userId, row.debt_revision_after]),
+      buildBatchAssertion(db, `SELECT EXISTS(${debtPaymentAccount} AND COALESCE(revision,1)=?)`, [row.account_id, userId, row.account_revision_after])
+    ];
+    for (const [txId, status] of [[row.bank_transaction_id, 'ignored'], [row.interest_transaction_id, 'confirmed']]) {
+      if (txId) statements.push(buildBatchAssertion(db, 'SELECT COUNT(*) FROM transactions WHERE id=? AND user_id=? AND debt_payment_id=? AND status=? AND deleted_at IS NULL', [txId, userId, paymentId, status]));
+    }
+    statements.push(
+      db.prepare('UPDATE debts SET principal_vnd=principal_vnd+?,charges_vnd=charges_vnd+?,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?')
+        .bind(row.principal_vnd, row.charges_reduced_vnd, debtId, userId),
+      ...buildLedgerDeltaStatements(db, userId, row.account_id, collecting ? -amount : amount,
+        collecting ? 'loan_repayment_undo' : 'debt_repayment_undo', operationId, collecting ? row.bank_transaction_id : row.interest_transaction_id),
+      db.prepare('UPDATE debt_payments SET voided_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?').bind(paymentId, userId)
+    );
+    if (row.bank_transaction_id) statements.push(db.prepare(`UPDATE transactions SET status='pending',debt_payment_id=NULL,revision=COALESCE(revision,1)+1,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?`)
+      .bind(row.bank_transaction_id, userId));
+    if (row.interest_transaction_id) statements.push(db.prepare(`UPDATE transactions SET status='deleted',debt_payment_id=NULL,deleted_at=CURRENT_TIMESTAMP,revision=COALESCE(revision,1)+1 WHERE id=? AND user_id=?`)
+      .bind(row.interest_transaction_id, userId));
+    try { await db.batch(statements); }
+    catch (err) {
+      const replay = await getMutationReceipt(db, operationId, userId, endpoint, payload);
+      if (replay.cachedResponse) return c.json(replay.cachedResponse);
+      if (replay.conflict || String(err).includes('CHECK constraint failed')) return stale();
+      throw err;
+    }
+    return c.json(result);
+  } catch { return c.json({ error: 'Chưa hoàn tác được lần trả nợ. Anh thử lại.', code: 'DEBT_UNDO_UNAVAILABLE' }, 503); }
 });
 
 // Investment Cashflow Transactions (Buy / Sell / Dividend / Fee / Tax) (V2-19)
@@ -4553,6 +5322,25 @@ async function syncMarketPrices(db: D1Database): Promise<{ updated: Record<strin
   const staleAssets: string[] = [];
   const nowIso = new Date().toISOString();
 
+  const fundAssets = assets.filter(asset => asset.asset_class === 'fund' && asset.provider === 'fmarket');
+  if (fundAssets.length > 0) {
+    const catalog = await loadFmarketProducts().catch(() => []);
+    const products = new Map(catalog.map(product => [product.shortName, product]));
+    for (const asset of fundAssets) {
+      const product = products.get(String(asset.symbol).toUpperCase());
+      const quote = product ? await loadFmarketNav(product).catch(() => null) : null;
+      if (quote && !quote.stale && (!asset.price_as_of || quote.navDate >= String(asset.price_as_of).slice(0, 10))) {
+        await db.prepare(`UPDATE assets SET current_price = ?, price_as_of = ?, sync_status = 'ok', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND provider = 'fmarket' AND (price_as_of IS NULL OR date(price_as_of) <= ?)`)
+          .bind(quote.nav, quote.navDate, asset.id, quote.navDate).run();
+        updated[asset.symbol] = quote.nav;
+      } else {
+        await db.prepare("UPDATE assets SET sync_status = 'stale' WHERE id = ? AND provider = 'fmarket'").bind(asset.id).run();
+        staleAssets.push(asset.symbol);
+      }
+    }
+  }
+
   // 1. Gold prices (Separate SJC 9999 vs GOLD_RING / NHAN_TRON strictly!)
   const goldAssets = assets.filter((a) => a.asset_class === 'gold');
   for (const g of goldAssets) {
@@ -4746,7 +5534,7 @@ app.post('/api/reset', async (c) => {
       .all<{ id: string; name: string; balance: number; revision: number }>();
 
     const { results: activeTxs } = await db
-      .prepare('SELECT * FROM transactions WHERE user_id = ? AND deleted_at IS NULL')
+      .prepare('SELECT * FROM transactions WHERE user_id = ? AND deleted_at IS NULL AND debt_payment_id IS NULL')
       .bind(userId)
       .all<any>();
 
@@ -4815,7 +5603,7 @@ app.post('/api/reset', async (c) => {
             .prepare(
               `UPDATE transactions
                SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP, revision = COALESCE(revision, 1) + 1
-               WHERE user_id = ? AND deleted_at IS NULL`
+               WHERE user_id = ? AND deleted_at IS NULL AND debt_payment_id IS NULL`
             )
             .bind(userId)
         );
@@ -4965,6 +5753,8 @@ app.get('/api/backup/export', async (c) => {
       postingsRes,
       assetsRes,
       holdingsRes,
+      debtsRes,
+      debtPaymentsRes,
       invTxsRes,
       cashflowsRes,
       cashflowSettingsRes,
@@ -4982,6 +5772,8 @@ app.get('/api/backup/export', async (c) => {
       db.prepare('SELECT * FROM ledger_postings WHERE user_id = ?').bind(userId).all<any>(),
       db.prepare('SELECT * FROM assets').all<any>(),
       db.prepare('SELECT * FROM holdings WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM debts WHERE user_id = ?').bind(userId).all<any>(),
+      db.prepare('SELECT * FROM debt_payments WHERE user_id = ?').bind(userId).all<any>(),
       db.prepare('SELECT * FROM investment_transactions WHERE user_id = ?').bind(userId).all<any>(),
       db.prepare('SELECT * FROM investment_cashflows WHERE user_id = ? ORDER BY occurred_at ASC, id ASC').bind(userId).all<any>(),
       db.prepare('SELECT * FROM investment_cashflow_settings WHERE user_id = ?').bind(userId).first<any>(),
@@ -5015,6 +5807,8 @@ app.get('/api/backup/export', async (c) => {
       ledger_postings: postingsRes.results || [],
       assets: assetsRes.results || [],
       holdings: holdingsRes.results || [],
+      debts: debtsRes.results || [],
+      debt_payments: debtPaymentsRes.results || [],
       investment_transactions: invTxsRes.results || [],
       investment_cashflows: cashflowsRes.results || [],
       investment_cashflow_settings: cashflowSettingsRes || null,
@@ -5065,6 +5859,39 @@ app.post('/api/backup/restore', async (c) => {
     }
     if (Object.prototype.hasOwnProperty.call(data, 'raw_notifications') && !Array.isArray(data.raw_notifications)) {
       return c.json({ error: 'Danh sách raw_notifications trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+    for (const transaction of Array.isArray(data.transactions) ? data.transactions : []) {
+      if (transaction.fund_purchase_json != null && !parseFundPurchaseLink(transaction.fund_purchase_json)) {
+        return c.json({ error: 'Liên kết mua quỹ trong sao lưu không hợp lệ.', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
+    }
+    for (const holding of Array.isArray(data.holdings) ? data.holdings : []) {
+      if (holding.land_details_json != null && (!readLandDetails(holding.land_details_json) || !isLandArea(holding.quantity) || holding.holding_unit !== 'm²')) {
+        return c.json({ error: 'Vị trí hoặc diện tích đất trong bản sao lưu không hợp lệ.', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
+    }
+    const hasDebts = Array.isArray(data.debts) && Array.isArray(data.debt_payments);
+    if (!hasDebts && ('debts' in data || 'debt_payments' in data)) {
+      return c.json({ error: 'Danh sách khoản nợ trong bản sao lưu không hợp lệ.', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+    }
+    if (!hasDebts && await db.prepare('SELECT COUNT(*) AS n FROM debts WHERE user_id=?').bind(userId).first<number>('n')) {
+      return c.json({ error: 'Bản sao lưu này chưa có dữ liệu nợ. Anh chọn bản sao có cả khoản nợ và số dư.', code: 'DEBT_BACKUP_REQUIRED' }, 409);
+    }
+    for (const d of data.debts || []) {
+      if (!d?.id || !isRevision(d.revision) || !parseDebtFields({ name: d.name, creditor: d.creditor, kind: d.kind,
+        principalVnd: d.principal_vnd, chargesVnd: d.charges_vnd, dueOn: d.due_on, dueVnd: d.due_vnd, collateralHoldingId: d.collateral_holding_id })) {
+        return c.json({ error: 'Khoản nợ trong bản sao lưu không hợp lệ.', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
+    }
+    const loanIds = new Set((data.debts || []).filter((d: any) => d.kind === 'receivable').map((d: any) => d.id));
+    for (const p of data.debt_payments || []) {
+      if (!p?.id || !Number.isSafeInteger(p.principal_vnd) || p.principal_vnd < 0 || !Number.isSafeInteger(p.charges_vnd) || p.charges_vnd < 0 ||
+          !isValidVndAmount(p.principal_vnd + p.charges_vnd) || !Number.isSafeInteger(p.charges_reduced_vnd) || p.charges_reduced_vnd < 0 ||
+          p.charges_reduced_vnd > p.charges_vnd || !isRevision(p.debt_revision_after) || !isRevision(p.account_revision_after) ||
+          (loanIds.has(p.debt_id) && (p.charges_vnd !== 0 || p.interest_transaction_id)) ||
+          typeof p.occurred_at !== 'string' || !Number.isFinite(Date.parse(p.occurred_at))) {
+        return c.json({ error: 'Lần trả nợ trong bản sao lưu không hợp lệ.', code: 'INVALID_BACKUP_SCHEMA' }, 400);
+      }
     }
     if (Object.prototype.hasOwnProperty.call(data, 'investment_cashflows') && !Array.isArray(data.investment_cashflows)) {
       return c.json({ error: 'Danh sách investment_cashflows trong file sao lưu không hợp lệ', code: 'INVALID_BACKUP_SCHEMA' }, 400);
@@ -5153,13 +5980,17 @@ app.post('/api/backup/restore', async (c) => {
       ['raw_notification_id', rawNotificationIds, true],
       ['original_account_id', accountIds, true],
       ['original_jar_id', jarIds, true],
-      ['original_income_source_id', incomeSourceIds, true]
+      ['original_income_source_id', incomeSourceIds, true],
+      ['debt_payment_id', ids('debt_payments'), true]
     ]);
     if (!brokenReference) checkRows('income_sources', 'Income source', [['account_id', accountIds, true]]);
     if (!brokenReference) checkRows('planned_expenses', 'Planned expense', [['account_id', accountIds, true], ['jar_id', jarIds, true]]);
     if (!brokenReference) checkRows('ledger_baselines', 'Ledger baseline', [['account_id', accountIds]]);
     if (!brokenReference) checkRows('ledger_postings', 'Ledger posting', [['account_id', accountIds], ['transaction_id', transactionIds, true]]);
     if (!brokenReference) checkRows('holdings', 'Holding', [['asset_id', assetIds], ['account_id', accountIds, true]]);
+    if (!brokenReference) checkRows('debts', 'Debt', [['collateral_holding_id', ids('holdings'), true]]);
+    if (!brokenReference) checkRows('debt_payments', 'Debt payment', [['debt_id', ids('debts')], ['account_id', accountIds, true],
+      ['bank_transaction_id', transactionIds, true], ['interest_transaction_id', transactionIds, true]]);
     if (!brokenReference) checkRows('investment_transactions', 'Investment transaction', [['asset_id', assetIds], ['account_id', accountIds, true], ['linked_transaction_id', transactionIds, true]]);
 
     if (!brokenReference) {
@@ -5188,6 +6019,8 @@ app.post('/api/backup/restore', async (c) => {
     }
 
     const stmts: D1PreparedStatement[] = [
+      db.prepare('DELETE FROM debt_payments WHERE user_id = ?').bind(userId),
+      db.prepare('DELETE FROM debts WHERE user_id = ?').bind(userId),
       db.prepare('DELETE FROM investment_cashflows WHERE user_id = ?').bind(userId),
       db.prepare('DELETE FROM investment_cashflow_settings WHERE user_id = ?').bind(userId),
       db.prepare('DELETE FROM investment_transactions WHERE user_id = ?').bind(userId),
@@ -5372,8 +6205,8 @@ app.post('/api/backup/restore', async (c) => {
               jar_id, income_source_id, planned_expense_id, status, needs_account_review, source,
               description, note, counterparty, raw_notification_id, dedupe_hash, transfer_pair_id,
               suggested_pair_id, is_synthetic, original_type, original_account_id, original_jar_id,
-              original_income_source_id, original_description, original_status, history_hidden, revision, deleted_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              original_income_source_id, original_description, original_status, history_hidden, revision, deleted_at, created_at, reviewed_at, fund_purchase_json, debt_payment_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
             tx.id,
@@ -5408,7 +6241,10 @@ app.post('/api/backup/restore', async (c) => {
             tx.history_hidden ? 1 : 0,
             Number(tx.revision || 1),
             tx.deleted_at || null,
-            tx.created_at || new Date().toISOString()
+            tx.created_at || new Date().toISOString(),
+            tx.reviewed_at || null,
+            tx.fund_purchase_json || null,
+            tx.debt_payment_id || null
           )
       );
     }
@@ -5471,8 +6307,8 @@ app.post('/api/backup/restore', async (c) => {
       stmts.push(
         db
           .prepare(
-            `INSERT INTO holdings (id, user_id, asset_id, account_id, quantity, holding_unit, avg_cost, note, revision)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO holdings (id, user_id, asset_id, account_id, quantity, holding_unit, avg_cost, note, revision, land_details_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
             h.id,
@@ -5483,9 +6319,22 @@ app.post('/api/backup/restore', async (c) => {
             h.holding_unit || null,
             Number(h.avg_cost || 0),
             h.note || null,
-            Number(h.revision || 1)
+            Number(h.revision || 1),
+            h.land_details_json || null
           )
       );
+    }
+
+    for (const d of data.debts || []) {
+      stmts.push(db.prepare(`INSERT INTO debts (id,user_id,name,creditor,kind,principal_vnd,charges_vnd,due_on,due_vnd,collateral_holding_id,revision,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(d.id, userId, d.name, d.creditor || '', d.kind ?? 'payable', d.principal_vnd, d.charges_vnd, d.due_on || null, d.due_vnd,
+        d.collateral_holding_id || null, d.revision, d.updated_at || new Date().toISOString()));
+    }
+    for (const p of data.debt_payments || []) {
+      stmts.push(db.prepare(`INSERT INTO debt_payments (id,user_id,debt_id,account_id,bank_transaction_id,interest_transaction_id,principal_vnd,charges_vnd,
+        charges_reduced_vnd,debt_revision_after,account_revision_after,occurred_at,created_at,voided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(p.id, userId, p.debt_id, p.account_id || null, p.bank_transaction_id || null, p.interest_transaction_id || null, p.principal_vnd, p.charges_vnd,
+          p.charges_reduced_vnd, p.debt_revision_after, p.account_revision_after, p.occurred_at, p.created_at || p.occurred_at, p.voided_at || null));
     }
 
     for (const it of data.investment_transactions || []) {
@@ -5616,7 +6465,8 @@ app.get('/api/notifications/recent', async (c) => {
     )
     .bind(userId, limit)
     .all<any>();
-  return c.json({ notifications: results || [] });
+  const notifications = (results || []).filter(row => !isFmarketEmailNotification(row.app_package, row.title || '', row.text));
+  return c.json({ notifications });
 });
 
 app.get('/api/user/profile', async (c) => {
@@ -5641,36 +6491,26 @@ app.put('/api/user/profile', async (c) => {
 
 app.get('/api/market/fmarket-funds', async (c) => {
   try {
-    // FireAnt's documented Fmarket product list supplies product identity, NAV and NAV date.
-    const upstream = await fetch('https://api.fireant.vn/fmarket/markets/filter-products', {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ page: 0, page_size: 200 })
-    });
-    if (!upstream.ok) throw new Error(`Fmarket upstream HTTP ${upstream.status}`);
-    const payload: any = await upstream.json();
-    if (!Array.isArray(payload?.items)) throw new Error('Fmarket upstream response invalid');
-    const now = Date.now();
-    const funds = payload.items.flatMap((item: any) => {
-      const shortName = String(item.short_name || '').trim();
-      const nav = Number(item.nav);
-      const navDate = String(item.nav_date || '').trim();
-      const updatedAt = Date.parse(navDate);
-      if (!shortName || !Number.isFinite(nav) || nav <= 0 || !Number.isFinite(updatedAt)) return [];
-      return [{
-        shortName,
-        name: String(item.name || shortName),
-        nav,
-        navDate,
-        updatedAt,
-        issuer: item.issuer_info?.name || null,
-        stale: now - updatedAt > 7 * 24 * 60 * 60 * 1000
-      }];
-    });
-    return c.json({ funds, source: 'FireAnt Fmarket', stale: funds.length === 0 || funds.every((fund: any) => fund.stale), fetchedAt: new Date(now).toISOString() });
+    const funds = await loadFmarketProducts();
+    if (funds.length === 0) throw new Error('Empty Fmarket catalog');
+    return c.json({ funds, source: 'Fmarket', quoteOnSelect: true });
   } catch {
-    return c.json({ funds: [], source: 'FireAnt Fmarket', stale: true, error: 'NAV hiện không khả dụng' }, 503);
+    return c.json({ funds: [], source: 'Fmarket', error: 'Chưa tải được danh sách quỹ Fmarket.' }, 503);
   }
+});
+
+app.get('/api/market/fmarket-funds/:symbol', async (c) => {
+  const symbol = c.req.param('symbol').trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9._-]{0,23}$/.test(symbol)) {
+    return c.json({ error: 'Mã quỹ không hợp lệ.', code: 'INVALID_FUND_SYMBOL' }, 400);
+  }
+  try {
+    const quote = await loadFmarketQuote(symbol);
+    if (quote) return c.json({ ...quote, source: 'Fmarket' });
+  } catch {
+    // A provider failure never becomes a made-up price.
+  }
+  return c.json({ error: 'Chưa có NAV xác minh cho mã quỹ này. Anh thử tải lại.', code: 'FMARKET_NAV_UNAVAILABLE' }, 503);
 });
 
 app.post('/api/seed', async (c) => {

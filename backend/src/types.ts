@@ -17,13 +17,18 @@ export type Bindings = {
   CF_ACCESS_AUD?: string;
   OWNER_EMAIL?: string;
   OWNER_API_TOKEN?: string;
+  OWNER_CODE_PEPPER?: string;
   FRONTEND_ORIGIN?: string;
+  LAND_PRICE_API_KEY?: string;
 };
 
 export interface ParsedTransaction {
   type: 'income' | 'expense';
   amount: number;
+  accountNumber?: string;
   accountNumberMask?: string;
+  accountReferenceAmbiguous?: boolean;
+  needsTypeReview?: boolean;
   bankCode: string;
   occurredAt: string;
   timeSource?: 'override' | 'notification_text' | 'server_received' | 'notification';

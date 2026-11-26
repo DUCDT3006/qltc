@@ -10,10 +10,14 @@ import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.text.InputType
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -520,6 +524,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun triggerLightHapticFeedback() {
+        runOnUiThread {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val manager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                    manager?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+                if (vibrator != null && vibrator.hasVibrator()) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(18L, 120))
+                    return@runOnUiThread
+                }
+                if (::webView.isInitialized) {
+                    @Suppress("DEPRECATION")
+                    webView.performHapticFeedback(
+                        HapticFeedbackConstants.CONTEXT_CLICK,
+                        HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
+                    )
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     class AndroidBridge(private val activity: MainActivity) {
         @JavascriptInterface
         fun getNativeApkVersion(): String {
@@ -539,6 +569,11 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun openDevicePairing() {
             activity.runOnUiThread { activity.showPairingDialog() }
+        }
+
+        @JavascriptInterface
+        fun triggerLightHaptic() {
+            activity.triggerLightHapticFeedback()
         }
 
         @JavascriptInterface

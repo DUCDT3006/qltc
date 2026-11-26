@@ -1,7 +1,7 @@
 // Account matching logic according to V2-03
 // Aliases chuẩn hóa, khớp theo thứ tự ưu tiên, cờ needs_account_review
 
-import { ParsedTransaction } from '../types';
+import type { ParsedTransaction } from '../types';
 
 export interface BankAccountCandidate {
   id: string;
@@ -46,6 +46,7 @@ export const BANK_ALIASES: Record<string, string> = {
   TPBANK: 'TPB',
   HDB: 'HDB',
   HDBANK: 'HDB',
+  COOPBANK: 'COOPBANK',
   ICB: 'CTG',
   CTG: 'CTG',
   VIETINBANK: 'CTG',
@@ -66,8 +67,8 @@ export const BANK_ALIASES: Record<string, string> = {
 };
 
 export function canonicalBankCode(bankCodeOrName: string): string {
-  if (!bankCodeOrName || bankCodeOrName.toUpperCase() === 'UNKNOWN') return 'BANK';
-  const clean = bankCodeOrName.trim().toUpperCase();
+  const clean = bankCodeOrName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/Đ/g, 'D').replace(/[^A-Z0-9]/g, '');
+  if (!clean || clean === 'UNKNOWN') return 'BANK';
   return BANK_ALIASES[clean] || clean;
 }
 
@@ -90,8 +91,12 @@ export function matchAccountForNotification(
   if (Array.isArray(arg1)) {
     accounts = arg1;
     const parsed = arg2 as ParsedTransaction | undefined;
+    if (parsed?.accountReferenceAmbiguous) {
+      return { accountId: null, confidence: 0, needsAccountReview: true, matchMethod: 'none', reasonCode: 'AMBIGUOUS_ACCOUNT' };
+    }
     detectedBankCode = parsed?.bankCode || 'BANK';
     accountMask = parsed?.accountNumberMask || null;
+    fullAccountNumber = parsed?.accountNumber;
   } else {
     detectedBankCode = arg1 || 'BANK';
     accountMask = (arg2 as string | null) || null;
@@ -99,43 +104,43 @@ export function matchAccountForNotification(
     fullAccountNumber = arg4;
   }
 
-  const activeAccounts = accounts.filter((a) => a.isActive !== 0 && a.is_active !== 0);
+  const activeAccounts = accounts.filter((a) => a.id !== 'acc_unassigned' && a.isActive !== 0 && a.is_active !== 0);
   const canonBank = canonicalBankCode(detectedBankCode);
+  if (canonBank === 'FMARKET') {
+    return { accountId: null, confidence: 0, needsAccountReview: true, matchMethod: 'none', reasonCode: 'FMARKET_ACCOUNT_REQUIRED' };
+  }
 
   const getBank = (a: BankAccountCandidate) => canonicalBankCode(a.bankCode || a.bank_code || a.bankName || a.bank_name || '');
   const getFull = (a: BankAccountCandidate) => (a.accountNumber || a.account_number || '').replace(/[^\d]/g, '');
   const getMask = (a: BankAccountCandidate) => (a.accountNumberMask || a.account_number_mask || '').replace(/[^\d]/g, '');
 
-  // 1. Khớp số tài khoản đầy đủ + ngân hàng nếu có
-  if (fullAccountNumber && fullAccountNumber.length >= 6) {
-    const cleanFull = fullAccountNumber.replace(/[^\d]/g, '');
-    const fullMatch = activeAccounts.find((a) => {
-      const aFull = getFull(a);
-      const aBank = getBank(a);
-      return aFull === cleanFull && (canonBank === 'BANK' || aBank === canonBank);
-    });
-    if (fullMatch) {
+  const cleanFull = fullAccountNumber?.replace(/\D/g, '') || '';
+  const hasFullNumber = cleanFull.length >= 6;
+  const bankMatches = (account: BankAccountCandidate) => canonBank === 'BANK' || getBank(account) === 'BANK' || getBank(account) === canonBank;
+  if (hasFullNumber) {
+    const fullMatches = activeAccounts.filter(account => getFull(account) === cleanFull && bankMatches(account));
+    if (fullMatches.length === 1) {
       return {
-        accountId: fullMatch.id,
+        accountId: fullMatches[0].id,
         confidence: 1.0,
         needsAccountReview: false,
         matchMethod: 'full_number'
       };
     }
+    if (fullMatches.length > 1) return { accountId: null, confidence: 0, needsAccountReview: true, matchMethod: 'none', reasonCode: 'AMBIGUOUS_FULL_NUMBER' };
   }
 
   // 2. Khớp ngân hàng + số đuôi mask (ví dụ 4 số cuối)
-  const cleanMask = (accountMask || '').replace(/[^\d]/g, '');
+  const cleanMask = (accountMask || (hasFullNumber ? cleanFull.slice(-4) : '')).replace(/[^\d]/g, '');
   if (cleanMask.length >= 3) {
     const maskCandidates = activeAccounts.filter((a) => {
-      const aBank = getBank(a);
       const aFull = getFull(a);
       const aMask = getMask(a);
-
-      const bankMatches = canonBank === 'BANK' || aBank === 'BANK' || aBank === canonBank;
+      // Do not accept a matching suffix when a known complete number contradicts it.
+      if (hasFullNumber && (aFull || canonBank === 'BANK' || getBank(a) !== canonBank)) return false;
       const maskMatches =
         (aMask.length >= 3 && aMask.endsWith(cleanMask)) || (aFull.length >= 4 && aFull.endsWith(cleanMask));
-      return bankMatches && maskMatches;
+      return bankMatches(a) && maskMatches;
     });
 
     if (maskCandidates.length === 1) {
@@ -157,23 +162,15 @@ export function matchAccountForNotification(
     }
   }
 
+  if (hasFullNumber || cleanMask.length >= 3) {
+    return { accountId: null, confidence: 0, needsAccountReview: true, matchMethod: 'none', reasonCode: 'ACCOUNT_NUMBER_MISMATCH' };
+  }
+
   // 3. Nếu chỉ biết ngân hàng: CHỈ nhận khi có ĐÚNG 1 tài khoản duy nhất của ngân hàng đó (và không có mask xung đột)
   if (canonBank !== 'BANK') {
     const bankCandidates = activeAccounts.filter((a) => getBank(a) === canonBank);
     if (bankCandidates.length === 1) {
       const singleAcc = bankCandidates[0];
-      const existingMask = getMask(singleAcc) || getFull(singleAcc).slice(-4);
-      // Nếu thông báo có mask cụ thể nhưng khác hoàn toàn với mask của tài khoản duy nhất -> cần review!
-      if (cleanMask.length >= 3 && existingMask.length >= 3 && !existingMask.endsWith(cleanMask)) {
-        return {
-          accountId: null,
-          confidence: 0.3,
-          needsAccountReview: true,
-          matchMethod: 'none',
-          reason: `Số đuôi ${cleanMask} không khớp với tài khoản ${singleAcc.name} (${existingMask})`,
-          reasonCode: 'MASK_MISMATCH'
-        };
-      }
       return {
         accountId: singleAcc.id,
         confidence: 0.8,

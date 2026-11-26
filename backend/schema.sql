@@ -46,6 +46,21 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_web_sessions_active ON web_sessions(token_hash, expires_at) WHERE revoked_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS owner_credentials (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  salt TEXT NOT NULL,
+  code_mac TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision >= 1),
+  last_change_id TEXT NOT NULL,
+  last_change_mac TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS owner_auth_throttle (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  failures INTEGER NOT NULL DEFAULT 0,
+  window_until INTEGER NOT NULL
+);
+
 -- 1e. Mutation Assertions (Used inside D1 batch() to abort & rollback on precondition failure)
 CREATE TABLE IF NOT EXISTS mutation_assertions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +195,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   source TEXT DEFAULT 'manual', -- 'notification', 'sms', 'manual', 'import', 'system'
   description TEXT,
   note TEXT,
+  reviewed_at DATETIME,
+  fund_purchase_json TEXT,
+  debt_payment_id TEXT,
   counterparty TEXT,
   raw_notification_id TEXT,
   dedupe_hash TEXT UNIQUE, -- Chống trùng lặp giao dịch tự động
@@ -284,11 +302,46 @@ CREATE TABLE IF NOT EXISTS holdings (
   holding_unit TEXT,
   avg_cost REAL NOT NULL DEFAULT 0, -- Giá vốn trung bình trên mỗi đơn vị (VND)
   note TEXT,
+  land_details_json TEXT,
   revision INTEGER NOT NULL DEFAULT 1,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS debts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  creditor TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'payable' CHECK(kind IN ('payable','receivable')),
+  principal_vnd INTEGER NOT NULL CHECK(principal_vnd >= 0),
+  charges_vnd INTEGER NOT NULL DEFAULT 0 CHECK(charges_vnd >= 0),
+  due_on TEXT,
+  due_vnd INTEGER NOT NULL DEFAULT 0 CHECK(due_vnd >= 0),
+  collateral_holding_id TEXT REFERENCES holdings(id) ON DELETE SET NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS debt_payments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  debt_id TEXT NOT NULL REFERENCES debts(id) ON DELETE CASCADE,
+  account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  bank_transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+  interest_transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+  principal_vnd INTEGER NOT NULL CHECK(principal_vnd >= 0),
+  charges_vnd INTEGER NOT NULL CHECK(charges_vnd >= 0),
+  charges_reduced_vnd INTEGER NOT NULL CHECK(charges_reduced_vnd >= 0 AND charges_reduced_vnd <= charges_vnd),
+  debt_revision_after INTEGER NOT NULL,
+  account_revision_after INTEGER NOT NULL,
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  voided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_debts_user ON debts(user_id);
+CREATE INDEX IF NOT EXISTS idx_debt_payments_user ON debt_payments(user_id, debt_id, created_at);
 
 CREATE TABLE IF NOT EXISTS investment_transactions (
   id TEXT PRIMARY KEY,

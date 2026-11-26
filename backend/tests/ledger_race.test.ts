@@ -139,30 +139,66 @@ it('V2-16: weekly, quarterly and semiannual plans preserve their annual totals',
   assert.equal(year.data.totals.plannedExpense, 52 * 10 + 4 * 1_000_001 + 2 * 10);
 });
 
-it('AT2-32: Fmarket NAV comes from upstream with date; failure reports unavailable', async () => {
-  const { db } = createSqliteD1();
+it('AT2-32: Fmarket selection uses the published dated NAV and preserves purchase inputs', async () => {
+  const { db, rawDb } = createSqliteD1();
   const env = { DB: db, OWNER_API_TOKEN: ownerToken };
   const originalFetch = globalThis.fetch;
+  const day = new Date().toISOString().slice(0, 10);
+  let nav = 12_345.67;
   try {
-    globalThis.fetch = (async (url: string | URL | Request) => {
-      assert.equal(String(url), 'https://api.fireant.vn/fmarket/markets/filter-products');
-      return new Response(JSON.stringify({ items: [
-        { short_name: 'TESTFUND', name: 'Test Fund', nav: 12_345.67, nav_date: new Date().toISOString() },
-        { short_name: 'OLDFUND', name: 'Old Fund', nav: 10_000, nav_date: '2020-01-01' }
-      ] }), { status: 200 });
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(init?.method, 'POST');
+      if (String(url) === 'https://api.fmarket.vn/res/products/filter') {
+        return Response.json({ data: { total: 2, rows: [
+          { id: 23, shortName: 'TESTFUND', name: 'Official test fund', nav: 1, status: 'PRODUCT_ACTIVE' },
+          { id: 24, shortName: 'OLDFUND', name: 'Old fund', status: 'PRODUCT_ACTIVE' }
+        ] } });
+      }
+      assert.equal(String(url), 'https://api.fmarket.vn/res/product/get-nav-history');
+      const { productId } = JSON.parse(String(init?.body));
+      return Response.json({ data: productId === 24 ? [{ productId, nav: 10_000, navDate: '2020-01-01' }] : [
+        { productId, nav: 10, navDate: '2020-01-01' },
+        { productId, nav, navDate: day },
+        { productId, nav: 1, navDate: '2099-12-31' },
+        { productId: 24, nav: 1, navDate: day }
+      ] });
     }) as typeof fetch;
     const result = await call(env, '/api/market/fmarket-funds');
     assert.equal(result.status, 200);
-    assert.equal(result.data.funds[0].shortName, 'TESTFUND');
-    assert.equal(result.data.funds[0].nav, 12_345.67);
-    assert.equal(result.data.funds[0].stale, false);
-    assert.equal(result.data.funds[1].stale, true);
+    assert.equal(result.data.quoteOnSelect, true);
+    assert.ok(result.data.funds.some((fund: any) => fund.shortName === 'TESTFUND' && fund.name === 'Official test fund'));
+    const quote = await call(env, '/api/market/fmarket-funds/TESTFUND');
+    assert.equal(quote.data.nav, 12_345.67);
+    assert.equal(quote.data.navDate, day);
+    assert.equal(quote.data.stale, false);
+    assert.equal((await call(env, '/api/market/fmarket-funds/OLDFUND')).data.stale, true);
+
+    const body = { symbol: 'TESTFUND', name: 'Client guess', assetClass: 'fund', provider: 'fmarket', quantity: 12.5, avgCost: 11_222.34, currentPrice: 1 };
+    const saved = await call(env, '/api/holdings', 'POST', body);
+    assert.equal(saved.status, 200, saved.data.error);
+    assert.equal(saved.data.holding.name, 'Official test fund');
+    assert.equal(saved.data.holding.avg_cost, 11_222.34);
+    assert.equal(saved.data.holding.quantity, 12.5);
+    assert.equal(saved.data.holding.current_price, 12_345.67);
+    assert.equal(saved.data.holding.price_as_of, day);
+    assert.equal((await call(env, '/api/holdings', 'POST', body)).data.id, saved.data.id);
+    assert.equal(rawDb.prepare('SELECT COUNT(*) AS n FROM holdings').get()?.n, 1);
+    assert.equal((await call(env, '/api/holdings', 'POST', { ...body, symbol: 'OLDFUND' })).status, 503);
+
+    nav = 12_456.78;
+    const refresh = await call(env, '/api/market/sync-prices', 'POST', {});
+    assert.equal(refresh.status, 200);
+    assert.equal(refresh.data.updated.TESTFUND, nav);
+    assert.equal(rawDb.prepare('SELECT current_price FROM assets WHERE symbol = ?').get('TESTFUND')?.current_price, nav);
+    assert.equal(rawDb.prepare('SELECT avg_cost FROM holdings WHERE id = ?').get(saved.data.id)?.avg_cost, 11_222.34);
 
     globalThis.fetch = (async () => { throw new Error('network down'); }) as typeof fetch;
     const unavailable = await call(env, '/api/market/fmarket-funds');
     assert.equal(unavailable.status, 503);
     assert.deepEqual(unavailable.data.funds, []);
-    assert.equal(unavailable.data.stale, true);
+    assert.equal((await call(env, '/api/market/fmarket-funds/TESTFUND')).status, 503);
+    assert.equal((await call(env, '/api/holdings', 'POST', { ...body, quantity: 100 })).status, 503);
+    assert.equal(rawDb.prepare('SELECT quantity FROM holdings WHERE id = ?').get(saved.data.id)?.quantity, 12.5);
   } finally {
     globalThis.fetch = originalFetch;
   }

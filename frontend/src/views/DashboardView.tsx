@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Sparkline } from '../components/Sparkline';
-import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount } from '../types';
+import { Jar, Holding, IncomeSource, PlannedExpense, Transaction, BankAccount, DebtKind } from '../types';
 import { formatVND, normalizeToMonthlyAmount, computeExact100Percentages } from '../utils/financeMath';
 import { isTxnInPeriod, getVietnamDate, periodBoundsUtc } from '../utils/dateUtils';
 import { API_BASE } from '../services/apiClient';
@@ -27,11 +27,15 @@ import {
   Scale,
   Plus,
   QrCode,
-  Copy
+  Copy,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 interface DashboardViewProps {
-  netWorth: number;
+  debtTotal: number | null;
+  loanTotal: number | null;
+  assetsLoaded: boolean;
   liquidCash: number;
   totalInvestments: number;
   accounts: BankAccount[];
@@ -49,12 +53,18 @@ interface DashboardViewProps {
   onOpenInbox: () => void;
   onOpenBudget: () => void;
   onOpenInvestments: () => void;
+  onOpenDebts: (kind: DebtKind) => void;
 }
 
 type PeriodMode = 'month' | 'quarter' | 'year';
+const ASSET_GROUP_IDS = ['bank', 'cash', 'financial', 'gold', 'silver', 'land'] as const;
+type AssetGroupId = typeof ASSET_GROUP_IDS[number];
+const HIDDEN_ASSET_GROUPS_KEY = 'qltc_hidden_asset_groups';
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
-  netWorth,
+  debtTotal,
+  loanTotal,
+  assetsLoaded,
   liquidCash,
   totalInvestments,
   accounts,
@@ -71,13 +81,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onAddAccount,
   onOpenInbox,
   onOpenBudget,
-  onOpenInvestments
+  onOpenInvestments,
+  onOpenDebts
 }) => {
   const nowVN = getVietnamDate();
   const [periodMode, setPeriodMode] = useState<PeriodMode>('month');
   const [selectedYear, setSelectedYear] = useState<number>(nowVN.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState<number>(nowVN.getMonth() + 1); // 1..12
   const [selectedQuarter, setSelectedQuarter] = useState<number>(Math.floor(nowVN.getMonth() / 3) + 1); // 1..4
+  const [hiddenAssetGroups, setHiddenAssetGroups] = useState<AssetGroupId[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(HIDDEN_ASSET_GROUPS_KEY) ?? '[]');
+      return Array.isArray(saved) ? ASSET_GROUP_IDS.filter(id => saved.includes(id)) : [];
+    } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(HIDDEN_ASSET_GROUPS_KEY, JSON.stringify(hiddenAssetGroups)); }
+    catch { /* The current selection still works when device storage is unavailable. */ }
+  }, [hiddenAssetGroups]);
+  const toggleAssetGroup = (id: AssetGroupId) => setHiddenAssetGroups(previous =>
+    previous.includes(id) ? previous.filter(group => group !== id) : [...previous, id]
+  );
 
   // Modal chỉnh nhanh số dư Ngân hàng / Tiền mặt ngay tại Tổng quan
   const [showQuickCashModal, setShowQuickCashModal] = useState(false);
@@ -215,7 +239,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const silverTotal = silverHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
   const landTotal = landHoldings.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
 
-  const totalCalculatedNetWorth = bankTotal + cashTotal + financialTotal + goldTotal + silverTotal + landTotal;
+  const assetGroups = [
+    { id: 'bank' as const, name: 'Ngân hàng & Ví', chartLabel: 'NH', Icon: Landmark,
+      value: bankTotal, color: '#657D81', valueColor: '#F2F5F5', detail: bankAccounts.length + ' TK', onOpen: () => setShowQuickCashModal(true) },
+    { id: 'cash' as const, name: 'Tiền mặt', chartLabel: 'Tiền mặt', Icon: Wallet,
+      value: cashTotal, color: '#8CC7AE', valueColor: '#F2F5F5', detail: cashAccounts.length + ' ví', onOpen: () => setShowQuickCashModal(true) },
+    { id: 'financial' as const, name: 'TS Tài chính (Fmarket)', chartLabel: 'TS TC', Icon: TrendingUp,
+      value: financialTotal, color: '#4EA8DE', valueColor: '#8CC7AE', detail: financialHoldings.length + ' mã', onOpen: onOpenInvestments },
+    { id: 'gold' as const, name: 'Vàng tích trữ', chartLabel: 'Vàng', Icon: Coins,
+      value: goldTotal, color: '#DEB48A', valueColor: '#DEB48A',
+      detail: goldHoldings.reduce((sum, holding) => sum + holding.quantity, 0) + ' ' + (goldHoldings[0]?.unit || 'chỉ'), onOpen: onOpenInvestments },
+    { id: 'silver' as const, name: 'Bạc tích trữ', chartLabel: 'Bạc', Icon: Coins,
+      value: silverTotal, color: '#C4D0D2', valueColor: '#D5E1E3',
+      detail: silverHoldings.reduce((sum, holding) => sum + holding.quantity, 0) + ' ' + (silverHoldings[0]?.unit || 'lượng'), onOpen: onOpenInvestments },
+    { id: 'land' as const, name: 'Đất / BĐS', chartLabel: 'Đất', Icon: MapPin,
+      value: landTotal, color: '#E07A5F', valueColor: '#E07A5F', detail: landHoldings.length + ' tài sản', onOpen: onOpenInvestments }
+  ];
+  const includedAssets = assetGroups.filter(group => !hiddenAssetGroups.includes(group.id));
+  const totalIncludedAssets = includedAssets.reduce((sum, group) => sum + group.value, 0);
+  const allocationAssets = includedAssets.filter(group => group.value > 0);
+  const allocationTotal = allocationAssets.reduce((sum, group) => sum + group.value, 0);
 
   // ============================================================================
   // TÍNH ĐIỂM DỮ LIỆU THẬT CHO SPARKLINE
@@ -447,15 +490,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {/* ==========================================================================
           PHẦN 1: TÀI SẢN RÒNG & THỐNG KÊ TÀI SẢN THỰC TẾ HIỆN CÓ (6 NHÓM)
          ========================================================================== */}
-      <div className="bg-gradient-to-br from-[#273336] via-[#182022] to-[#141A1C] border border-[#A7BDC1]/20 rounded-3xl p-5 shadow-[0_16px_36px_rgba(0,0,0,0.35)] space-y-3.5">
+      <section aria-label="Tài sản hiện có" className="bg-gradient-to-br from-[#273336] via-[#182022] to-[#141A1C] border border-[#A7BDC1]/20 rounded-3xl p-5 shadow-[0_16px_36px_rgba(0,0,0,0.35)] space-y-3.5">
         <div className="flex items-center justify-between">
           <div>
             <span className="text-[11px] font-semibold text-[#869699] uppercase tracking-wider block">
               Tổng Tài Sản Thực Tế Hiện Có
             </span>
-            <div className="num text-[28px] font-bold text-[#F2F5F5] tracking-tight mt-0.5">
-              {privacyMode ? '••••••••••' : formatVND(totalCalculatedNetWorth)}
-            </div>
+            <output aria-label="Tổng tài sản được tính" className="block num text-[28px] font-bold text-[#F2F5F5] tracking-tight mt-0.5">
+              {privacyMode ? '••••••••••' : formatVND(totalIncludedAssets)}
+            </output>
+            {hiddenAssetGroups.length > 0 && <p role="status" className="mt-1 text-xs text-[#BFD0D3]">Đang tính {includedAssets.length}/6 nhóm</p>}
           </div>
 
           <button
@@ -477,26 +521,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
 
+        <div className="grid grid-cols-2 gap-2" aria-label="Nợ phải trả, khoản cho vay và tài sản ròng">
+          <button type="button" onClick={() => onOpenDebts('payable')} className="min-h-14 min-w-0 rounded-xl border border-[#8BA5AA]/25 bg-[#20292B] p-2.5 text-left active:bg-[#2A3639]">
+            <span className="flex items-center gap-1.5 text-xs text-[#BFD0D3]"><Scale size={14} aria-hidden="true" /> Tổng nợ phải trả <ChevronRight size={13} aria-hidden="true" /></span>
+            <span className="mt-1 block break-words text-sm font-bold text-[#DEB48A]">{debtTotal === null ? 'Chưa tải được' : privacyMode ? '••••••' : formatVND(debtTotal)}</span>
+          </button>
+          <button type="button" onClick={() => onOpenDebts('receivable')} className="min-h-14 min-w-0 rounded-xl border border-[#8BA5AA]/25 bg-[#20292B] p-2.5 text-left active:bg-[#2A3639]">
+            <span className="flex items-center gap-1.5 text-xs text-[#BFD0D3]">Khoản cho vay <ChevronRight size={13} aria-hidden="true" /></span>
+            <span className="mt-1 block break-words text-sm font-bold text-[#8CC7AE]">{loanTotal === null ? 'Chưa tải được' : privacyMode ? '••••••' : formatVND(loanTotal)}</span>
+          </button>
+          <div className="col-span-2 flex flex-wrap items-center justify-between gap-1 rounded-xl border border-[#8BA5AA]/25 bg-[#20292B] p-2.5">
+            <span className="text-xs text-[#BFD0D3]">{hiddenAssetGroups.length ? 'Tài sản ròng theo nhóm đang tính' : 'Tài sản ròng'}</span>
+            <output aria-label="Tài sản ròng được tính" className="break-words text-sm font-bold text-[#F2F5F5]">{debtTotal === null || loanTotal === null || !assetsLoaded ? 'Chưa đủ dữ liệu' : privacyMode ? '••••••' : formatVND(totalIncludedAssets + loanTotal - debtTotal)}</output>
+          </div>
+        </div>
+
         {/* U-01: Thanh phân bổ tỷ trọng 6 lớp tài sản trực quan (V2-24: Tỷ lệ thực tế) */}
-        {totalCalculatedNetWorth > 0 && !privacyMode && (
+        {allocationTotal > 0 && !privacyMode && (
           <div className="space-y-1.5">
-            <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#121819]">
-              {[
-                { label: 'NH', val: bankTotal, color: '#657D81' },
-                { label: 'Tiền mặt', val: cashTotal, color: '#8CC7AE' },
-                { label: 'TS TC', val: financialTotal, color: '#4EA8DE' },
-                { label: 'Vàng', val: goldTotal, color: '#DEB48A' },
-                { label: 'Bạc', val: silverTotal, color: '#C4D0D2' },
-                { label: 'Đất', val: landTotal, color: '#E07A5F' }
-              ]
-                .filter(seg => seg.val > 0)
-                .map(seg => (
+            <div aria-label="Phân bổ tài sản đang tính" className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[#121819]">
+              {allocationAssets.map(group => (
                   <div
-                    key={seg.label}
-                    title={`${seg.label}: ${Math.round((seg.val / totalCalculatedNetWorth) * 100)}%`}
+                    key={group.id}
+                    title={`${group.chartLabel}: ${Math.round((group.value / allocationTotal) * 100)}%`}
                     style={{
-                      width: `${(seg.val / totalCalculatedNetWorth) * 100}%`,
-                      backgroundColor: seg.color
+                      width: `${(group.value / allocationTotal) * 100}%`,
+                      backgroundColor: group.color
                     }}
                     className="h-full transition-all duration-300"
                   />
@@ -529,110 +579,35 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            {/* 1. Tài khoản ngân hàng / Ví */}
-            <div
-              onClick={() => setShowQuickCashModal(true)}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <Landmark size={12} className="text-[#657D81]" /> Ngân hàng & Ví
-                </span>
-                <span>{bankAccounts.length} TK</span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#F2F5F5] mt-1">
-                {privacyMode ? '••••••' : formatVND(bankTotal)}
-              </div>
-            </div>
-
-            {/* 2. Tiền mặt */}
-            <div
-              onClick={() => setShowQuickCashModal(true)}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <Wallet size={12} className="text-[#8CC7AE]" /> Tiền mặt
-                </span>
-                <span>{cashAccounts.length} ví</span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#F2F5F5] mt-1">
-                {privacyMode ? '••••••' : formatVND(cashTotal)}
-              </div>
-            </div>
-
-            {/* 3. Tài sản tài chính (Fmarket, CP, Crypto + tiền trong TK CK) */}
-            <div
-              onClick={onOpenInvestments}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <TrendingUp size={12} className="text-[#8CC7AE]" /> TS Tài chính (Fmarket)
-                </span>
-                <span>{financialHoldings.length} mã</span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#8CC7AE] mt-1">
-                {privacyMode ? '••••••' : formatVND(financialTotal)}
-              </div>
-            </div>
-
-            {/* 4. Vàng */}
-            <div
-              onClick={onOpenInvestments}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <Coins size={12} className="text-[#DEB48A]" /> Vàng tích trữ
-                </span>
-                <span>
-                  {goldHoldings.reduce((s, h) => s + h.quantity, 0)}{' '}
-                  {goldHoldings[0]?.unit || 'chỉ'}
-                </span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#DEB48A] mt-1">
-                {privacyMode ? '••••••' : formatVND(goldTotal)}
-              </div>
-            </div>
-
-            {/* 5. Bạc */}
-            <div
-              onClick={onOpenInvestments}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <Coins size={12} className="text-[#C4D0D2]" /> Bạc tích trữ
-                </span>
-                <span>
-                  {silverHoldings.reduce((s, h) => s + h.quantity, 0)}{' '}
-                  {silverHoldings[0]?.unit || 'lượng'}
-                </span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#D5E1E3] mt-1">
-                {privacyMode ? '••••••' : formatVND(silverTotal)}
-              </div>
-            </div>
-
-            {/* 6. Đất / Bất động sản */}
-            <div
-              onClick={onOpenInvestments}
-              className="bg-[#161C1E]/80 border border-[#8BA5AA]/12 rounded-2xl p-2.5 cursor-pointer hover:border-[#8BA5AA]/30 transition-colors"
-            >
-              <div className="flex items-center justify-between text-[11px] text-[#869699]">
-                <span className="flex items-center gap-1">
-                  <MapPin size={12} className="text-[#E07A5F]" /> Đất / BĐS
-                </span>
-                <span>{landHoldings.length} tài sản</span>
-              </div>
-              <div className="num text-[14px] font-bold text-[#E07A5F] mt-1">
-                {privacyMode ? '••••••' : formatVND(landTotal)}
-              </div>
-            </div>
+            {assetGroups.map(group => {
+              const hidden = hiddenAssetGroups.includes(group.id);
+              const Icon = group.Icon;
+              return <article key={group.id} data-asset-group={group.id} className="relative rounded-2xl border border-[#8BA5AA]/12 bg-[#161C1E]/80 transition-colors hover:border-[#8BA5AA]/30">
+                <button type="button" onClick={group.onOpen} className="block w-full rounded-2xl p-2.5 text-left"
+                  title={'Mở ' + group.name}>
+                  <div className="min-h-11 pr-11 text-[11px] text-[#869699]">
+                    <span className="flex items-start gap-1">
+                      <Icon size={12} className="mt-0.5 shrink-0" style={{ color: group.color }} aria-hidden="true" />
+                      <span>{group.name}</span>
+                    </span>
+                    <span className="mt-1 block">{group.detail}</span>
+                  </div>
+                  <span className="num mt-1 block break-words text-[14px] font-bold"
+                    style={{ color: hidden ? '#869699' : group.valueColor }}>
+                    {hidden ? 'Đã ẩn khỏi tổng' : privacyMode ? '••••••' : formatVND(group.value)}
+                  </span>
+                </button>
+                <button type="button" onClick={() => toggleAssetGroup(group.id)}
+                  aria-label={'Hiện và tính ' + group.name + ' vào tổng tài sản'} aria-pressed={!hidden}
+                  title={hidden ? 'Hiện giá trị và cộng vào tổng' : 'Ẩn giá trị và bỏ khỏi tổng'}
+                  className="absolute right-1 top-1 grid h-11 w-11 place-items-center rounded-xl text-[#8CC7AE] active:bg-[#263234] focus-visible:outline-2 focus-visible:outline-[#8CC7AE]">
+                  {hidden ? <EyeOff size={17} className="text-[#869699]" aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+                </button>
+              </article>;
+            })}
           </div>
         </div>
-      </div>
+      </section>
 
       {/* ==========================================================================
           DÒNG TIỀN THU - CHI TRONG KỲ (V2-21, V2-24: Đặt Sparkline đúng khối)

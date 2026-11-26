@@ -112,7 +112,7 @@ async function browserCase(scriptMode, budget = 4000, authStatus = 401) {
           var path = String(input).split('?')[0];
           var payloads = {
             '/api/auth/session': {authenticated:true},
-            '/api/accounts': {accounts:[]}, '/api/jars': {jars:[]}, '/api/holdings': {holdings:[]},
+            '/api/accounts': {accounts:[]}, '/api/jars': {jars:[]}, '/api/holdings': {holdings:[]}, '/api/debts': {debts:[], payments:[]},
             '/api/income-sources': {incomeSources:[]}, '/api/planned-expenses': {plannedExpenses:[]},
             '/api/user/profile': {user:{name:'Test user'}},
             '/api/transactions': {transactions:[],pagination:{totalCount:0,hasMore:false,nextCursor:null,dataRevision:0}}

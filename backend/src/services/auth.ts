@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import { Bindings, AuthPrincipal, UserRole } from '../types';
+import { checkOwnerCode } from './ownerCode';
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: { principal: AuthPrincipal } }>;
 
@@ -180,16 +181,17 @@ export async function resolveAuthPrincipal(c: AuthContext): Promise<AuthPrincipa
 
   // Extract token candidate
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  let checkedOwnerCandidate = '';
+
+  // Preserve the configured owner's precedence when both owner and bearer headers are present.
+  if (!deviceHeader && (ownerHeader || (bearerToken && bearerToken === c.env.OWNER_API_TOKEN))) {
+    checkedOwnerCandidate = ownerHeader || bearerToken;
+    if ((await checkOwnerCode(db, c.env, checkedOwnerCandidate)).valid) return { userId: 'user_default', role: 'owner' };
+  }
 
   // 2. Explicit Device Token header or Bearer token matching a registered active device in DB
   const deviceTokenCandidate = deviceHeader.trim() || bearerToken;
   if (deviceTokenCandidate) {
-    // Check if it is an Owner token first (unless sent via X-Device-Token explicitly)
-    const configuredOwnerToken = c.env.OWNER_API_TOKEN;
-    if (configuredOwnerToken && !deviceHeader && (bearerToken === configuredOwnerToken || ownerHeader === configuredOwnerToken)) {
-      return { userId: 'user_default', role: 'owner' };
-    }
-
     // Look up device token hash in DB
     try {
       const tokenHash = await sha256Hex(deviceTokenCandidate);
@@ -214,9 +216,11 @@ export async function resolveAuthPrincipal(c: AuthContext): Promise<AuthPrincipa
   }
 
   // 3. Explicit X-Owner-Token check
-  const configuredOwnerToken = c.env.OWNER_API_TOKEN;
-  if (configuredOwnerToken && ownerHeader === configuredOwnerToken) {
-    return { userId: 'user_default', role: 'owner' };
+  for (const candidate of [ownerHeader, deviceHeader ? '' : bearerToken]) {
+    if (candidate && candidate !== checkedOwnerCandidate) {
+      checkedOwnerCandidate = candidate;
+      if ((await checkOwnerCode(db, c.env, candidate)).valid) return { userId: 'user_default', role: 'owner' };
+    }
   }
 
   return null;

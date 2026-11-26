@@ -6,6 +6,7 @@ import { createSqliteD1 } from './d1Helper';
 const DEFAULT_TOKEN = 'qltc_owner_session_v2_default';
 const OWNER_TOKEN = 'explicit_test_owner_token';
 const FRONTEND_ORIGIN = 'https://qltc-app.dtd-store.workers.dev';
+const OWNER_PEPPER = 'test-only-pepper-0123456789-abcdef-0123456789';
 
 function testEnv(extra: Record<string, string> = {}) {
   return { DB: createSqliteD1().db, ...extra };
@@ -23,6 +24,157 @@ async function request(env: any, path: string, headers: Record<string, string> =
   );
   return { status: response.status, data: await response.json().catch(() => null) };
 }
+
+async function ownerLogin(env: any, token: string) {
+  const response = await workerApp.fetch(new Request('https://test.local/api/auth/login', {
+    method: 'POST',
+    headers: { Origin: FRONTEND_ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token })
+  }), env, { waitUntil() {} });
+  return { status: response.status, cookie: response.headers.get('Set-Cookie')?.split(';', 1)[0] ?? '',
+    retryAfter: response.headers.get('Retry-After') };
+}
+
+describe('owner access code changes', () => {
+  it('changes a five-character code once, revokes other web sessions and preserves paired devices', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN, OWNER_CODE_PEPPER: OWNER_PEPPER, FRONTEND_ORIGIN };
+    try {
+      const current = await ownerLogin(env, OWNER_TOKEN);
+      const other = await ownerLogin(env, OWNER_TOKEN);
+      assert.equal(current.status, 200);
+      assert.equal(other.status, 200);
+      const owner = { Cookie: current.cookie, Origin: FRONTEND_ORIGIN };
+      const withoutPepper = { ...env, OWNER_CODE_PEPPER: undefined };
+      assert.equal((await ownerLogin(withoutPepper, OWNER_TOKEN)).status, 200);
+      assert.equal((await request(withoutPepper, '/api/auth/change-owner-code', owner,
+        { currentCode: OWNER_TOKEN, newCode: 'ab123', operationId: 'no-pepper' })).status, 503);
+      const pair = await request(env, '/api/devices/pair-code', owner, { deviceName: 'Paired phone' });
+      const exchanged = await request(env, '/api/auth/pair-exchange', {}, { code: pair.data.code });
+      const device = { 'X-Device-Token': exchanged.data.deviceToken };
+      const change = { currentCode: OWNER_TOKEN, newCode: 'ab123', operationId: 'change-owner-test' };
+      assert.equal((await request(env, '/api/auth/change-owner-code', { Cookie: current.cookie }, change)).status, 403);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, { ...change, currentCode: 'wrong' })).status, 401);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, { ...change, newCode: '1234' })).status, 400);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner,
+        { ...change, newCode: exchanged.data.deviceToken })).data.code, 'OWNER_CODE_DEVICE_CONFLICT');
+      assert.equal((await request(env, '/api/auth/change-owner-code', device, change)).status, 403);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, change)).status, 200);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, change)).status, 200, 'the same request can be retried after a lost response');
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, { ...change, newCode: 'zz123' })).status, 409);
+      assert.equal((await request(env, '/api/auth/session', { Cookie: current.cookie })).status, 200);
+      assert.equal((await request(env, '/api/auth/session', { Cookie: other.cookie })).status, 401);
+      assert.equal((await ownerLogin(env, OWNER_TOKEN)).status, 401);
+      assert.equal((await request(env, '/api/auth/session', { Authorization: `Bearer ${OWNER_TOKEN}` })).status, 401);
+      assert.equal((await ownerLogin(env, 'ab123')).status, 200);
+      assert.equal((await request(env, '/api/auth/session', { Authorization: 'Bearer ab123' })).status, 200);
+      assert.equal((await request(env, '/api/auth/session', { 'X-Owner-Token': 'ab123' })).status, 200);
+      assert.equal((await request(env, '/api/notifications/ingest', device, {})).status, 400, 'the device remains authenticated');
+      assert.equal((await request(env, '/api/notifications/ingest', { Authorization: `Bearer ${exchanged.data.deviceToken}` }, {})).status, 400);
+      const stored = JSON.stringify(h.rawDb.prepare('SELECT * FROM owner_credentials').get());
+      assert.ok(!stored.includes('ab123') && !stored.includes(OWNER_TOKEN) && !stored.includes(OWNER_PEPPER));
+      const backup = await request(env, '/api/backup/export', { Cookie: current.cookie });
+      assert.equal(backup.status, 200);
+      assert.equal(backup.data.data.owner_credentials, undefined);
+      assert.ok(!JSON.stringify(backup.data).includes('ab123'));
+      assert.equal((await request(env, '/api/backup/restore', owner, backup.data)).status, 200);
+      assert.equal((await ownerLogin(env, 'ab123')).status, 200, 'restoring financial data preserves the current owner code');
+    } finally { h.rawDb.close(); }
+  });
+
+  it('rolls back a failed change and never falls back to the old code when credential storage is unavailable', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN, OWNER_CODE_PEPPER: OWNER_PEPPER, FRONTEND_ORIGIN };
+    try {
+      const session = await ownerLogin(env, OWNER_TOKEN);
+      const owner = { Cookie: session.cookie, Origin: FRONTEND_ORIGIN };
+      const change = { currentCode: OWNER_TOKEN, newCode: 'new12', operationId: 'owner-rollback' };
+      h.setFailOnSqlPattern('INSERT INTO owner_credentials');
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, change)).status, 503);
+      h.setFailOnSqlPattern(null);
+      assert.equal((await ownerLogin(env, OWNER_TOKEN)).status, 200);
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner, change)).status, 200);
+      const missingPepper = { ...env, OWNER_CODE_PEPPER: undefined };
+      assert.equal((await ownerLogin(missingPepper, OWNER_TOKEN)).status, 503);
+      assert.equal((await ownerLogin(missingPepper, 'new12')).status, 503);
+      assert.equal((await ownerLogin(env, 'new12')).status, 200);
+    } finally { h.rawDb.close(); }
+  });
+
+  it('limits repeated wrong codes across login and bearer access while paired devices continue', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN, OWNER_CODE_PEPPER: OWNER_PEPPER, FRONTEND_ORIGIN };
+    try {
+      const session = await ownerLogin(env, OWNER_TOKEN);
+      const owner = { Cookie: session.cookie, Origin: FRONTEND_ORIGIN };
+      const pair = await request(env, '/api/devices/pair-code', owner, {});
+      const exchanged = await request(env, '/api/auth/pair-exchange', {}, { code: pair.data.code });
+      const device = { 'X-Device-Token': exchanged.data.deviceToken };
+      assert.equal((await request(env, '/api/auth/change-owner-code', owner,
+        { currentCode: OWNER_TOKEN, newCode: 'valid5', operationId: 'owner-limit-setup' })).status, 200);
+      for (let index = 0; index < 8; index++) assert.equal((await ownerLogin(env, 'wrong')).status, 401);
+      assert.equal((await request(env, '/api/accounts', { Authorization: 'Bearer wrong' })).status, 401);
+      const limited = await ownerLogin(env, 'wrong');
+      assert.equal(limited.status, 429);
+      assert.ok(Number(limited.retryAfter) > 0);
+      assert.equal((await ownerLogin(env, 'valid5')).status, 429);
+      assert.equal((await request(env, '/api/notifications/ingest', device, {})).status, 400);
+      h.rawDb.prepare('UPDATE owner_auth_throttle SET window_until=0 WHERE id=1').run();
+      assert.equal((await ownerLogin(env, 'valid5')).status, 200);
+    } finally { h.rawDb.close(); }
+  });
+
+  it('accepts only one concurrent change using the same old code', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN, OWNER_CODE_PEPPER: OWNER_PEPPER, FRONTEND_ORIGIN };
+    try {
+      const session = await ownerLogin(env, OWNER_TOKEN);
+      const owner = { Cookie: session.cookie, Origin: FRONTEND_ORIGIN };
+      const results = await Promise.all([
+        request(env, '/api/auth/change-owner-code', owner, { currentCode: OWNER_TOKEN, newCode: 'first5', operationId: 'concurrent-one' }),
+        request(env, '/api/auth/change-owner-code', owner, { currentCode: OWNER_TOKEN, newCode: 'second5', operationId: 'concurrent-two' })
+      ]);
+      assert.equal(results.filter(result => result.status === 200).length, 1);
+      assert.ok(results.every(result => [200, 401, 409].includes(result.status)));
+      const first = await ownerLogin(env, 'first5');
+      const second = await ownerLogin(env, 'second5');
+      assert.deepEqual([first.status, second.status].sort(), [200, 401]);
+      assert.equal((await ownerLogin(env, OWNER_TOKEN)).status, 401);
+    } finally { h.rawDb.close(); }
+  });
+
+  it('does not create a session from an old code checked just before a concurrent change', async () => {
+    const h = createSqliteD1();
+    const env = { DB: h.db, OWNER_API_TOKEN: OWNER_TOKEN, OWNER_CODE_PEPPER: OWNER_PEPPER, FRONTEND_ORIGIN };
+    try {
+      const current = await ownerLogin(env, OWNER_TOKEN);
+      const owner = { Cookie: current.cookie, Origin: FRONTEND_ORIGIN };
+      const originalBatch = h.db.batch.bind(h.db);
+      let releaseLogin!: () => void;
+      let announceLogin!: () => void;
+      const waiting = new Promise<void>(resolve => { announceLogin = resolve; });
+      const release = new Promise<void>(resolve => { releaseLogin = resolve; });
+      let holdNextLogin = true;
+      (h.db as any).batch = async (statements: any[]) => {
+        if (holdNextLogin && statements.some(statement => statement.__sql?.includes('INSERT INTO web_sessions'))) {
+          holdNextLogin = false;
+          announceLogin();
+          await release;
+        }
+        return originalBatch(statements);
+      };
+      const oldLogin = ownerLogin(env, OWNER_TOKEN);
+      await waiting;
+      const changed = await request(env, '/api/auth/change-owner-code', owner,
+        { currentCode: OWNER_TOKEN, newCode: 'final5', operationId: 'owner-login-race' });
+      assert.equal(changed.status, 200);
+      releaseLogin();
+      assert.equal((await oldLogin).status, 401);
+      assert.equal((await ownerLogin(env, 'final5')).status, 200);
+      assert.equal((await request(env, '/api/auth/session', { Cookie: current.cookie })).status, 200);
+    } finally { h.rawDb.close(); }
+  });
+});
 
 function b64url(value: Uint8Array | string): string {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
